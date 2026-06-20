@@ -1,0 +1,42 @@
+name: security
+
+# Supply-chain + static security scanning. The `security` job (Trivy) is the
+# status check that branch protection requires alongside `quality`.
+#
+# CodeQL is intentionally NOT run here: this repo is private and GitHub code
+# scanning (Advanced Security) is not enabled, so the CodeQL SARIF upload fails
+# with a configuration error. Re-add a `codeql` job once GHAS/code scanning is
+# enabled on the repository.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  schedule:
+    # Weekly re-scan so newly disclosed CVEs surface even without a push.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trivy filesystem + config scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
