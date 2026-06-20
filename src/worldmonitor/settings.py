@@ -29,6 +29,8 @@ class Settings(BaseSettings):
 
     # --- Backing services (URLs only; clients land in later phases) ---
     neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = ""
     postgres_dsn: str = "postgresql://worldmonitor:worldmonitor@localhost:5432/worldmonitor"
     redis_url: str = "redis://localhost:6379/0"
     minio_endpoint: str = "localhost:9000"
