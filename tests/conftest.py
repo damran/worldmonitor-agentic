@@ -14,6 +14,7 @@ with the no-rate-limit mirror::
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 
 import pytest
@@ -25,6 +26,9 @@ TEST_TENANT = "test-tenant"
 
 NEO4J_IMAGE = "neo4j:2026.05.0-community"
 NEO4J_TEST_PASSWORD = "testpassword"  # pragma: allowlist secret
+# MinIO isn't a Docker Hub `library/` image, so it can't use the ECR mirror
+# prefix; override locally with a fully-qualified mirror (e.g. quay.io/minio/minio).
+MINIO_IMAGE = os.environ.get("WM_TEST_MINIO_IMAGE", "minio/minio:RELEASE.2025-09-07T16-13-09Z")
 
 
 @pytest.fixture(scope="session")
@@ -66,3 +70,13 @@ def postgres_dsn() -> Iterator[str]:
 
     with PostgresContainer("postgres:16-alpine", driver="psycopg") as container:
         yield container.get_connection_url()
+
+
+@pytest.fixture(scope="session")
+def minio() -> Iterator[tuple[str, str, str]]:
+    """Spin up an ephemeral MinIO and yield ``(endpoint, access_key, secret_key)``."""
+    from testcontainers.minio import MinioContainer
+
+    with MinioContainer(MINIO_IMAGE) as container:
+        config = container.get_config()
+        yield config["endpoint"], config["access_key"], config["secret_key"]

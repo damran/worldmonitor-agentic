@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     postgres_dsn: str = "postgresql://worldmonitor:worldmonitor@localhost:5432/worldmonitor"
     redis_url: str = "redis://localhost:6379/0"
     minio_endpoint: str = "localhost:9000"
+    minio_access_key: str = "worldmonitor"
+    minio_secret_key: str = ""
+    minio_secure: bool = False
+    landing_bucket: str = "landing"
 
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in

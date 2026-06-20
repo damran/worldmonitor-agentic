@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenSanctions connector configuration",
+  "description": "Imports a FollowTheMoney-native dataset published by OpenSanctions.",
+  "type": "object",
+  "properties": {
+    "dataset": {
+      "type": "string",
+      "title": "Dataset",
+      "description": "OpenSanctions dataset slug, e.g. 'us_ofac_sdn' or 'ie_unlawful_organizations'.",
+      "minLength": 1
+    },
+    "limit": {
+      "type": "integer",
+      "title": "Record limit",
+      "description": "Optional cap on the number of entities collected (testing / incremental runs).",
+      "minimum": 1
+    }
+  },
+  "required": ["dataset"],
+  "additionalProperties": false
+}

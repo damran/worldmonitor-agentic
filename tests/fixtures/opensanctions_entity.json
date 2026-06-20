@@ -1,0 +1,67 @@
+{
+  "caption": "Irish Republican Army",
+  "datasets": [
+    "ie_unlawful_organizations"
+  ],
+  "first_seen": "2024-07-11T16:26:41",
+  "id": "NK-CRxrz3RXD3GZS85Edg3r9U",
+  "last_change": "2024-07-11T16:26:41",
+  "last_seen": "2026-06-07T10:23:30",
+  "origin": [
+    "inferred"
+  ],
+  "properties": {
+    "alias": [
+      "I.R.A.",
+      "Oglaigh na h\u00e9ireann"
+    ],
+    "country": [
+      "ie"
+    ],
+    "name": [
+      "Irish Republican Army"
+    ],
+    "notes": [
+      "It is hereby declared that the organisation styling itself the Irish Republican Army (also the I.R.A. and Oglaigh na h\u00c9ireann) is an unlawful organisation and ought, in the public interest, to be suppressed."
+    ],
+    "sourceUrl": [
+      "https://www.irishstatutebook.ie/eli/1939/sro/162/made/en/print?q=unlawful+organisation&search_type=all"
+    ],
+    "topics": [
+      "sanction"
+    ]
+  },
+  "referents": [
+    "gb-hmt-17217",
+    "usgsa-3556968fcd78702aac2669b9dcd27aaf102adc70",
+    "ie-eisb-57324f120abb0a2c88807fdcde0933e425a37b27",
+    "usgsa-s4mr3nxhd",
+    "usgsa-s4mr3p3f9",
+    "gb-fcdo-ctd0010",
+    "us-dos-fto-ae6c5d8d4a9f6d12c9cde06047caf9bdf271225d",
+    "usgsa-s4mr3qbq9",
+    "cz-terr-1014ee54040e2c9304d1223074532eb02982f151",
+    "nz-terr-real-irish-republican-army-rira",
+    "usgsa-80865abbc9a39ee332d90c2ba295e1d7b1367695",
+    "au-dfat-288-real-ira",
+    "tw-shtc-d667f8710553c0ccd326c27e957085ff92e7dd41",
+    "usgsa-s4mr3nxhc",
+    "at-nbter-570677d0ef348c9de1ad5138664ea57e3a731653",
+    "au-dfat-288-real-irish-republican-army",
+    "usgsa-c84ae1f196698d1e6ca19a6fcf0735262ad0d025",
+    "usgsa-2becce6ac8ba7ffbc1bbc38d0f3f62c41b0563dc",
+    "usgsa-s4mr3nxh9",
+    "nz-terr-new-irish-republican-army-nira",
+    "usgsa-s4mr3qbqb",
+    "us-dos-fto-4629444de377dad232bd84b0b5b8921bff03c9b8",
+    "usgsa-s4mr3nxhb",
+    "omnio-249f4db1f649ccc3854887900f324cc9deda6c5d",
+    "at-nbter-0608dad49e7bc6a9e6c70cca9d503d307ea12438",
+    "usgsa-b9f844315a4331181984d9626ff21f63554239d4",
+    "permid-5086642215",
+    "ofac-6853",
+    "tw-shtc-e7e455b0fb0448f5a4efd172c85485c6e730a0fc"
+  ],
+  "schema": "Organization",
+  "target": true
+}
