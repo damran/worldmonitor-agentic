@@ -35,6 +35,18 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     minio_endpoint: str = "localhost:9000"
 
+    # --- Secrets ---
+    # Fernet key for encrypting connector-instance config at rest. Required in
+    # any environment that persists connector configs; empty default fails fast.
+    config_encryption_key: str = ""
+
+    @property
+    def sqlalchemy_dsn(self) -> str:
+        """The Postgres DSN with the psycopg (v3) driver SQLAlchemy expects."""
+        if self.postgres_dsn.startswith("postgresql://"):
+            return self.postgres_dsn.replace("postgresql://", "postgresql+psycopg://", 1)
+        return self.postgres_dsn
+
     @property
     def oidc_issuer(self) -> str:
         """The OIDC issuer URL Zitadel signs tokens with."""

@@ -57,3 +57,12 @@ def clean_graph(neo4j_client: Neo4jClient) -> Neo4jClient:
     """Return the client after wiping all data (so tests don't bleed into each other)."""
     neo4j_client.execute_write("MATCH (n) DETACH DELETE n")
     return neo4j_client
+
+
+@pytest.fixture(scope="session")
+def postgres_dsn() -> Iterator[str]:
+    """Spin up an ephemeral Postgres and yield a SQLAlchemy (+psycopg) DSN."""
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine", driver="psycopg") as container:
+        yield container.get_connection_url()
