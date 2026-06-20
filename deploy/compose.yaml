@@ -1,0 +1,150 @@
+# WorldMonitor — core development stack (Phase 0).
+#
+#   cp .env.example .env   # fill in values first
+#   docker compose -f deploy/compose.yaml up -d
+#
+# Core services have no profile, so a bare `up` starts them (and
+# `--profile core` is equivalent). Future optional services get named profiles.
+#
+# Images are pinned; bump deliberately. Verify newer tags before changing.
+
+name: worldmonitor
+
+services:
+  # --- PostgreSQL 16 + pgvector (app metadata + Zitadel store) ---
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-worldmonitor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-worldmonitor}
+      ZITADEL_DB: ${ZITADEL_DB:-zitadel}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-worldmonitor}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # --- Neo4j 2026.x + Graph Data Science (system of record) ---
+  neo4j:
+    image: neo4j:2026.05.0-community
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      NEO4J_PLUGINS: '["graph-data-science"]'
+      NEO4J_dbms_security_procedures_unrestricted: "gds.*"
+      NEO4J_dbms_security_procedures_allowlist: "gds.*"
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-512m}
+    ports:
+      - "7474:7474" # HTTP / Browser
+      - "7687:7687" # Bolt
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test:
+        ["CMD-SHELL", "cypher-shell -u neo4j -p \"$$NEO4J_PASSWORD\" 'RETURN 1' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 15
+      start_period: 40s
+
+  # --- MinIO (S3-compatible landing zone) ---
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-worldmonitor}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # Console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # --- Redis (cache / queues) ---
+  redis:
+    image: redis:7.4
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+  # --- Zitadel (auth / tenancy, OIDC) ---
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:v4.15.2
+    restart: unless-stopped
+    command: >
+      start-from-init
+      --masterkey ${ZITADEL_MASTERKEY:?set a 32-char ZITADEL_MASTERKEY in .env}
+      --tlsMode disabled
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ZITADEL_EXTERNALDOMAIN: ${ZITADEL_EXTERNALDOMAIN:-localhost}
+      ZITADEL_EXTERNALPORT: ${ZITADEL_EXTERNALPORT:-8080}
+      ZITADEL_EXTERNALSECURE: "false"
+      ZITADEL_TLS_ENABLED: "false"
+      # Database connection (admin role runs migrations; user role serves runtime)
+      ZITADEL_DATABASE_POSTGRES_HOST: postgres
+      ZITADEL_DATABASE_POSTGRES_PORT: "5432"
+      ZITADEL_DATABASE_POSTGRES_DATABASE: ${ZITADEL_DB:-zitadel}
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: ${POSTGRES_USER:-worldmonitor}
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${POSTGRES_PASSWORD}
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: ${POSTGRES_USER:-worldmonitor}
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${POSTGRES_PASSWORD}
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      # First instance: org (= first tenant) + admin human user
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: ${ZITADEL_ORG_NAME:-WorldMonitor}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: ${ZITADEL_ADMIN_USERNAME:-admin}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${ZITADEL_ADMIN_PASSWORD:?set ZITADEL_ADMIN_PASSWORD in .env}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false"
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_ADDRESS: ${ZITADEL_ADMIN_EMAIL:-admin@worldmonitor.localhost}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_VERIFIED: "true"
+      # Machine user + PAT for automated OIDC-app provisioning (see scripts/dev/zitadel_provision.sh)
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: ${ZITADEL_SA_USERNAME:-provisioner}
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: ${ZITADEL_SA_USERNAME:-provisioner}
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"
+      ZITADEL_FIRSTINSTANCE_PATPATH: /machinekey/pat.txt
+    ports:
+      - "8080:8080"
+    volumes:
+      - zitadel-machinekey:/machinekey
+    healthcheck:
+      test: ["CMD", "/app/zitadel", "ready", "--config", "/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  postgres-data:
+  neo4j-data:
+  neo4j-logs:
+  minio-data:
+  redis-data:
+  zitadel-machinekey:

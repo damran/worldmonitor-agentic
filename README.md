@@ -30,8 +30,12 @@ uv run pre-commit install   # enable git hooks
 ### Local stack
 
 ```bash
-docker compose -f deploy/compose.yaml --profile core up -d
+cp .env.example .env                                          # fill in values first
+docker compose -f deploy/compose.yaml --env-file .env up -d   # core services
+./scripts/dev/zitadel_provision.sh                            # create the OIDC apps
 ```
 
 Brings up the core services (Neo4j+GDS, PostgreSQL+pgvector, MinIO, Redis, Zitadel).
-Copy [`.env.example`](.env.example) to `.env` first and fill in values.
+The provisioning script creates the `worldmonitor-api` and `hermes` OIDC apps and
+prints the `ZITADEL_DOMAIN` / `ZITADEL_CLIENT_ID` to paste back into `.env`.
+(`--env-file .env` is required because the compose file lives under `deploy/`.)
