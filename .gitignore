@@ -1,0 +1,49 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+.Python
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Test / lint / type caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+
+# ---- Secrets & env (never commit) ----
+.env
+.env.*
+!.env.example
+
+# ---- Vendored read-only reference clones ----
+vendor-repos/
+
+# ---- Local data / volumes ----
+data/
+*.db
+*.duckdb
+
+# ---- Claude Code local-only settings ----
+.claude/settings.local.json
+
+# ---- OS / editor cruft ----
+*:Zone.Identifier
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
