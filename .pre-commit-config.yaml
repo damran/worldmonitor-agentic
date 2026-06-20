@@ -1,0 +1,51 @@
+# Pre-commit hooks for WorldMonitor.
+# ruff + pyright run via `uv run` so the hook versions always match the
+# versions pinned in pyproject.toml / uv.lock (single source of truth).
+#   uv run pre-commit install        # enable
+#   uv run pre-commit run --all-files # run everything once
+default_language_version:
+  python: python3.12
+
+repos:
+  # --- basic hygiene ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  # --- secret scanning ---
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: ^uv\.lock$
+
+  # --- lint / format / type-check (project-pinned via uv) ---
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: pyright
+        name: pyright (strict on src/)
+        entry: uv run pyright
+        language: system
+        types: [python]
+        pass_filenames: false
