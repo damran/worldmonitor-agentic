@@ -318,3 +318,65 @@ def test_driver_resolution_pass_resolves_and_does_not_overlap(
     )[0]["n"]
     assert nodes == 2  # two distinct companies, both written
     engine.dispose()
+
+
+def test_prune_task_runs_removes_old_finished_only(
+    postgres_dsn: str, clean_graph: Neo4jClient
+) -> None:
+    """Pruning deletes finished task_run rows past the retention window (default 30d);
+    recent rows and any ``running`` row are kept (WS5 hardening)."""
+    engine, sessions, driver, _ = _harness(postgres_dsn, clean_graph, _FakeConnector("stub"))
+    tenant = "prune-tenant"
+    old = _NOW - timedelta(days=60)
+    with sessions() as session:
+        session.add(
+            TaskRun(
+                id="prune-old-ok", tenant_id=tenant, kind="ingest", status="ok", finished_at=old
+            )
+        )
+        session.add(
+            TaskRun(id="prune-old-running", tenant_id=tenant, kind="ingest", status="running")
+        )
+        session.add(
+            TaskRun(
+                id="prune-recent-ok",
+                tenant_id=tenant,
+                kind="resolve",
+                status="ok",
+                finished_at=_NOW,
+            )
+        )
+        session.commit()
+
+    driver.prune_task_runs(now=_NOW)
+
+    with sessions() as session:
+        remaining = {
+            row.id
+            for row in session.execute(select(TaskRun).where(TaskRun.tenant_id == tenant)).scalars()
+        }
+    assert "prune-old-ok" not in remaining, "an old finished row is pruned"
+    assert {"prune-old-running", "prune-recent-ok"} <= remaining, "running + recent rows are kept"
+    engine.dispose()
+
+
+def test_run_due_ingests_survives_a_crashing_instance(
+    postgres_dsn: str, clean_graph: Neo4jClient
+) -> None:
+    """One instance crashing must never abort the tick or crash the driver loop (B1)."""
+    engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, _FakeConnector("stub"))
+    id1 = _add_instance(sessions, tenant_id="resil-tenant", connector_id="stub", cipher=cipher)
+    id2 = _add_instance(sessions, tenant_id="resil-tenant", connector_id="stub", cipher=cipher)
+
+    attempted: list[str] = []
+
+    def _boom(instance_id: str, *, now: datetime) -> None:
+        attempted.append(instance_id)
+        if instance_id == id1:
+            raise RuntimeError("instance boom")
+
+    driver._ingest_instance = _boom  # type: ignore[method-assign]
+    driver.run_due_ingests(now=_NOW)  # must NOT raise despite id1 crashing
+
+    assert id1 in attempted and id2 in attempted, "both instances attempted; the crash was isolated"
+    engine.dispose()

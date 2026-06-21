@@ -26,6 +26,12 @@ def _url() -> str:
 
 
 def _run(connection: Connection) -> None:
+    # NOTE (compare_type, ADR 0030 follow-up): the drift guard (`alembic check`,
+    # tests/integration/test_migrations.py) relies on Alembic's default type
+    # comparison + its Postgres type synonyms (e.g. FLOAT <-> DOUBLE PRECISION) to
+    # avoid false positives. If a future model adds a type whose Postgres round-trip
+    # is NOT synonym-covered (a bare Numeric vs NUMERIC(p,s), a TIMESTAMP precision),
+    # pass a `compare_type=<callback>` here to teach the comparison about it.
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
         context.run_migrations()

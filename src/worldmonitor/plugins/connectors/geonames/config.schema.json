@@ -9,7 +9,8 @@
       "title": "Country code",
       "description": "ISO-3166 alpha-2 country code, e.g. 'VA' or 'MC'.",
       "minLength": 2,
-      "maxLength": 2
+      "maxLength": 2,
+      "pattern": "^[A-Za-z]{2}$"
     },
     "path": {
       "type": "string",

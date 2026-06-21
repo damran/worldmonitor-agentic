@@ -32,7 +32,7 @@ import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from worldmonitor.db.crypto import ConfigCipher
@@ -112,6 +112,35 @@ class IngestDriver:
             logger.warning("driver startup: reset %d stale 'running' task(s)", len(stale_tasks))
         return len(stale_tasks)
 
+    def prune_task_runs(self, *, now: datetime | None = None) -> int:
+        """Delete finished (``ok``/``error``) task_run rows older than the retention window.
+
+        Keeps the run-history table bounded (``TASK_RUN_RETENTION_DAYS``, ADR 0029
+        follow-up). ``running`` rows are never pruned; a retention of 0 disables it.
+        Returns the number deleted.
+        """
+        retention = self._settings.task_run_retention_days
+        if retention <= 0:
+            return 0
+        cutoff = (now or datetime.now(UTC)) - timedelta(days=retention)
+        with self._sessions() as session:
+            stale_ids = list(
+                session.execute(
+                    select(TaskRun.id).where(
+                        TaskRun.status.in_(("ok", "error")),
+                        TaskRun.finished_at.is_not(None),
+                        TaskRun.finished_at < cutoff,
+                    )
+                ).scalars()
+            )
+            if stale_ids:
+                session.execute(delete(TaskRun).where(TaskRun.id.in_(stale_ids)))
+                session.commit()
+        deleted = len(stale_ids)
+        if deleted:
+            logger.info("pruned %d finished task_run row(s) older than %dd", deleted, retention)
+        return deleted
+
     # -- ingest pass --------------------------------------------------------- #
     def run_due_ingests(self, *, now: datetime) -> list[str]:
         """Run every enabled connector instance whose ``next_run`` has arrived."""
@@ -129,7 +158,11 @@ class IngestDriver:
                 ).scalars()
             ]
         for instance_id in due_ids:
-            self._ingest_instance(instance_id, now=now)
+            try:
+                self._ingest_instance(instance_id, now=now)
+            except Exception:
+                # One instance's failure must never abort the tick or crash the driver.
+                logger.exception("ingest instance %s crashed; continuing", instance_id)
         return due_ids
 
     def _ingest_instance(self, instance_id: str, *, now: datetime) -> None:
@@ -206,7 +239,11 @@ class IngestDriver:
                     )
                 ]
             for tenant_id in tenant_ids:
-                self._resolve_tenant(tenant_id, now=now)
+                try:
+                    self._resolve_tenant(tenant_id, now=now)
+                except Exception:
+                    # One tenant's failure must never abort the pass or crash the driver.
+                    logger.exception("resolution for tenant %s crashed; continuing", tenant_id)
             return tenant_ids
         finally:
             self._resolve_lock.release()
@@ -263,16 +300,22 @@ class IngestDriver:
     async def run_forever(self) -> None:  # pragma: no cover - thin asyncio glue
         """Drive ingests + resolution on cadence until cancelled."""
         self.recover_stale()
+        self.prune_task_runs()
         last_resolve: datetime | None = None
         while True:
             now = datetime.now(UTC)
-            await asyncio.to_thread(self.run_due_ingests, now=now)
-            if (
-                last_resolve is None
-                or (now - last_resolve).total_seconds() >= self._settings.resolve_cadence_seconds
-            ):
-                await asyncio.to_thread(self.run_resolution, now=now)
-                last_resolve = now
+            try:
+                await asyncio.to_thread(self.run_due_ingests, now=now)
+                if (
+                    last_resolve is None
+                    or (now - last_resolve).total_seconds()
+                    >= self._settings.resolve_cadence_seconds
+                ):
+                    await asyncio.to_thread(self.run_resolution, now=now)
+                    last_resolve = now
+            except Exception:
+                # A tick failure (transient DB error, etc.) must never kill the loop.
+                logger.exception("driver tick failed; continuing")
             await asyncio.sleep(self._settings.driver_tick_seconds)
 
 

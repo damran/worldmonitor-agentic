@@ -12,7 +12,7 @@ on:
   push:
     # Working-branch trigger so the gate runs without a PR (reviewer-gated merge to
     # master). Replace this branch entry at gate close.
-    branches: [master, main, ws4-gate-ledger]
+    branches: [master, main, ws5-cheap-hardening]
   pull_request:
   schedule:
     # Weekly re-scan so newly disclosed CVEs surface even without a push.

@@ -23,6 +23,7 @@ The drive of ``collect()`` is **bounded and windowed** (ADR 0027, audit gap G8):
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from collections.abc import Mapping
@@ -42,6 +43,18 @@ logger = logging.getLogger(__name__)
 
 # Cap a dead-letter error summary so one pathological record can't bloat a row.
 _ERROR_SUMMARY_MAX = 2000
+
+_UNSAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_segment(value: str) -> str:
+    """Sanitize a connector/config-controlled path segment so it cannot escape its
+    landing-zone prefix (G4). ``record.key`` is derived from hostile parsed source
+    data; collapse path separators + other unsafe chars to ``_`` and strip leading
+    dots, so neither ``/`` nor ``..`` can redirect the S3 object key out of the
+    ``tenant_id/connector_id/...`` prefix."""
+    cleaned = _UNSAFE_SEGMENT.sub("_", value).lstrip(".")
+    return cleaned or "_"
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +148,17 @@ def run_ingest(
     for record in connector.collect(config):
         collected += 1
         since_commit += 1
-        key = "/".join(filter(None, [tenant_id, connector_id, dataset, f"{record.key}.json"]))
+        key = "/".join(
+            filter(
+                None,
+                [
+                    tenant_id,
+                    connector_id,
+                    _safe_segment(dataset) if dataset else "",
+                    f"{_safe_segment(record.key)}.json",
+                ],
+            )
+        )
 
         try:
             uri = landing.put(key, record.data, content_type=record.content_type)

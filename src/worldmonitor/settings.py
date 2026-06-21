@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     ingest_cadence_seconds: int = Field(default=3600, gt=0)
     resolve_cadence_seconds: int = Field(default=300, gt=0)
     driver_tick_seconds: float = Field(default=30.0, gt=0)
+    # Finished (ok/error) task_run rows older than this are pruned on driver startup
+    # so the history table does not grow without bound (ADR 0029 follow-up). 0 disables.
+    task_run_retention_days: int = Field(default=30, ge=0)
 
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in

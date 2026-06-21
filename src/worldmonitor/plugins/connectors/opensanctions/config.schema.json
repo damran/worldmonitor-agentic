@@ -8,7 +8,8 @@
       "type": "string",
       "title": "Dataset",
       "description": "OpenSanctions dataset slug, e.g. 'us_ofac_sdn' or 'ie_unlawful_organizations'.",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[a-z0-9_]+$"
     },
     "limit": {
       "type": "integer",
