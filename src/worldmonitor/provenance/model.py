@@ -53,3 +53,16 @@ def get_provenance(entity: FtmEntity) -> Provenance | None:
         reliability=raw["reliability"],
         source_record=raw["source_record"],
     )
+
+
+# Prefix for provenance properties projected onto graph nodes (Neo4j stores only
+# scalars/arrays, so the provenance dict is flattened to prov_* properties).
+PROVENANCE_NODE_PREFIX = "prov_"
+
+
+def provenance_node_properties(entity: FtmEntity) -> dict[str, str]:
+    """Flatten an entity's provenance into ``prov_*`` node properties (empty if none)."""
+    provenance = get_provenance(entity)
+    if provenance is None:
+        return {}
+    return {f"{PROVENANCE_NODE_PREFIX}{key}": value for key, value in provenance.as_dict().items()}

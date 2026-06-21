@@ -64,6 +64,25 @@ def clean_graph(neo4j_client: Neo4jClient) -> Neo4jClient:
 
 
 @pytest.fixture(scope="session")
+def neo4j_gds_client() -> Iterator[Neo4jClient]:
+    """A connected client against an ephemeral Neo4j WITH the Graph Data Science plugin."""
+    from testcontainers.neo4j import Neo4jContainer
+
+    container = (
+        Neo4jContainer(NEO4J_IMAGE, password=NEO4J_TEST_PASSWORD)
+        .with_env("NEO4J_PLUGINS", '["graph-data-science"]')
+        .with_env("NEO4J_dbms_security_procedures_unrestricted", "gds.*")
+    )
+    with container:
+        client = Neo4jClient.connect(
+            uri=container.get_connection_url(), user="neo4j", password=NEO4J_TEST_PASSWORD
+        )
+        client.verify()
+        yield client
+        client.close()
+
+
+@pytest.fixture(scope="session")
 def postgres_dsn() -> Iterator[str]:
     """Spin up an ephemeral Postgres and yield a SQLAlchemy (+psycopg) DSN."""
     from testcontainers.postgres import PostgresContainer
