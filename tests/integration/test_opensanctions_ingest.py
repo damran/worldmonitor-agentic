@@ -56,7 +56,7 @@ def test_collect_land_queue(minio: tuple[str, str, str], postgres_dsn: str, tena
         row = session.execute(select(ErQueueItem).limit(1)).scalar_one()
         assert row.connector_id == "opensanctions"
         assert row.raw_entity["schema"]
-        assert row.raw_entity["wm_provenance"]["source_id"] == f"opensanctions:{_DATASET}"
+        assert row.raw_entity["wm_prov_source_id"] == [f"opensanctions:{_DATASET}"]
         assert row.source_record.startswith("s3://landing/")
 
     engine.dispose()

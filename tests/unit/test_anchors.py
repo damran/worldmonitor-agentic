@@ -19,8 +19,8 @@ def test_set_and_get_anchors() -> None:
     set_anchor(entity, "wikidata_id", "Q1")
     set_anchor(entity, "geonames_id", "123")
     assert get_anchors(entity) == {"wikidata_id": "Q1", "geonames_id": "123"}
-    # Anchors ride in the context and survive serialization.
-    assert entity.to_dict()["wm_anchors"]["wikidata_id"] == "Q1"
+    # Anchors ride in the context and survive the serialization round-trip.
+    assert get_anchors(make_entity(entity.to_dict())) == {"wikidata_id": "Q1", "geonames_id": "123"}
 
 
 def test_unknown_anchor_field_raises() -> None:

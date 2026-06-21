@@ -27,21 +27,21 @@ layer has tools; **Hermes** connects after that; self-improvement is unlocked la
 
 ---
 
-## Phase 1 — The spine: one source → ontology → ER → graph ★ CURRENT MILESTONE
+## Phase 1 — The spine: one source → ontology → ER → graph ✅ COMPLETE
 **Goal:** prove `connector → ontology → resolution → graph → query` with **OpenSanctions** (FtM-native, free, zero-risk), with tests.
-- [ ] **Ontology bootstrap:** FtM installed + schema validation; `followthemoney-graph` writes FtM → Neo4j with `tenant_id` + unique constraints on canonical IDs.
-- [ ] **Plugin framework v0:** base interfaces + registry + `FtmBulkConnector` + provenance stamping + tenant-scoped instance table (`30`).
-- [ ] **OpenSanctions connector:** manifest + schema + collect + (near-identity) map; raw → MinIO, candidates → ER queue.
-- [ ] **Entity resolution v0:** **Splink** (DuckDB) + **nomenklatura** → canonical entities; **merge audit trail**; a size/sensitivity **review-queue threshold**.
-- [ ] **Reference anchor:** load **GeoNames** + a Wikidata slice → canonical IDs on resolved entities.
-- [ ] **Graph queries:** Cypher returns resolved entities + relationships + provenance; one **GDS** run (centrality/community) over a projection.
-- [ ] **Tests:** unit (raw→FtM; ER merges right pairs, refuses bad — incl. a catastrophic-merge negative test); integration (queried-back graph = expected resolved, deduped, provenance-tagged).
+- [x] **Ontology bootstrap:** FtM installed + schema validation; `followthemoney-graph` writes FtM → Neo4j with `tenant_id` + unique constraints on canonical IDs.
+- [x] **Plugin framework v0:** base interfaces + registry + `FtmBulkConnector` + provenance stamping + tenant-scoped instance table (`30`).
+- [x] **OpenSanctions connector:** manifest + schema + collect + (near-identity) map; raw → MinIO, candidates → ER queue.
+- [x] **Entity resolution v0:** **Splink** (DuckDB) + **nomenklatura** → canonical entities; **merge audit trail**; a size/sensitivity **review-queue threshold**.
+- [x] **Reference anchor:** load **GeoNames** + a Wikidata slice → canonical IDs on resolved entities.
+- [x] **Graph queries:** Cypher returns resolved entities + relationships + provenance; one **GDS** run (centrality/community) over a projection.
+- [x] **Tests:** unit (raw→FtM; ER merges right pairs, refuses bad — incl. a catastrophic-merge negative test); integration (queried-back graph = expected resolved, deduped, provenance-tagged).
 
 **Done when:** "show this sanctioned entity, everyone linked to it, and where each fact came from" returns a correct, deduplicated, canonical-ID-anchored answer. **No second source until green.**
 
 ---
 
-## Phase 2 — API/MCP surface + Integrations page + first live/stream connectors
+## Phase 2 — API/MCP surface + Integrations page + first live/stream connectors ★ CURRENT MILESTONE
 **Goal:** expose the graph outward, and the flagship self-service surface.
 - [ ] **API + MCP (`60`):** GraphQL/REST reads + a FastMCP server with `query_graph`/`get_entity`/`find_paths`/`enrich`; auth + tenancy + provenance-in-responses; guarded reads.
 - [ ] **Integrations page (UI):** catalog from the registry (filterable), **schema-driven config forms**, save→vault→validate→enable, status/health. Seeded from the 67-sheet inventory.

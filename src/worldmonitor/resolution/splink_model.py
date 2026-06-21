@@ -109,7 +109,9 @@ def _flatten(entity: FtmEntity) -> dict[str, Any]:
     ``quiet=True`` so properties absent from a given schema (e.g. ``birthDate``
     on a Company) yield ``None`` rather than raising.
     """
-    name = entity.first("name", quiet=True) or entity.caption
+    # Use the actual name property only — entities with no name (e.g. Sanction)
+    # get name=None so they fall to the null level and never match on an empty name.
+    name = entity.first("name", quiet=True)
     countries = entity.get_type_values(registry.country)
     return {
         "unique_id": entity.id,

@@ -24,7 +24,8 @@ SENSITIVE_TOPICS = frozenset(
 
 def is_sensitive(entity: FtmEntity) -> bool:
     """True if the entity is a PEP, sanctioned, or otherwise flagged."""
-    topics = set(entity.get("topics"))
+    # quiet=True: schemata without a `topics` property (e.g. Sanction) -> no topics.
+    topics = set(entity.get("topics", quiet=True))
     if topics & SENSITIVE_TOPICS:
         return True
     return any(topic.startswith("role.pep") or topic.startswith("sanction") for topic in topics)

@@ -91,7 +91,7 @@ def test_geonames_ingest_via_fixture(minio: tuple[str, str, str], postgres_dsn: 
         )
         by_id = {row.raw_entity["id"]: row for row in rows}
         assert "geonames-3164670" in by_id
-        assert by_id["geonames-3164670"].raw_entity["wm_anchors"]["geonames_id"] == "3164670"
+        assert by_id["geonames-3164670"].raw_entity["wm_anchor_geonames_id"] == ["3164670"]
 
     engine.dispose()
 

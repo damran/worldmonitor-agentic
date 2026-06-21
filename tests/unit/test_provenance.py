@@ -25,8 +25,8 @@ def test_stamp_roundtrip() -> None:
     )
     stamp(entity, PROV)
     assert get_provenance(entity) == PROV
-    # Provenance survives serialization (raw landing).
-    assert entity.to_dict()["wm_provenance"]["source_id"] == PROV.source_id
+    # Provenance survives the serialization round-trip (raw landing / ER queue).
+    assert get_provenance(make_entity(entity.to_dict())) == PROV
 
 
 def test_unstamped_entity_has_no_provenance() -> None:
