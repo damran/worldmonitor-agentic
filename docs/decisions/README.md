@@ -22,4 +22,20 @@
 | 12 | **Telegram** outbound: Hermes (rich reports) + a `TelegramNotifier` plugin (deterministic alerts) | LOCKED | Reports/notifications; alerts survive agent downtime. |
 | 13 | **Self-improvement = all three** (Hermes loop + model fine-tune + param/rule tuning), **fully gated** | LOCKED | User chose "all"; nothing self-modifies silently (propose→evaluate→gate→promote, versioned, rollback, audit). |
 | 14 | **Auth/tenancy SaaS-grade from day one via Zitadel**, single-node deploy now | LOCKED | Solo now, cloud later; org model = tenants. |
-| 15 | **Containerized + 12-factor + S3-compatible**
+| 15 | **Containerized + 12-factor + S3-compatible** | LOCKED | Portable + reproducible; dev on WSL2, always-on stack on a persistent host. |
+
+## Phase 1 decisions (recorded from the audit)
+
+> Decisions surfaced by the Phase 1 audit (`docs/reviews/PHASE_1_AUDIT.md`). Unlike #1–15, each has a
+> detailed file (`docs/decisions/00NN-*.md`) in Context → Decision → Status → Consequences format.
+
+| # | Decision | Status | Why |
+|---|----------|--------|-----|
+| 16 | **Splink ER model: expert-set weights (v0), EM-trained later** ([0016](0016-splink-expert-set-weights.md)) | LOCKED (v0) | One source, no labels; transparent + reproducible now, EM is a gated upgrade. |
+| 17 | **Tenant isolation: app-layer composite keys, not per-tenant DB** ([0017](0017-app-layer-tenant-isolation.md)) | LOCKED | Neo4j Community has no per-tenant RBAC; `tenant_id` in MERGE key + composite `(tenant_id, anchor)` constraint. |
+| 18 | **Provenance as flat FtM-context keys → `prov_*` node props** ([0018](0018-provenance-as-ftm-context-properties.md)) | LOCKED | `merge_context` can't merge nested dicts; flat keys survive merge + serialization. (Edges still uncovered — gap G1.) |
+| 19 | **ER: whole-queue batch now; streaming/incremental** ([0019](0019-batch-vs-streaming-resolution.md)) | **OPEN** | Batch is deterministic for bulk; streaming needs incremental clustering — resolve before first STREAM connector. |
+| 20 | **Catastrophic-merge guard: hardcoded conservative thresholds (v0)** ([0020](0020-merge-guard-thresholds.md)) | LOCKED (v0) | `>10` members or any PEP/sanctioned → human review; rule-engine config deferred. |
+| 21 | **Raw lands in object storage before mapping/enqueue** ([0021](0021-raw-lands-before-mapping.md)) | LOCKED | Concrete s3:// provenance pointer + replayable re-mapping without re-fetch. |
+| 22 | **Connector output: strict FtM validation (fail-loud)** ([0022](0022-strict-schema-validation.md)) | LOCKED | L2 is the contract; bad data fails at the source, never corrupts the graph silently. |
+| 23 | **Resolved-graph edge materialization: accepted v0 limitations** ([0023](0023-edge-materialization-v0-limitations.md)) | **OPEN** (debt) | No edge referent-rewriting (owed before Phase 2) + no abstract `Thing`-range links (owed before Phase 4). |
