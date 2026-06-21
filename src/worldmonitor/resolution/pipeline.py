@@ -28,7 +28,12 @@ from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
 from worldmonitor.resolution.audit import record_merge, record_merge_alert
-from worldmonitor.resolution.merge import DEFAULT_MERGE_THRESHOLD, cluster_and_merge
+from worldmonitor.resolution.merge import (
+    DEFAULT_MERGE_THRESHOLD,
+    ResolvedCluster,
+    cluster_and_merge,
+)
+from worldmonitor.resolution.referents import build_referent_map, rewrite_referents
 from worldmonitor.resolution.review import needs_review
 from worldmonitor.resolution.splink_model import score_pairs
 from worldmonitor.settings import get_settings
@@ -83,6 +88,7 @@ def resolve_pending(
     clusters = cluster_and_merge(entities, pairs, merge_threshold=merge_threshold)
 
     promoted_entities: list[FtmEntity] = []
+    promoted_clusters: list[ResolvedCluster] = []
     promoted = review = alerts = 0
     for cluster in clusters:
         flagged, reason = needs_review(cluster, by_id)
@@ -119,9 +125,18 @@ def resolve_pending(
                 item.status = "resolved"
         entity = enrich(cluster.entity) if enrich is not None else cluster.entity
         promoted_entities.append(entity)
+        promoted_clusters.append(cluster)
         promoted += 1
 
     if promoted_entities:
+        # Referent rewriting (G2, ADR 0025): redirect every reference to a
+        # merged-away source id onto its surviving canonical id before the write,
+        # so no edge dangles at a node that was never materialised. The map is
+        # built from PROMOTED clusters only — a block-mode parked cluster never
+        # rewrites anything, while an alert-mode flagged merge does.
+        referents = build_referent_map(promoted_clusters)
+        for entity in promoted_entities:
+            rewrite_referents(entity, referents)
         write_entities(neo4j, promoted_entities, tenant_id=tenant_id)
     session.commit()
     return ResolveStats(
