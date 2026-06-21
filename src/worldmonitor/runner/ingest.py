@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from worldmonitor.db.models import ErQueueItem, IngestDeadLetter
@@ -174,17 +175,24 @@ def run_ingest(
                 dead_lettered += 1
             else:
                 for entity in entities:
-                    session.add(
-                        ErQueueItem(
+                    # Idempotent enqueue (ADR 0029 / A6): a re-ingest of the same
+                    # landing record + FtM entity id is a no-op, so a crash/restart
+                    # never double-enqueues. ``queued`` counts only NEW rows.
+                    result = session.execute(
+                        pg_insert(ErQueueItem)
+                        .values(
                             id=str(uuid.uuid4()),
                             tenant_id=tenant_id,
                             connector_id=connector_id,
+                            entity_id=entity.id,
                             raw_entity=entity.to_dict(),
                             source_record=uri,
                             status="pending",
                         )
+                        .on_conflict_do_nothing(constraint="uq_er_queue_dedup")
                     )
-                    queued += 1
+                    if result.rowcount:
+                        queued += 1
 
         if since_commit >= window:
             _commit_window()

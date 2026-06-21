@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import DateTime, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -40,10 +40,19 @@ class ErQueueItem(Base):
     """A mapped FtM candidate awaiting entity resolution (L3 owns canonicalization)."""
 
     __tablename__ = "er_queue_item"
+    # Idempotent enqueue (ADR 0029 / A6): the same landing record + FtM entity id
+    # enqueues at most once per tenant, so a re-ingest after a crash/restart does
+    # not double-enqueue. ``entity_id`` is NULL for an id-less entity; Postgres
+    # treats NULLs as distinct, so those rare rows are not deduped.
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "source_record", "entity_id", name="uq_er_queue_dedup"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(128), index=True)
     connector_id: Mapped[str] = mapped_column(String(128))
+    # The FtM entity id (``raw_entity["id"]``) — part of the dedup key; NULL if absent.
+    entity_id: Mapped[str | None] = mapped_column(String(255), index=True, default=None)
     # The mapped FtM entity (with provenance in its context), pending resolution.
     raw_entity: Mapped[dict[str, Any]] = mapped_column(JSONB)
     # Pointer to the verbatim raw record in the landing zone.
@@ -116,3 +125,28 @@ class MergeAlert(Base):
     reason: Mapped[str] = mapped_column(String, default="")
     score: Mapped[float]
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TaskRun(Base):
+    """One driver-initiated unit of work — the run-history + observability trail (ADR 0029).
+
+    The long-running ingest driver records a row per ``kind`` (``"ingest"`` for a
+    connector run, ``"resolve"`` for a resolution pass): ``status`` moves
+    ``"running"`` → ``"ok"`` / ``"error"``, ``stats`` holds the run's counts
+    (Ingest/ResolveStats), and ``error`` carries a bounded summary on failure. A row
+    left ``"running"`` after a crash is reset to ``"error"`` on driver startup
+    (single-node assumption; the deferred lease replaces it under HA). Every row is
+    tenant-scoped.
+    """
+
+    __tablename__ = "task_run"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    connector_instance_id: Mapped[str | None] = mapped_column(String(64), index=True, default=None)
+    kind: Mapped[str] = mapped_column(String(16), index=True)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    stats: Mapped[dict[str, Any] | None] = mapped_column(JSONB, default=None)
+    error: Mapped[str] = mapped_column(String, default="")

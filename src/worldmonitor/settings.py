@@ -67,6 +67,16 @@ class Settings(BaseSettings):
     ingest_timeout_seconds: float = Field(default=1800.0, ge=0)
     ingest_max_records: int | None = Field(default=None, gt=0)
 
+    # --- Ingest driver cadence (ADR 0029) ---
+    # The long-running driver runs each enabled connector instance every
+    # ``ingest_cadence_seconds`` and resolves the queue every
+    # ``resolve_cadence_seconds`` (an INDEPENDENT cadence, not fired per ingest);
+    # it wakes every ``driver_tick_seconds`` to check what is due. Single global
+    # cadence for now (a per-connector cadence column is deferred).
+    ingest_cadence_seconds: int = Field(default=3600, gt=0)
+    resolve_cadence_seconds: int = Field(default=300, gt=0)
+    driver_tick_seconds: float = Field(default=30.0, gt=0)
+
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in
     # any environment that persists connector configs; empty default fails fast.

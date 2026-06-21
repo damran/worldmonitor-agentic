@@ -57,3 +57,18 @@ def test_ingest_max_records_accepts_cap_and_rejects_non_positive() -> None:
     assert Settings(ingest_max_records=500).ingest_max_records == 500
     with pytest.raises(ValidationError):
         Settings(ingest_max_records=0)
+
+
+def test_driver_cadence_defaults() -> None:
+    """ADR 0029: per-connector ingest cadence + an independent resolution cadence."""
+    settings = Settings()
+    assert settings.ingest_cadence_seconds == 3600
+    assert settings.resolve_cadence_seconds == 300
+    assert settings.driver_tick_seconds == 30.0
+
+
+def test_driver_cadence_rejects_non_positive() -> None:
+    with pytest.raises(ValidationError):
+        Settings(resolve_cadence_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(driver_tick_seconds=0)
