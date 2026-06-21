@@ -23,8 +23,10 @@ deterministically testable; :meth:`IngestDriver.run_forever` is the thin asyncio
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
+import pkgutil
 import threading
 import uuid
 from dataclasses import asdict
@@ -34,6 +36,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from worldmonitor.db.crypto import ConfigCipher
+from worldmonitor.db.engine import engine_from_settings, session_factory
 from worldmonitor.db.models import ConnectorInstance, ErQueueItem, TaskRun
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.plugins.base import Capability
@@ -271,3 +274,56 @@ class IngestDriver:
                 await asyncio.to_thread(self.run_resolution, now=now)
                 last_resolve = now
             await asyncio.sleep(self._settings.driver_tick_seconds)
+
+
+def discover_connectors() -> Registry:
+    """A registry of every connector under ``worldmonitor.plugins.connectors``.
+
+    Connectors live two levels down (``connectors/<name>/connector.py``), so walk the
+    package recursively and register each connector class in the modules found.
+    """
+    registry = Registry()
+    package = importlib.import_module("worldmonitor.plugins.connectors")
+    for info in pkgutil.walk_packages(package.__path__, prefix=f"{package.__name__}."):
+        registry.discover_module(importlib.import_module(info.name))
+    return registry
+
+
+def build_driver(settings: Settings | None = None) -> IngestDriver:
+    """Wire an :class:`IngestDriver` from settings + the discovered connector registry.
+
+    The process entry point for the smoke run (docs/runbooks/smoke-run.md): builds the
+    real Postgres sessions, landing store, Neo4j client, and a registry auto-discovered
+    from ``worldmonitor.plugins.connectors``.
+    """
+    settings = settings or get_settings()
+    return IngestDriver(
+        registry=discover_connectors(),
+        sessions=session_factory(engine_from_settings(settings)),
+        landing=LandingStore.from_settings(settings),
+        neo4j=Neo4jClient.from_settings(settings),
+        settings=settings,
+    )
+
+
+def main() -> int:  # pragma: no cover - process entry point
+    """Run the ingest driver forever (Ctrl-C to stop). ``python -m worldmonitor.runner.driver``."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    settings = get_settings()
+    driver = build_driver(settings)
+    logger.info(
+        "ingest driver starting: guard_mode=%s ingest_cadence=%ss resolve_cadence=%ss tick=%ss",
+        settings.merge_guard_mode,
+        settings.ingest_cadence_seconds,
+        settings.resolve_cadence_seconds,
+        settings.driver_tick_seconds,
+    )
+    try:
+        asyncio.run(driver.run_forever())
+    except KeyboardInterrupt:
+        logger.info("ingest driver stopped")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
