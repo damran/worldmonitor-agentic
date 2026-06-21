@@ -128,8 +128,10 @@ def test_driver_runs_due_instance_and_records_task(
     engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, _FakeConnector("fake-a"))
     instance_id = _add_instance(sessions, tenant_id=tenant_id, connector_id="fake-a", cipher=cipher)
 
+    # The driver runs ALL due instances (global, by design); the shared session-scoped
+    # Postgres holds other tests' instances too, so assert membership, not equality.
     ran = driver.run_due_ingests(now=_NOW)
-    assert ran == [instance_id]
+    assert instance_id in ran
 
     with sessions() as session:
         instance = session.get(ConnectorInstance, instance_id)

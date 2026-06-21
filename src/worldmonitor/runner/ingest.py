@@ -178,7 +178,10 @@ def run_ingest(
                     # Idempotent enqueue (ADR 0029 / A6): a re-ingest of the same
                     # landing record + FtM entity id is a no-op, so a crash/restart
                     # never double-enqueues. ``queued`` counts only NEW rows.
-                    result = session.execute(
+                    # RETURNING tells us a row was *actually* inserted (a row comes
+                    # back) vs skipped by ON CONFLICT (nothing returned) — reliable
+                    # where rowcount is not for ON CONFLICT DO NOTHING.
+                    inserted = session.execute(
                         pg_insert(ErQueueItem)
                         .values(
                             id=str(uuid.uuid4()),
@@ -190,8 +193,9 @@ def run_ingest(
                             status="pending",
                         )
                         .on_conflict_do_nothing(constraint="uq_er_queue_dedup")
-                    )
-                    if result.rowcount:
+                        .returning(ErQueueItem.id)
+                    ).first()
+                    if inserted is not None:
                         queued += 1
 
         if since_commit >= window:
