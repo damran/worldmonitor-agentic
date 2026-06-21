@@ -53,7 +53,11 @@ def test_collect_land_queue(minio: tuple[str, str, str], postgres_dsn: str, tena
         ).scalar_one()
         assert count == stats.queued
 
-        row = session.execute(select(ErQueueItem).limit(1)).scalar_one()
+        # Tenant-scope this lookup: the ER queue is shared (session-scoped Postgres),
+        # so an unfiltered limit(1) could pick another test's row.
+        row = session.execute(
+            select(ErQueueItem).where(ErQueueItem.tenant_id == tenant_id).limit(1)
+        ).scalar_one()
         assert row.connector_id == "opensanctions"
         assert row.raw_entity["schema"]
         assert row.raw_entity["wm_prov_source_id"] == [f"opensanctions:{_DATASET}"]
