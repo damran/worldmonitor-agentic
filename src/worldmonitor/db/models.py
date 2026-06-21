@@ -50,3 +50,22 @@ class ErQueueItem(Base):
     source_record: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MergeAudit(Base):
+    """Audit trail of every resolution decision — which sources collapsed and why.
+
+    Doubles as the rollback record (CLAUDE.md: merge audit trail; never silent
+    in-place mutation). ``decision`` is ``merged`` or ``pending_review``.
+    """
+
+    __tablename__ = "merge_audit"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    canonical_id: Mapped[str] = mapped_column(String(255), index=True)
+    source_ids: Mapped[list[str]] = mapped_column(JSONB)
+    score: Mapped[float]
+    decision: Mapped[str] = mapped_column(String(32), index=True)
+    reason: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

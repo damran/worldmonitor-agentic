@@ -18,6 +18,9 @@ dependencies = [
     "cryptography>=43",
     "jsonschema>=4.21",
     "boto3>=1.35",
+    "splink>=4.0",
+    "duckdb>=1.0",
+    "nomenklatura>=4.10",
 ]
 
 [project.urls]
