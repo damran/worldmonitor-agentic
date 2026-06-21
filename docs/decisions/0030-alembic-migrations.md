@@ -42,7 +42,10 @@ work is reopened. Future schema changes are expressed as new revisions, not `cre
 - ✅ `migrate_to_head` is idempotent; the in-package migrations ship with the wheel; downgrades are
   provided for both revisions.
 - ✅ Tests keep using the fast `create_all`, which is proven equivalent, so the suite is unchanged.
-- ⚠️ No Alembic autogenerate is wired into CI to *guard* future model/migration drift; the snapshot test
-  catches drift for the current schema, but a `check` step (autogenerate diff == empty on every PR) is a
-  worthwhile follow-up. Running migrations at app startup vs. as a deploy step is left to ops (the CLI
-  supports either); at-startup would need the deferred lease under multi-replica.
+- ✅ **Drift guard:** `test_no_autogenerate_drift` runs `alembic check` against a head database and fails
+  the build if the models and migrations diverge (a model change without a matching revision), so drift
+  cannot silently return. The post-runway pre-Alembic **adoption** path (a `create_all` database with no
+  `alembic_version` → stamp head, upgrade is a no-op) is covered directly by
+  `test_post_runway_create_all_database_is_stamped_at_head`.
+- Running migrations at app startup vs. as a deploy step is left to ops (the CLI supports either);
+  at-startup would need the deferred lease under multi-replica.

@@ -10,9 +10,9 @@ name: security
 
 on:
   push:
-    # g2-referent-rewriting added so the gate runs on the feature branch without a
-    # PR (gated autonomous build); prune at gate close.
-    branches: [master, main, g2-referent-rewriting]
+    # Working-branch trigger so the gate runs without a PR (the user merges). Replace
+    # this branch entry at gate close.
+    branches: [master, main, alembic-followups]
   pull_request:
   schedule:
     # Weekly re-scan so newly disclosed CVEs surface even without a push.
