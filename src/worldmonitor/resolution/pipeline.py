@@ -25,13 +25,13 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from worldmonitor.db.models import ErQueueItem
+from worldmonitor.db.models import ErQueueItem, ResolverJudgement
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
@@ -39,6 +39,7 @@ from worldmonitor.resolution.audit import record_merge, record_merge_alert
 from worldmonitor.resolution.merge import (
     DEFAULT_MERGE_THRESHOLD,
     ResolvedCluster,
+    StoredJudgement,
     cluster_and_merge,
 )
 from worldmonitor.resolution.referents import build_referent_map, rewrite_referents
@@ -93,6 +94,9 @@ def resolve_pending(
     if size <= 0:
         raise ValueError(f"batch_size must be a positive integer, got {size}")
 
+    # Durable sign-off judgements (ADR 0031) — loaded once, seeded into every batch's
+    # ephemeral resolver so a reviewed cluster never re-parks. Tenant-scoped (G4).
+    judgements = _load_judgements(session, tenant_id)
     pending = clusters = promoted = review = alerts = batches = 0
     while True:
         items = list(
@@ -116,6 +120,7 @@ def resolve_pending(
             mode=mode,
             merge_threshold=merge_threshold,
             enrich=enrich,
+            judgements=judgements,
         )
         session.commit()
         pending += stats.pending
@@ -135,6 +140,14 @@ def resolve_pending(
     )
 
 
+def _load_judgements(session: Session, tenant_id: str) -> list[StoredJudgement]:
+    """Load this tenant's durable sign-off judgements (ADR 0031) to seed each batch."""
+    rows = session.execute(
+        select(ResolverJudgement).where(ResolverJudgement.tenant_id == tenant_id)
+    ).scalars()
+    return [StoredJudgement(row.left_id, row.right_id, row.judgement) for row in rows]
+
+
 def _resolve_batch(
     session: Session,
     neo4j: Neo4jClient,
@@ -144,6 +157,7 @@ def _resolve_batch(
     mode: str,
     merge_threshold: float,
     enrich: Callable[[FtmEntity], FtmEntity] | None,
+    judgements: Sequence[StoredJudgement] = (),
 ) -> ResolveStats:
     """Resolve one bounded batch of queue ``items`` (the caller commits).
 
@@ -160,7 +174,14 @@ def _resolve_batch(
     by_id: dict[str | None, FtmEntity] = {entity.id: entity for entity in entities}
 
     pairs = score_pairs(entities)
-    clusters = cluster_and_merge(entities, pairs, merge_threshold=merge_threshold)
+    clusters = cluster_and_merge(
+        entities, pairs, merge_threshold=merge_threshold, judgements=judgements
+    )
+    # Pairs a human explicitly APPROVED (ADR 0031): a flagged cluster backed by one is
+    # already human-reviewed, so it bypasses the guard and is promoted, never re-parked.
+    approved_pairs = {
+        frozenset((j.left_id, j.right_id)) for j in judgements if j.judgement == "positive"
+    }
 
     def _set_status(member_ids: tuple[str, ...], status: str) -> None:
         for member_id in member_ids:
@@ -172,6 +193,8 @@ def _resolve_batch(
     promoted = review = alerts = 0
     for cluster in clusters:
         flagged, reason = needs_review(cluster, by_id)
+        if flagged and any(pair <= set(cluster.member_ids) for pair in approved_pairs):
+            flagged = False  # human-approved merge (ADR 0031) — promote, never re-park
 
         # mode="block": park the flagged cluster for human review; never write it.
         if flagged and mode == "block":

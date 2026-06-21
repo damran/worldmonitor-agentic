@@ -41,14 +41,15 @@ class Settings(BaseSettings):
     minio_secure: bool = False
     landing_bucket: str = "landing"
 
-    # --- Entity resolution: catastrophic-merge guard (ADR 0024) ---
-    # "block" parks flagged (oversized / PEP / sanctioned) clusters in
-    # pending_review and never writes them. "alert" (BUILD-PHASE default) writes
-    # the merge anyway and records a durable, auditable merge_alerts row. The
-    # guard EVALUATION (resolution/review.py) is identical in both modes — only
-    # the ACTION on a flagged cluster differs. This MUST return to "block" with
-    # human sign-off before production (CLAUDE.md self-improvement rule).
-    merge_guard_mode: Literal["alert", "block"] = "alert"
+    # --- Entity resolution: catastrophic-merge guard (ADR 0024 → ADR 0031) ---
+    # "block" (DEFAULT — production posture) parks flagged (oversized / PEP /
+    # sanctioned) clusters in pending_review and never writes them; a human reviews
+    # them via the sign-off mechanism (ADR 0031). "alert" was the TEMPORARY
+    # build-phase mode that wrote flagged merges anyway with a durable merge_alerts
+    # trail. The guard EVALUATION (resolution/review.py) is identical in both modes —
+    # only the ACTION on a flagged cluster differs. Returned to "block" with human
+    # sign-off, fulfilling the ADR 0024 obligation.
+    merge_guard_mode: Literal["alert", "block"] = "block"
 
     # Max ER-queue candidates resolved per batch (ADR 0026). resolve_pending drains
     # the pending queue in windows of this size, committing per batch, so memory and

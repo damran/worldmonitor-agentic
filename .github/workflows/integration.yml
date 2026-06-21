@@ -6,9 +6,9 @@ name: integration
 
 on:
   push:
-    # Working-branch trigger so the gate runs without a PR (the user merges). Replace
-    # this branch entry at gate close.
-    branches: [master, main, alembic-followups]
+    # Working-branch trigger so the gate runs without a PR (reviewer-gated merge to
+    # master). Replace this branch entry at gate close.
+    branches: [master, main, ws1-return-to-block]
   pull_request:
 
 permissions:

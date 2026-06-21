@@ -43,6 +43,15 @@ class ResolvedCluster:
         return len(self.member_ids) > 1
 
 
+@dataclass(frozen=True, slots=True)
+class StoredJudgement:
+    """A persisted, tenant-scoped human sign-off judgement on a pair (ADR 0031)."""
+
+    left_id: str
+    right_id: str
+    judgement: str  # "positive" | "negative"
+
+
 def _ephemeral_resolver() -> nk.Resolver:
     """Return a private, in-memory nomenklatura resolver scoped to ONE batch.
 
@@ -67,8 +76,16 @@ def cluster_and_merge(
     pairs: Sequence[ScoredPair],
     *,
     merge_threshold: float = DEFAULT_MERGE_THRESHOLD,
+    judgements: Sequence[StoredJudgement] = (),
 ) -> list[ResolvedCluster]:
-    """Cluster ``entities`` by their high-confidence ``pairs`` and merge each cluster."""
+    """Cluster ``entities`` by their high-confidence ``pairs`` and merge each cluster.
+
+    Persisted human sign-off ``judgements`` (ADR 0031, already filtered to this
+    tenant by the caller) are seeded into the ephemeral resolver FIRST and take
+    precedence over Splink: a Splink pair that a judgement already decided is skipped
+    (the human decision wins), so a rejected cluster never re-merges and an approved
+    one always does — neither re-parks on a later batch.
+    """
     by_id = {entity.id: entity for entity in entities if entity.id is not None}
     resolver = _ephemeral_resolver()
 
@@ -79,7 +96,21 @@ def cluster_and_merge(
     # The resolver mutates inside an explicit transaction (begin-once style).
     resolver.begin()
     try:
+        # Seed persisted sign-off judgements first — authoritative over Splink. Only a
+        # judgement whose BOTH ids are in this batch can affect its clustering.
+        decided_pairs: set[frozenset[str]] = set()
+        for judgement in judgements:
+            if judgement.left_id in by_id and judgement.right_id in by_id:
+                verdict = (
+                    Judgement.NEGATIVE if judgement.judgement == "negative" else Judgement.POSITIVE
+                )
+                resolver.decide(judgement.left_id, judgement.right_id, verdict, user="signoff")
+                decided_pairs.add(frozenset((judgement.left_id, judgement.right_id)))
+                judged_ids.update((judgement.left_id, judgement.right_id))
         for pair in pairs:
+            key = frozenset((pair.left_id, pair.right_id))
+            if key in decided_pairs:
+                continue  # a human sign-off already decided this pair — never override it
             if (
                 pair.probability >= merge_threshold
                 and pair.left_id in by_id
@@ -92,7 +123,7 @@ def cluster_and_merge(
                     user="splink",
                     score=pair.probability,
                 )
-                pair_scores[frozenset((pair.left_id, pair.right_id))] = pair.probability
+                pair_scores[key] = pair.probability
                 judged_ids.update((pair.left_id, pair.right_id))
         # Only resolve ids that took part in a judgement; the rest are singletons
         # keyed by their own id (get_canonical is unreliable for unjudged ids).

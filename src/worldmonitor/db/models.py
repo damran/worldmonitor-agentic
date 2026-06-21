@@ -150,3 +150,54 @@ class TaskRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     stats: Mapped[dict[str, Any] | None] = mapped_column(JSONB, default=None)
     error: Mapped[str] = mapped_column(String, default="")
+
+
+class ResolverJudgement(Base):
+    """A DURABLE, tenant-scoped resolver judgement that survives the per-batch resolver.
+
+    The per-batch resolver is ephemeral (ADR 0028, the G4 fix), so a judgement made
+    in one batch evaporates. A human sign-off (ADR 0031) must persist: a REJECT writes
+    a ``"negative"`` judgement so the records never re-merge; an APPROVE writes a
+    ``"positive"`` one so they always do. EVERY batch's fresh resolver loads this
+    tenant's judgements before clustering and they take precedence over Splink — so a
+    reviewed cluster never re-parks. Tenant-scoped (``tenant_id``): one tenant's
+    judgement can never bind another's resolution (the G4 invariant the global
+    nomenklatura ledger violated). ``(tenant_id, left_id, right_id)`` is unique with
+    ``left_id <= right_id`` (the pair is stored canonically ordered).
+    """
+
+    __tablename__ = "resolver_judgement"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "left_id", "right_id", name="uq_resolver_judgement_pair"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    left_id: Mapped[str] = mapped_column(String(255))
+    right_id: Mapped[str] = mapped_column(String(255))
+    judgement: Mapped[str] = mapped_column(String(16))  # "positive" | "negative"
+    source: Mapped[str] = mapped_column(String(32), default="signoff")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SignOff(Base):
+    """A human decision on a parked (sensitive/oversized) merge (ADR 0031).
+
+    Under ``MERGE_GUARD_MODE="block"`` the catastrophic-merge guard parks a flagged
+    cluster as ``pending_review`` (never written). An operator reviews it and either
+    APPROVES (the merge is promoted to the graph) or REJECTS (the members are written
+    as separate entities). This is the durable, auditable sign-off trail CLAUDE.md
+    requires for changes affecting a real person — ``approver`` is the operator
+    identity (a string in v0; Zitadel-backed in Phase 2). Tenant-scoped.
+    """
+
+    __tablename__ = "sign_off"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    canonical_id: Mapped[str] = mapped_column(String(255), index=True)
+    source_ids: Mapped[list[str]] = mapped_column(JSONB)
+    decision: Mapped[str] = mapped_column(String(16), index=True)  # "approved" | "rejected"
+    approver: Mapped[str] = mapped_column(String(255))
+    reason: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

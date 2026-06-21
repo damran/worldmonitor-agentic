@@ -8,13 +8,13 @@ from pydantic import ValidationError
 from worldmonitor.settings import Settings
 
 
-def test_merge_guard_mode_defaults_to_alert() -> None:
-    """Build phase (ADR 0024): the guard alerts rather than blocks by default."""
-    assert Settings().merge_guard_mode == "alert"
+def test_merge_guard_mode_defaults_to_block() -> None:
+    """Production posture (ADR 0031): the guard blocks + parks sensitive merges by default."""
+    assert Settings().merge_guard_mode == "block"
 
 
-def test_merge_guard_mode_accepts_block() -> None:
-    assert Settings(merge_guard_mode="block").merge_guard_mode == "block"
+def test_merge_guard_mode_accepts_alert() -> None:
+    assert Settings(merge_guard_mode="alert").merge_guard_mode == "alert"
 
 
 def test_merge_guard_mode_rejects_unknown_value() -> None:
