@@ -7,7 +7,7 @@ on:
   push:
     # Working-branch trigger so the gate runs without a PR (reviewer-gated merge to
     # master). Replace this branch entry at gate close.
-    branches: [master, main, ws3-architecture-review]
+    branches: [master, main, ws4-gate-ledger]
   pull_request:
 
 permissions:
