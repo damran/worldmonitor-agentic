@@ -1,7 +1,7 @@
 # WorldMonitor — Architecture & Review
 
 > Standalone architecture and review of the WorldMonitor ingest → resolution → graph pipeline.
-> File:line citations are to the source tree at the time of writing (branch `g2-referent-rewriting`).
+> File:line citations are to the source tree at the time of writing (`master` after the WS1–WS2 merges).
 
 ---
 
@@ -80,7 +80,7 @@ separate transactions**:
 5. Build `Provenance(source_id, retrieved_at, reliability, source_record=uri)` — **only after a
    successful land** (`ingest.py:156`), so no provenance-less entity is ever queued.
 6. `connector.map(record, provenance=...)` (`ingest.py:163`). `map()` ends in
-   `stamp(entity, provenance)` (`plugins/ftm_bulk.py:27` / `connectors/geonames/connector.py:116`).
+   `stamp(entity, provenance)` (`plugins/ftm_bulk.py:27` / `plugins/connectors/geonames/connector.py:116`).
    On failure: dead-letter `stage="map"` (URI retained, replayable) and continue (`ingest.py:166-175`).
 7. For each mapped entity, **idempotent enqueue**: `pg_insert(ErQueueItem)
    .on_conflict_do_nothing(constraint="uq_er_queue_dedup").returning(id)` (`ingest.py:184-197`);
@@ -157,8 +157,8 @@ before the Postgres commit** (same cross-store ordering gap as the pipeline — 
 - `registry.py` — in-memory connector catalog keyed by `connector_id`; `register` (dup-reject),
   `discover_module`/`discover_package` via `inspect` + `pkgutil`.
 - `ftm_bulk.py` — `FtmBulkConnector` base: `map()` = `json.loads` → `validate_or_raise` → `stamp`.
-- `connectors/opensanctions/` — passive `EXTERNAL_IMPORT`; streams `entities.ftm.json` line-by-line.
-- `connectors/geonames/` — passive `EXTERNAL_IMPORT`; downloads `<CC>.zip`, splits TSV → FtM
+- `plugins/connectors/opensanctions/` — passive `EXTERNAL_IMPORT`; streams `entities.ftm.json` line-by-line.
+- `plugins/connectors/geonames/` — passive `EXTERNAL_IMPORT`; downloads `<CC>.zip`, splits TSV → FtM
   `Address`, `set_anchor("geonames_id", …)`.
 
 ### Ingest + landing + provenance (`runner/`, `storage/`, `provenance/`)
@@ -290,7 +290,7 @@ Each deferred milestone has its seam left intentionally visible in the code, own
 | **X2** — driver lease / HA | Single-node best-effort: `recover_stale` resets all `running` rows at startup; no lease/heartbeat/owner column | `driver.py:86-113` (recover_stale); `db/models.py:130-139` (TaskRun docstring names the single-node assumption); the in-process `_resolve_lock` (`driver.py:195`) | (runway — X2) |
 | **X3** — single-writer-per-tenant | Nothing serializes two `run_ingest` or a concurrent `resolve` + `sign-off` for one tenant; relies on the single-node lock + dedup constraint | `driver.py:139-141` (TOCTOU claim, silent loser); `pipeline.py:101-112` (no `FOR UPDATE`/`SKIP LOCKED`); `landing.py` (last-writer-wins S3 key race) | (runway — X3) |
 | **Active-connector scope tokens** | The authorized-scope-token gate for active plugins is unbuilt; refusal is the placeholder | `driver.py:54-60,165-169` (`ActiveConnectorRefused`) | (plugin framework) |
-| **`wm:Place` ontology extension** | GeoNames maps places to FtM `Address` as a load-bearing stand-in | `connectors/geonames/connector.py:6` (docstring), `:91` | (ontology) |
+| **`wm:Place` ontology extension** | GeoNames maps places to FtM `Address` as a load-bearing stand-in | `plugins/connectors/geonames/connector.py:6` (docstring), `:91` | (ontology) |
 
 ---
 
@@ -350,8 +350,8 @@ as a list property, or per-source provenance sub-nodes).
 **H5 — SSRF / path injection at the connector config → URL boundary.**
 Both connectors interpolate **unsanitized** config into outbound URLs with no allowlist or pattern.
 OpenSanctions: `f"{_BASE_URL}/{dataset}/entities.ftm.json"` with `dataset` only `minLength:1`
-(`connectors/opensanctions/connector.py:55`); GeoNames: `f"{_BASE_URL}/{country}.zip"` with `country`
-len-2 but no pattern, and `..` is a valid 2-char value (`connectors/geonames/connector.py:121`). Both
+(`plugins/connectors/opensanctions/connector.py:55`); GeoNames: `f"{_BASE_URL}/{country}.zip"` with `country`
+len-2 but no pattern, and `..` is a valid 2-char value (`plugins/connectors/geonames/connector.py:121`). Both
 use `follow_redirects=True`. This violates "treat all external data as hostile" at the config→URL
 boundary. *Direction:* add a strict ISO-3166 / dataset-slug regex to each `config.schema.json` and
 disable cross-host redirects.
@@ -419,7 +419,7 @@ incrementally or in a separate transaction from the graph write.
 (its key is `country`), so `source_id` collapses to `"geonames"` and the landing key omits the country
 (`ingest.py:138`) — VA and MC dumps share a non-discriminating `source_id` (degraded G1). Separately,
 `_download` reads the entire country zip + decompressed `.txt` into memory and `splitlines()`
-materializes every row (`connectors/geonames/connector.py:120-125`) — a large country can OOM.
+materializes every row (`plugins/connectors/geonames/connector.py:120-125`) — a large country can OOM.
 *Direction:* let connectors contribute their own provenance discriminator; stream the GeoNames
 archive line-by-line.
 
