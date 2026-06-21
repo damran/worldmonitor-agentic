@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GeoNames connector configuration",
+  "description": "Loads a GeoNames country dump as reference places keyed on geonames_id.",
+  "type": "object",
+  "properties": {
+    "country": {
+      "type": "string",
+      "title": "Country code",
+      "description": "ISO-3166 alpha-2 country code, e.g. 'VA' or 'MC'.",
+      "minLength": 2,
+      "maxLength": 2
+    },
+    "path": {
+      "type": "string",
+      "title": "Local dump path",
+      "description": "Optional path to a local {CC}.txt dump (overrides live download)."
+    }
+  },
+  "required": ["country"],
+  "additionalProperties": false
+}

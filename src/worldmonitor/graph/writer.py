@@ -29,6 +29,7 @@ from ftmg.transform import (
 )
 
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.ontology.anchors import get_anchors
 from worldmonitor.ontology.ftm import FtmEntity
 
 
@@ -57,8 +58,12 @@ def _tenantize_query(query: str) -> str:
     return rewritten
 
 
-def _inject_tenant(params: dict[str, Any], tenant_id: str) -> dict[str, Any]:
-    """Stamp ``tenant_id`` onto a parameter set (and its nested ``props``)."""
+def _inject_tenant(
+    params: dict[str, Any],
+    tenant_id: str,
+    anchors_by_id: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Stamp ``tenant_id`` (and, for node params, canonical anchors) onto params."""
     stamped = dict(params)
     stamped["tenant_id"] = tenant_id
     props = stamped.get("props")
@@ -66,14 +71,21 @@ def _inject_tenant(params: dict[str, Any], tenant_id: str) -> dict[str, Any]:
         nested: dict[str, Any] = dict(props)
         nested["tenant_id"] = tenant_id
         stamped["props"] = nested
+    elif anchors_by_id is not None:
+        # Flat node params: project the entity's canonical anchors onto the node.
+        anchors = anchors_by_id.get(str(stamped.get("id")))
+        if anchors:
+            stamped.update(anchors)
     return stamped
 
 
-def _tenantize(batch: Any, tenant_id: str) -> Any:
-    """Return a copy of an ftmg ``QueryBatch`` that is tenant-scoped."""
+def _tenantize(
+    batch: Any, tenant_id: str, anchors_by_id: dict[str, dict[str, str]] | None = None
+) -> Any:
+    """Return a copy of an ftmg ``QueryBatch`` that is tenant-scoped (+ anchors)."""
     return QueryBatch(
         query=_tenantize_query(batch.query),
-        params=_inject_tenant(batch.params, tenant_id),
+        params=_inject_tenant(batch.params, tenant_id, anchors_by_id),
     )
 
 
@@ -96,6 +108,11 @@ def write_entities(client: Neo4jClient, entities: Iterable[FtmEntity], *, tenant
         raise WriterError("tenant_id is required")
     materialized = list(entities)
     config = _ftmg_config(client)
+    anchors_by_id = {
+        entity.id: anchors
+        for entity in materialized
+        if entity.id is not None and (anchors := get_anchors(entity))
+    }
 
     # Pass 1 — entity nodes (skip edge schemata; they become relationships).
     with client.session() as session:
@@ -104,7 +121,7 @@ def write_entities(client: Neo4jClient, entities: Iterable[FtmEntity], *, tenant
             if entity.schema.edge:
                 continue
             for batch in generate_node_entity(config, entity):
-                batcher.add(_tenantize(batch, tenant_id))
+                batcher.add(_tenantize(batch, tenant_id, anchors_by_id))
         batcher.flush()
 
     # Pass 2 — relationships: edge entities, property links, and topic labels.

@@ -8,6 +8,7 @@ oversized merges are parked as ``pending_review`` and never written to the graph
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -39,8 +40,13 @@ def resolve_pending(
     neo4j: Neo4jClient,
     tenant_id: str,
     merge_threshold: float = DEFAULT_MERGE_THRESHOLD,
+    enrich: Callable[[FtmEntity], FtmEntity] | None = None,
 ) -> ResolveStats:
-    """Resolve all pending ER-queue candidates for ``tenant_id``."""
+    """Resolve all pending ER-queue candidates for ``tenant_id``.
+
+    If ``enrich`` is given, each auto-promoted canonical entity is passed through
+    it (e.g. the Wikidata anchor enricher) before being written to the graph.
+    """
     items = list(
         session.execute(
             select(ErQueueItem).where(
@@ -71,7 +77,8 @@ def resolve_pending(
         if flagged:
             review += 1
         else:
-            promoted_entities.append(cluster.entity)
+            entity = enrich(cluster.entity) if enrich is not None else cluster.entity
+            promoted_entities.append(entity)
             promoted += 1
 
     if promoted_entities:
