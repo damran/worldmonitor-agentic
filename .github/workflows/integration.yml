@@ -6,7 +6,9 @@ name: integration
 
 on:
   push:
-    branches: [master, main]
+    # g2-referent-rewriting added so the gate runs on the feature branch without a
+    # PR (gated autonomous build); prune at gate close.
+    branches: [master, main, g2-referent-rewriting]
   pull_request:
 
 permissions:
