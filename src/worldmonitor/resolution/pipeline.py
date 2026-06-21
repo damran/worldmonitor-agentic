@@ -148,6 +148,35 @@ def _load_judgements(session: Session, tenant_id: str) -> list[StoredJudgement]:
     return [StoredJudgement(row.left_id, row.right_id, row.judgement) for row in rows]
 
 
+def _approved_groups(judgements: Sequence[StoredJudgement]) -> list[frozenset[str]]:
+    """Connected components of APPROVED (positive) judgement pairs.
+
+    Each component is one human-reviewed merge. Used to exempt a flagged cluster from
+    the guard ONLY when the cluster is an exact re-formation of a single approved group
+    (so a never-reviewed member accreting onto it, or two approved groups fusing, still
+    re-parks). Union-find over the positive pairs.
+    """
+    parent: dict[str, str] = {}
+
+    def find(node: str) -> str:
+        parent.setdefault(node, node)
+        root = node
+        while parent[root] != root:
+            root = parent[root]
+        while parent[node] != root:  # path-compress
+            parent[node], node = root, parent[node]
+        return root
+
+    for judgement in judgements:
+        if judgement.judgement == "positive":
+            parent[find(judgement.left_id)] = find(judgement.right_id)
+
+    groups: dict[str, set[str]] = defaultdict(set)
+    for node in list(parent):
+        groups[find(node)].add(node)
+    return [frozenset(members) for members in groups.values()]
+
+
 def _resolve_batch(
     session: Session,
     neo4j: Neo4jClient,
@@ -177,11 +206,13 @@ def _resolve_batch(
     clusters = cluster_and_merge(
         entities, pairs, merge_threshold=merge_threshold, judgements=judgements
     )
-    # Pairs a human explicitly APPROVED (ADR 0031): a flagged cluster backed by one is
-    # already human-reviewed, so it bypasses the guard and is promoted, never re-parked.
-    approved_pairs = {
-        frozenset((j.left_id, j.right_id)) for j in judgements if j.judgement == "positive"
-    }
+    # Connected components of human-APPROVED (positive) pairs — each is exactly one
+    # human-reviewed merge (ADR 0031). A flagged cluster is exempt from the guard ONLY
+    # when ALL its members fall inside a SINGLE approved group: a new member (sensitive or
+    # not) accreting onto an approved merge, or two approved groups fusing, is a fresh
+    # UNREVIEWED merge and must re-park — this preserves "never auto-merge a sensitive
+    # entity" and routes canonical-canonical fusion through the guard, not around it.
+    approved_groups = _approved_groups(judgements)
 
     def _set_status(member_ids: tuple[str, ...], status: str) -> None:
         for member_id in member_ids:
@@ -193,8 +224,9 @@ def _resolve_batch(
     promoted = review = alerts = 0
     for cluster in clusters:
         flagged, reason = needs_review(cluster, by_id)
-        if flagged and any(pair <= set(cluster.member_ids) for pair in approved_pairs):
-            flagged = False  # human-approved merge (ADR 0031) — promote, never re-park
+        members = set(cluster.member_ids)
+        if flagged and any(members <= group for group in approved_groups):
+            flagged = False  # exactly an already-approved merge — promote, never re-park
 
         # mode="block": park the flagged cluster for human review; never write it.
         if flagged and mode == "block":

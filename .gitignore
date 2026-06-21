@@ -47,3 +47,6 @@ Thumbs.db
 *.swp
 *~
 .idea/
+
+# Local git bundle artifact (never commit)
+*.bundle

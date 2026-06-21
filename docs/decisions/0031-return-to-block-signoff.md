@@ -31,8 +31,12 @@ would be forgotten and the cluster would re-park on every later batch.
    judgements once and seeds **every** batch's fresh ephemeral resolver with them
    *before* clustering; a Splink pair that a judgement already decided is **skipped**
    (the human decision wins). Tenant-scoping keeps the G4 invariant: one tenant's
-   judgement can never bind another's resolution. A flagged cluster backed by a
-   positive judgement **bypasses the guard** — so an approved merge never re-parks.
+   judgement can never bind another's resolution. A flagged cluster **bypasses the
+   guard only when it is exactly a re-formation of a single approved group** (all its
+   members fall inside one connected component of positive judgements) — so an approved
+   merge never re-parks, **but** a never-reviewed member accreting onto it, or two
+   approved groups fusing, still re-parks (preserving "never auto-merge a sensitive
+   entity" and routing canonical-canonical fusion through the guard, not around it).
 
 3. **Sign-off mechanism** (`resolution/signoff.py`, CLI `python -m worldmonitor.review`):
    - `list` — the parked (`pending_review`) merges awaiting review.

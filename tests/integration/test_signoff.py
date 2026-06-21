@@ -343,3 +343,49 @@ def test_approve_promotes_with_outbound_edge_and_does_not_repark(
     )
     assert leftover[0]["n"] == 0, "p1/p2 always merge — they never survive as their own nodes"
     engine.dispose()
+
+
+def test_new_sensitive_member_accreting_to_approved_merge_re_parks(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """An approved merge must NOT shield a NEW sensitive member that later fuses into it.
+
+    The operator approved {p1, p2}. A fresh sanctioned p3 arrives and Splink links it to
+    the pair, so the cluster becomes {p1, p2, p3}. The guard exemption fires only for an
+    EXACT re-formation of an approved group — a never-reviewed member accreting in is a
+    fresh, high-impact merge and must re-park (never auto-merge a sensitive entity).
+    """
+    tenant_id = "accretion-tenant"
+    engine = make_engine(postgres_dsn)
+    create_all(engine)
+    sessions = session_factory(engine)
+    ensure_constraints(clean_graph)
+
+    # The operator has approved {p1, p2} — a positive judgement persists that decision.
+    with sessions() as session:
+        session.add(_judgement(tenant_id, "p1", "p2", "positive"))
+        session.commit()
+
+    # A new sanctioned p3 arrives; Splink fuses all three into one cluster.
+    with sessions() as session:
+        session.add(_queue_item(tenant_id, _sanctioned("p1"), source="p1"))
+        session.add(_queue_item(tenant_id, _sanctioned("p2", flag=False), source="p2"))
+        session.add(_queue_item(tenant_id, _sanctioned("p3"), source="p3"))
+        session.commit()
+    with sessions() as session:
+        stats = resolve_pending(
+            session=session, neo4j=clean_graph, tenant_id=tenant_id, guard_mode="block"
+        )
+
+    assert stats.review == 1, "a new sensitive member accreting onto an approved merge must re-park"
+    assert _person_ids(clean_graph, tenant_id) == [], "the expanded cluster is parked, not promoted"
+    with sessions() as session:
+        parked = session.execute(
+            select(MergeAudit).where(
+                MergeAudit.tenant_id == tenant_id, MergeAudit.decision == "pending_review"
+            )
+        ).scalar_one()
+        assert set(parked.source_ids) == {"p1", "p2", "p3"}, (
+            "re-parked with the new member included"
+        )
+    engine.dispose()
