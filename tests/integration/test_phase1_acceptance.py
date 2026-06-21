@@ -11,9 +11,10 @@ Two integration tests cover it:
   2. A deliberate duplicate collapses to a single resolved node, while a sanctioned
      entity is anchored to its canonical ID — through the real resolve->graph path.
 
-Note (v0 limitation): edges whose endpoints were merged away are not yet rewritten
-to the canonical id (referent rewriting is a follow-up), so neighbour linking is
-asserted on non-merged (singleton) entities.
+Note: this file asserts neighbour linking on a non-merged (singleton) entity.
+Edges whose endpoints were merged away are now rewritten to the canonical id
+(referent rewriting, G2 / ADR 0025) — that case is proven in
+``tests/integration/test_referent_rewriting.py``.
 """
 
 from __future__ import annotations
