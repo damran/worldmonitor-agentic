@@ -56,6 +56,17 @@ class Settings(BaseSettings):
     # dedup against already-resolved entities is deferred to the ER-streaming gate.
     resolve_batch_size: int = Field(default=1000, gt=0)
 
+    # --- Ingest bounds + windowing (ADR 0027) ---
+    # run_ingest drains a connector's collect() with these bounds so a stream that
+    # never returns can't hang the run, and a long import commits its progress.
+    #   ingest_commit_every   — land/map/enqueue this many records, then commit.
+    #   ingest_timeout_seconds — wall-clock deadline on a single run; <= 0 disables.
+    #   ingest_max_records     — optional hard cap on records pulled; None = no cap
+    #                            (windowed commits already bound the blast radius).
+    ingest_commit_every: int = Field(default=1000, gt=0)
+    ingest_timeout_seconds: float = Field(default=1800.0, ge=0)
+    ingest_max_records: int | None = Field(default=None, gt=0)
+
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in
     # any environment that persists connector configs; empty default fails fast.

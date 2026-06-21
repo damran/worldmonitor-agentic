@@ -71,6 +71,31 @@ class MergeAudit(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class IngestDeadLetter(Base):
+    """A record that could not be landed or mapped during ingest (the dead-letter trail).
+
+    ``run_ingest`` never lets one bad record abort the whole run (audit gap G8): a
+    failure is recorded here and ingest continues. ``stage`` is ``"land"`` (the raw
+    bytes could not be written to the landing zone — ``source_record`` is null) or
+    ``"map"`` (the raw landed but mapping to FtM raised — ``source_record`` points at
+    the landed bytes, replayable). ``error`` is a bounded exception summary. Every
+    row carries ``tenant_id`` (the GDPR/audit invariant holds for failures too).
+    """
+
+    __tablename__ = "ingest_dead_letter"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    connector_id: Mapped[str] = mapped_column(String(128))
+    # The record's source key (the would-be landing key); always known.
+    source_key: Mapped[str] = mapped_column(String)
+    # s3:// pointer to the landed bytes; null for a land-stage failure (nothing landed).
+    source_record: Mapped[str | None] = mapped_column(String, default=None)
+    stage: Mapped[str] = mapped_column(String(16), index=True)
+    error: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class MergeAlert(Base):
     """Durable, auditable record of a flagged cluster that was merged anyway.
 

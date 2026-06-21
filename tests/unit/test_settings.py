@@ -34,3 +34,26 @@ def test_resolve_batch_size_accepts_override() -> None:
 def test_resolve_batch_size_rejects_non_positive() -> None:
     with pytest.raises(ValidationError):
         Settings(resolve_batch_size=0)
+
+
+def test_ingest_bounds_defaults() -> None:
+    """ADR 0027: windowed commits + a wall-clock deadline + no record cap by default."""
+    settings = Settings()
+    assert settings.ingest_commit_every == 1000
+    assert settings.ingest_timeout_seconds == 1800.0
+    assert settings.ingest_max_records is None
+
+
+def test_ingest_timeout_allows_zero_to_disable() -> None:
+    assert Settings(ingest_timeout_seconds=0).ingest_timeout_seconds == 0
+
+
+def test_ingest_commit_every_rejects_non_positive() -> None:
+    with pytest.raises(ValidationError):
+        Settings(ingest_commit_every=0)
+
+
+def test_ingest_max_records_accepts_cap_and_rejects_non_positive() -> None:
+    assert Settings(ingest_max_records=500).ingest_max_records == 500
+    with pytest.raises(ValidationError):
+        Settings(ingest_max_records=0)
