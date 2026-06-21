@@ -21,6 +21,7 @@ dependencies = [
     "splink>=4.0",
     "duckdb>=1.0",
     "nomenklatura>=4.10",
+    "alembic>=1.18.4",
 ]
 
 [project.urls]
@@ -77,6 +78,8 @@ known-first-party = ["worldmonitor"]
 # ---------------------------------------------------------------------------
 [tool.pyright]
 include = ["src"]
+# Alembic env + generated migration scripts are DDL boilerplate, not app logic.
+exclude = ["src/worldmonitor/db/migrations"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 venvPath = "."
