@@ -6,7 +6,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from worldmonitor.db.models import MergeAudit
+from worldmonitor.db.models import MergeAlert, MergeAudit
 from worldmonitor.resolution.merge import ResolvedCluster
 
 
@@ -30,3 +30,27 @@ def record_merge(
     )
     session.add(audit)
     return audit
+
+
+def record_merge_alert(
+    session: Session,
+    cluster: ResolvedCluster,
+    *,
+    tenant_id: str,
+    reason: str,
+) -> MergeAlert:
+    """Write one :class:`MergeAlert` row for a flagged-but-merged cluster (caller commits).
+
+    Used only in ``MERGE_GUARD_MODE="alert"`` (ADR 0024): the durable trail of
+    every catastrophic-guard-flagged cluster that was merged anyway.
+    """
+    alert = MergeAlert(
+        id=str(uuid.uuid4()),
+        tenant_id=tenant_id,
+        canonical_id=cluster.canonical_id,
+        source_ids=list(cluster.member_ids),
+        reason=reason,
+        score=cluster.score,
+    )
+    session.add(alert)
+    return alert

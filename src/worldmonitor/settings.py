@@ -7,6 +7,7 @@ fully provisioned. See ``.env.example``.
 """
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -38,6 +39,15 @@ class Settings(BaseSettings):
     minio_secret_key: str = ""
     minio_secure: bool = False
     landing_bucket: str = "landing"
+
+    # --- Entity resolution: catastrophic-merge guard (ADR 0024) ---
+    # "block" parks flagged (oversized / PEP / sanctioned) clusters in
+    # pending_review and never writes them. "alert" (BUILD-PHASE default) writes
+    # the merge anyway and records a durable, auditable merge_alerts row. The
+    # guard EVALUATION (resolution/review.py) is identical in both modes — only
+    # the ACTION on a flagged cluster differs. This MUST return to "block" with
+    # human sign-off before production (CLAUDE.md self-improvement rule).
+    merge_guard_mode: Literal["alert", "block"] = "alert"
 
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in

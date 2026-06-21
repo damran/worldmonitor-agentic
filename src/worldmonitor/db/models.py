@@ -69,3 +69,25 @@ class MergeAudit(Base):
     decision: Mapped[str] = mapped_column(String(32), index=True)
     reason: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MergeAlert(Base):
+    """Durable, auditable record of a flagged cluster that was merged anyway.
+
+    Written only under ``MERGE_GUARD_MODE="alert"`` (build phase, ADR 0024): the
+    catastrophic-merge guard still flags oversized / PEP / sanctioned clusters,
+    but instead of parking them in ``pending_review`` the pipeline writes the
+    merge and records it here. This is the trail a human reviews before flipping
+    the guard back to ``"block"`` with sign-off (CLAUDE.md self-improvement rule).
+    ``reason`` is the guard's sensitivity reason (oversized / PEP / sanctioned).
+    """
+
+    __tablename__ = "merge_alerts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    canonical_id: Mapped[str] = mapped_column(String(255), index=True)
+    source_ids: Mapped[list[str]] = mapped_column(JSONB)
+    reason: Mapped[str] = mapped_column(String, default="")
+    score: Mapped[float]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

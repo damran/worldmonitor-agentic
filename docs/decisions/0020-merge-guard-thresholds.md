@@ -1,6 +1,12 @@
 # ADR 0020 — Catastrophic-merge guard: hardcoded conservative thresholds (v0)
 
-> Status: **LOCKED** (v0) · June 2026 · Implements the catastrophic-merge-guard invariant (CLAUDE.md).
+> Status: **LOCKED** (v0) · **superseded by [0024](0024-merge-guard-alert-mode-build-phase.md)
+> for the build phase** · June 2026 · Implements the catastrophic-merge-guard invariant (CLAUDE.md).
+>
+> **Note:** the guard *thresholds* and *evaluation* below remain in force. ADR 0024 changes only the
+> build-phase *action* on a flagged cluster (alert-and-write instead of park-for-review) behind the
+> `MERGE_GUARD_MODE` flag; this blocking behavior is the production target, restored by flipping the
+> flag back to `block` with human sign-off.
 
 ## Context
 The catastrophic-merge guard (PR #12) must hold high-impact merges for human review and never auto-merge
