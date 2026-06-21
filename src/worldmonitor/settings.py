@@ -9,6 +9,7 @@ fully provisioned. See ``.env.example``.
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -48,6 +49,12 @@ class Settings(BaseSettings):
     # the ACTION on a flagged cluster differs. This MUST return to "block" with
     # human sign-off before production (CLAUDE.md self-improvement rule).
     merge_guard_mode: Literal["alert", "block"] = "alert"
+
+    # Max ER-queue candidates resolved per batch (ADR 0026). resolve_pending drains
+    # the pending queue in windows of this size, committing per batch, so memory and
+    # per-pass cost are bounded. Dedup is WITHIN a batch; cross-batch / incremental
+    # dedup against already-resolved entities is deferred to the ER-streaming gate.
+    resolve_batch_size: int = Field(default=1000, gt=0)
 
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in

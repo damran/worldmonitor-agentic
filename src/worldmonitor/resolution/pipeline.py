@@ -1,8 +1,15 @@
 """Entity-resolution pipeline: ER queue → score → cluster/merge → guard → graph.
 
-Reads pending candidates for a tenant, resolves them (Splink score → nomenklatura
-cluster → FtM merge), applies the catastrophic-merge guard, records the audit
-trail, and upserts auto-promoted canonical entities into Neo4j.
+Reads pending candidates for a tenant and resolves them (Splink score →
+nomenklatura cluster → FtM merge), applies the catastrophic-merge guard, records
+the audit trail, rewrites referents to canonical ids, and upserts auto-promoted
+canonical entities into Neo4j.
+
+The queue is drained in **bounded batches** (ADR 0026): ``resolve_pending`` loads
+at most ``RESOLVE_BATCH_SIZE`` pending rows, resolves that window, commits, and
+repeats until the queue is empty — so memory and per-pass cost stay bounded.
+Dedup is *within* a batch; cross-batch / incremental dedup against
+already-resolved entities is deferred to the ER-streaming gate (ADR 0019).
 
 The guard *evaluation* (``resolution/review.py``) is unconditional; only the
 *action* on a flagged (oversized / PEP / sanctioned) cluster depends on
@@ -17,6 +24,7 @@ The guard *evaluation* (``resolution/review.py``) is unconditional; only the
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -43,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class ResolveStats:
-    """Counts from one resolution run."""
+    """Counts from one resolution run (summed across the batches it drained)."""
 
     pending: int
     clusters: int
@@ -51,6 +59,8 @@ class ResolveStats:
     review: int
     alerts: int
     """Flagged clusters merged anyway under ``MERGE_GUARD_MODE="alert"``."""
+    batches: int
+    """Number of bounded batches drained from the queue (ADR 0026)."""
 
 
 def resolve_pending(
@@ -61,31 +71,101 @@ def resolve_pending(
     merge_threshold: float = DEFAULT_MERGE_THRESHOLD,
     enrich: Callable[[FtmEntity], FtmEntity] | None = None,
     guard_mode: str | None = None,
+    batch_size: int | None = None,
 ) -> ResolveStats:
-    """Resolve all pending ER-queue candidates for ``tenant_id``.
+    """Resolve pending ER-queue candidates for ``tenant_id``, draining in batches.
+
+    The queue is processed in bounded windows of ``batch_size`` rows (default
+    ``RESOLVE_BATCH_SIZE`` from settings): each batch is scored, clustered,
+    guarded, referent-rewritten, written, and **committed** before the next is
+    loaded, so memory and per-pass cost stay bounded (ADR 0026). Dedup is *within*
+    a batch — cross-batch / incremental dedup against already-resolved entities is
+    deferred to the ER-streaming gate (ADR 0019).
 
     If ``enrich`` is given, each auto-promoted canonical entity is passed through
     it (e.g. the Wikidata anchor enricher) before being written to the graph.
     ``guard_mode`` (``"alert"`` / ``"block"``) overrides ``MERGE_GUARD_MODE`` from
     settings; it controls only the *action* on a flagged cluster (ADR 0024).
     """
-    mode = guard_mode if guard_mode is not None else get_settings().merge_guard_mode
-    items = list(
-        session.execute(
-            select(ErQueueItem).where(
-                ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "pending"
-            )
-        ).scalars()
-    )
-    if not items:
-        return ResolveStats(pending=0, clusters=0, promoted=0, review=0, alerts=0)
+    settings = get_settings()
+    mode = guard_mode if guard_mode is not None else settings.merge_guard_mode
+    size = batch_size if batch_size is not None else settings.resolve_batch_size
+    if size <= 0:
+        raise ValueError(f"batch_size must be a positive integer, got {size}")
 
-    items_by_entity_id = {item.raw_entity["id"]: item for item in items}
+    pending = clusters = promoted = review = alerts = batches = 0
+    while True:
+        items = list(
+            session.execute(
+                select(ErQueueItem)
+                .where(
+                    ErQueueItem.tenant_id == tenant_id,
+                    ErQueueItem.status == "pending",
+                )
+                .order_by(ErQueueItem.created_at, ErQueueItem.id)
+                .limit(size)
+            ).scalars()
+        )
+        if not items:
+            break
+        stats = _resolve_batch(
+            session,
+            neo4j,
+            items,
+            tenant_id=tenant_id,
+            mode=mode,
+            merge_threshold=merge_threshold,
+            enrich=enrich,
+        )
+        session.commit()
+        pending += stats.pending
+        clusters += stats.clusters
+        promoted += stats.promoted
+        review += stats.review
+        alerts += stats.alerts
+        batches += 1
+
+    return ResolveStats(
+        pending=pending,
+        clusters=clusters,
+        promoted=promoted,
+        review=review,
+        alerts=alerts,
+        batches=batches,
+    )
+
+
+def _resolve_batch(
+    session: Session,
+    neo4j: Neo4jClient,
+    items: list[ErQueueItem],
+    *,
+    tenant_id: str,
+    mode: str,
+    merge_threshold: float,
+    enrich: Callable[[FtmEntity], FtmEntity] | None,
+) -> ResolveStats:
+    """Resolve one bounded batch of queue ``items`` (the caller commits).
+
+    Scores + clusters the batch, applies the catastrophic-merge guard, records the
+    audit/alert trail, rewrites referents to canonical ids (G2, ADR 0025), and
+    writes the auto-promoted canonical entities. Every queue row in the batch is
+    transitioned out of ``pending`` — all rows sharing one FtM id move together —
+    so a drained batch can never be re-loaded by the outer loop.
+    """
+    items_by_entity_id: dict[str, list[ErQueueItem]] = defaultdict(list)
+    for item in items:
+        items_by_entity_id[item.raw_entity["id"]].append(item)
     entities = [make_entity(item.raw_entity) for item in items]
     by_id: dict[str | None, FtmEntity] = {entity.id: entity for entity in entities}
 
     pairs = score_pairs(entities)
     clusters = cluster_and_merge(entities, pairs, merge_threshold=merge_threshold)
+
+    def _set_status(member_ids: tuple[str, ...], status: str) -> None:
+        for member_id in member_ids:
+            for item in items_by_entity_id.get(member_id, []):
+                item.status = status
 
     promoted_entities: list[FtmEntity] = []
     promoted_clusters: list[ResolvedCluster] = []
@@ -98,10 +178,7 @@ def resolve_pending(
             record_merge(
                 session, cluster, tenant_id=tenant_id, decision="pending_review", reason=reason
             )
-            for member_id in cluster.member_ids:
-                item = items_by_entity_id.get(member_id)
-                if item is not None:
-                    item.status = "pending_review"
+            _set_status(cluster.member_ids, "pending_review")
             review += 1
             continue
 
@@ -112,17 +189,14 @@ def resolve_pending(
             alerts += 1
             logger.warning(
                 "catastrophic-merge guard ALERT (MERGE_GUARD_MODE=alert): merged flagged "
-                "cluster %s anyway — %s; %d alert(s) this run",
+                "cluster %s anyway — %s; %d alert(s) this batch",
                 cluster.canonical_id,
                 reason,
                 alerts,
             )
 
         record_merge(session, cluster, tenant_id=tenant_id, decision="merged", reason=reason)
-        for member_id in cluster.member_ids:
-            item = items_by_entity_id.get(member_id)
-            if item is not None:
-                item.status = "resolved"
+        _set_status(cluster.member_ids, "resolved")
         entity = enrich(cluster.entity) if enrich is not None else cluster.entity
         promoted_entities.append(entity)
         promoted_clusters.append(cluster)
@@ -138,11 +212,12 @@ def resolve_pending(
         for entity in promoted_entities:
             rewrite_referents(entity, referents)
         write_entities(neo4j, promoted_entities, tenant_id=tenant_id)
-    session.commit()
+
     return ResolveStats(
         pending=len(items),
         clusters=len(clusters),
         promoted=promoted,
         review=review,
         alerts=alerts,
+        batches=1,
     )
