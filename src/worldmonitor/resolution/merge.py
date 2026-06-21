@@ -9,6 +9,7 @@ canonical entity. nomenklatura ships no type stubs, so it is imported only here.
 
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
+# pyright: reportUnknownParameterType=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
 from collections import defaultdict
@@ -17,6 +18,8 @@ from dataclasses import dataclass
 
 import nomenklatura as nk
 from nomenklatura import Judgement
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
 from worldmonitor.resolution.splink_model import ScoredPair
@@ -40,6 +43,25 @@ class ResolvedCluster:
         return len(self.member_ids) > 1
 
 
+def _ephemeral_resolver() -> nk.Resolver:
+    """Return a private, in-memory nomenklatura resolver scoped to ONE batch.
+
+    Batch-first resolution (ADR 0026) resolves each batch in isolation: it must not
+    read or write any cross-batch / cross-tenant state. ``Resolver.make_default()``
+    binds to a shared, persistent, **non-tenant-scoped** SQLite ledger
+    (``NOMENKLATURA_DB_URL``); judgements accumulate there across every batch, tenant
+    and run, so one tenant's merge can canonicalize another tenant's entities — a G4
+    isolation violation (proven: a record shared between two tenants fuses their
+    independent merges). A throwaway in-memory engine (one shared connection via
+    ``StaticPool``) makes the resolver a pure function of *this* batch's pairs.
+    Persistent, per-tenant resolution is the deferred incremental-ER work (ADR 0019b).
+    """
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    return nk.Resolver.make_default(engine)
+
+
 def cluster_and_merge(
     entities: Sequence[FtmEntity],
     pairs: Sequence[ScoredPair],
@@ -48,7 +70,7 @@ def cluster_and_merge(
 ) -> list[ResolvedCluster]:
     """Cluster ``entities`` by their high-confidence ``pairs`` and merge each cluster."""
     by_id = {entity.id: entity for entity in entities if entity.id is not None}
-    resolver = nk.Resolver.make_default()
+    resolver = _ephemeral_resolver()
 
     pair_scores: dict[frozenset[str], float] = {}
     groups: dict[str, list[str]] = defaultdict(list)

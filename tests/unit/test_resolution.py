@@ -68,3 +68,34 @@ def test_sensitive_merge_goes_to_review() -> None:
     flagged, reason = needs_review(merges[0], {"p1": a, "p2": b})
     assert flagged is True
     assert "sensitive" in reason.lower()
+
+
+def test_resolver_is_isolated_per_batch_no_cross_tenant_leak() -> None:
+    """G4: one batch's merge must never influence another batch's resolution.
+
+    cluster_and_merge resolves each batch on a private in-memory ledger. If it
+    shared a persistent ledger, a source id common to two batches (e.g. two tenants
+    ingesting the same record) would fuse their independent merges — one tenant's
+    merge leaking into another's. Two batches sharing id "c1" must mint independent
+    canonical ids, and the second must contain only its own members.
+    """
+    first = [
+        _company("c1", "Acme Corporation Ltd", "us"),
+        _company("c2", "Acme Corporation Ltd", "us"),
+    ]
+    first_canonical = next(
+        c for c in cluster_and_merge(first, score_pairs(first)) if c.is_merge
+    ).canonical_id
+
+    second = [
+        _company("c1", "Acme Corporation Ltd", "us"),
+        _company("c3", "Acme Corporation Ltd", "us"),
+    ]
+    second_merge = next(c for c in cluster_and_merge(second, score_pairs(second)) if c.is_merge)
+
+    assert second_merge.canonical_id != first_canonical, (
+        "second batch reused the first's canonical => shared resolver ledger (G4 leak)"
+    )
+    assert set(second_merge.member_ids) == {"c1", "c3"}, (
+        "second batch must contain only its own ids"
+    )
