@@ -207,3 +207,53 @@ def test_batched_resolution_rerun_is_idempotent_noop(
     assert _node_count() == before
 
     engine.dispose()
+
+
+def test_unresolvable_id_row_is_quarantined_not_looped_forever(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """A row with an unusable FtM id is quarantined as 'invalid', never re-loaded.
+
+    cluster_and_merge drops an entity with a None/missing id, so its queue row gets
+    no resolved/review status — the bounded-drain loop would otherwise reload it
+    forever. The safety sweep marks it 'invalid' so the drain terminates; the valid
+    row alongside it still resolves.
+    """
+    tenant_id = "batch-invalid-tenant"
+    engine = make_engine(postgres_dsn)
+    create_all(engine)
+    sessions = session_factory(engine)
+    ensure_constraints(clean_graph)
+
+    valid = _company("ok", "Acme Corporation", "us")
+    unusable: dict[str, object] = {
+        "id": None,
+        "schema": "Company",
+        "properties": {"name": ["No Id Co"], "jurisdiction": ["gb"]},
+        "datasets": ["t"],
+    }
+    _seed(sessions, tenant_id, [valid, unusable])
+
+    # If the sweep regressed, this call would never return (infinite drain loop).
+    with sessions() as session:
+        stats = resolve_pending(
+            session=session, neo4j=clean_graph, tenant_id=tenant_id, batch_size=10
+        )
+
+    assert stats.promoted == 1  # only the valid row resolves
+
+    with sessions() as session:
+        invalid = session.execute(
+            select(func.count())
+            .select_from(ErQueueItem)
+            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "invalid")
+        ).scalar_one()
+        pending = session.execute(
+            select(func.count())
+            .select_from(ErQueueItem)
+            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "pending")
+        ).scalar_one()
+        assert invalid == 1
+        assert pending == 0  # queue fully drained, nothing left to loop on
+
+    engine.dispose()

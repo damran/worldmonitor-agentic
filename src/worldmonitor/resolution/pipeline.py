@@ -153,9 +153,9 @@ def _resolve_batch(
     transitioned out of ``pending`` — all rows sharing one FtM id move together —
     so a drained batch can never be re-loaded by the outer loop.
     """
-    items_by_entity_id: dict[str, list[ErQueueItem]] = defaultdict(list)
+    items_by_entity_id: dict[str | None, list[ErQueueItem]] = defaultdict(list)
     for item in items:
-        items_by_entity_id[item.raw_entity["id"]].append(item)
+        items_by_entity_id[item.raw_entity.get("id")].append(item)
     entities = [make_entity(item.raw_entity) for item in items]
     by_id: dict[str | None, FtmEntity] = {entity.id: entity for entity in entities}
 
@@ -201,6 +201,24 @@ def _resolve_batch(
         promoted_entities.append(entity)
         promoted_clusters.append(cluster)
         promoted += 1
+
+    # Safety sweep: cluster_and_merge drops any entity with a missing / None FtM id,
+    # so the queue rows carrying it get no status above and would be re-loaded by the
+    # bounded-drain loop forever. Quarantine them as "invalid" so the loop always makes
+    # progress (never fire-and-forget — log what was skipped).
+    clustered_ids = {member_id for c in clusters for member_id in c.member_ids}
+    skipped = 0
+    for entity_id, rows in items_by_entity_id.items():
+        if entity_id not in clustered_ids:
+            for row in rows:
+                row.status = "invalid"
+            skipped += len(rows)
+    if skipped:
+        logger.warning(
+            "resolve_pending: quarantined %d ER-queue row(s) with an unusable FtM id as "
+            "'invalid' (unresolvable; kept the bounded-drain loop terminating)",
+            skipped,
+        )
 
     if promoted_entities:
         # Referent rewriting (G2, ADR 0025): redirect every reference to a
