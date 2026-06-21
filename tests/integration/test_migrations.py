@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, create_engine, inspect, make_url, text
 
 from worldmonitor.db.engine import _alembic_config, create_all, make_engine, migrate_to_head
@@ -131,6 +132,11 @@ def _alembic_version(engine: Engine) -> str | None:
         return conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
 
 
+def _script_head(engine: Engine) -> str | None:
+    """The current head revision id — so the assertion tracks new migrations, not a literal."""
+    return ScriptDirectory.from_config(_alembic_config(engine)).get_current_head()
+
+
 def test_post_runway_create_all_database_is_stamped_at_head(
     postgres_dsn: str, reference_schema: dict[str, Any]
 ) -> None:
@@ -140,14 +146,15 @@ def test_post_runway_create_all_database_is_stamped_at_head(
     engine = make_engine(_create_fresh_database(postgres_dsn))
     create_all(engine)
     assert _alembic_version(engine) is None  # unmanaged, but already at the current schema
+    head = _script_head(engine)
 
     migrate_to_head(engine)  # adoption branch (c): er_queue_item has entity_id -> stamp head
 
-    assert _alembic_version(engine) == "0002_runway", "must stamp head, not re-run the baseline"
+    assert _alembic_version(engine) == head, "must stamp head, not re-run the baseline"
     assert _snapshot(engine) == reference_schema, "stamping must not change the schema"
 
     migrate_to_head(engine)  # already managed at head -> upgrade is a no-op
-    assert _alembic_version(engine) == "0002_runway"
+    assert _alembic_version(engine) == head
     assert _snapshot(engine) == reference_schema
     engine.dispose()
 
