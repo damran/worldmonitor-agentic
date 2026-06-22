@@ -18,6 +18,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from followthemoney import registry
 from ftmg.config import Configuration, DatabaseConfig
 from ftmg.transform import (
     QueryBatch,
@@ -106,6 +107,33 @@ def _tenantize(
     )
 
 
+# ftmg's `generate_entity_links` keys each endpoint by `registry.entity.node_id`, which
+# PREFIXES the FtM id (e.g. "entity:abc"). But nodes are written with the RAW id
+# (`generate_node_entity` -> MERGE {id: props.id}), so the link MATCH `{id: "entity:abc"}`
+# misses the raw node and the relationship is silently dropped (review H3). This is the
+# prefix to strip so they realign — derived from ftmg, not hardcoded, so a future change
+# to ftmg's id scheme surfaces in the regression test rather than silently re-breaking.
+_ENTITY_LINK_PREFIX = (registry.entity.node_id_safe("x") or "entity:x").removesuffix("x")
+
+
+def _align_entity_link_ids(batch: Any) -> Any:
+    """Strip the ``entity:`` prefix from an entity-link batch's endpoint ids (H3 fix).
+
+    Realigns ``generate_entity_links``' ``entity:``-prefixed ``source_id`` / ``target_id``
+    with the RAW ids the nodes are written under, so the link materializes instead of
+    silently MATCH-missing. **Scoped to the entity-link path only:** edge-schema entities
+    and topic labels already key on raw ids (untouched), and abstract-``Thing``-range
+    links (G3) are skipped inside ftmg before any batch exists — so this never sees them.
+    H3 is fixed; G3 stays deferred and unchanged.
+    """
+    params = dict(batch.params)
+    for key in ("source_id", "target_id"):
+        value = params.get(key)
+        if isinstance(value, str):
+            params[key] = value.removeprefix(_ENTITY_LINK_PREFIX)
+    return QueryBatch(query=batch.query, params=params)
+
+
 def _ftmg_config(client: Neo4jClient) -> Any:
     """Build the ftmg :class:`Configuration` (db creds drive label/transform logic)."""
     return Configuration(
@@ -159,13 +187,16 @@ def write_entities(client: Neo4jClient, entities: Iterable[FtmEntity], *, tenant
         for entity in materialized:
             edge_prov = provenance_node_properties(entity)
             if entity.schema.edge:
-                generators = (generate_edge_entity(config, entity),)
+                for batch in generate_edge_entity(config, entity):
+                    batcher.add(_tenantize(batch, tenant_id, edge_props=edge_prov))
             else:
-                generators = (
-                    generate_entity_links(config, entity),
-                    generate_topic_labels(config, entity),
-                )
-            for generator in generators:
-                for batch in generator:
+                # Entity-typed property links: realign the `entity:`-prefixed endpoint ids
+                # to the raw node ids so the link materializes (H3). Edge-schema and topic
+                # batches already key on raw ids, so only this generator is realigned.
+                for batch in generate_entity_links(config, entity):
+                    batcher.add(
+                        _tenantize(_align_entity_link_ids(batch), tenant_id, edge_props=edge_prov)
+                    )
+                for batch in generate_topic_labels(config, entity):
                     batcher.add(_tenantize(batch, tenant_id, edge_props=edge_prov))
         batcher.flush()

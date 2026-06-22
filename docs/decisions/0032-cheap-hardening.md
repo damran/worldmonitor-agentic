@@ -49,9 +49,16 @@ These need an architectural change or a gate decision; they are tracked, not fix
   commit; a crash between them + non-deterministic `NK-` ids can orphan a node. The real
   fix (outbox/saga, or content-addressed canonical ids) overlaps **Gate B** (cross-batch
   dedup / stable ids). Deferred.
-- **Entity-reference link drop (review H3)** — ftmg's `generate_entity_links` MATCHes an
-  `entity:`-prefixed id no node carries; non-edge entity references silently fail. Touches
-  the adopted ftmg adapter and is **Gate-C-adjacent** (graph-write model). Deferred.
+- **Entity-reference link drop (review H3)** — ~~deferred~~ **FIXED 2026-06-22** (a richer
+  smoke run hit it, dropping ~1867 real `addressEntity` relationships). The fix was NOT
+  Gate-C work: `graph/writer.py._align_entity_link_ids` strips the `entity:` prefix from
+  the entity-link `MATCH` endpoint ids so they realign with the raw node ids — **scoped to
+  the entity-link path only** (edge-schema + topic batches already use raw ids; abstract-
+  `Thing`-range / **G3** links are skipped inside ftmg before a batch exists, so they are
+  untouched and **remain deferred**). The H3/G3 boundary is pinned by
+  `tests/integration/test_entity_link_materialization.py` (concrete range materializes,
+  abstract range stays dropped). G3 (abstract-`Thing`-range, `Sanction.entity`) and H4
+  below stay deferred.
 - **Provenance collapse on merged nodes (review H4)** — a canonical fused from N sources
   projects only the first source's `prov_*`. Multi-valued provenance projection is a
   graph-write-model change; full lineage still survives in `raw_entity` + `merge_audit`.
