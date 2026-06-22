@@ -9,7 +9,7 @@ name: compose-boot
 
 on:
   push:
-    branches: [master, main, fix-neo4j-compose-auth-bootci]
+    branches: [master, main, docs-smoke-run-report]
   pull_request:
 
 jobs:

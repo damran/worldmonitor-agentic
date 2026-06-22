@@ -8,7 +8,7 @@ on:
   push:
     # Working-branch trigger so the gate runs without a PR (reviewer-gated merge to
     # master). Replace this branch entry at gate close.
-    branches: [master, main, fix-neo4j-compose-auth-bootci]
+    branches: [master, main, docs-smoke-run-report]
   pull_request:
 
 permissions:
