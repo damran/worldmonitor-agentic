@@ -43,8 +43,12 @@ services:
     # heap_max + pagecache + ~1g JVM/OS overhead (2g + 512m + ~1g = 3.5g < 4g default).
     mem_limit: ${NEO4J_MEM_LIMIT:-4g}
     environment:
+      # The neo4j SERVER gets its initial password from NEO4J_AUTH ONLY. Do NOT also set a
+      # bare NEO4J_PASSWORD: the image maps every NEO4J_<x> env var to a neo4j.conf setting,
+      # so NEO4J_PASSWORD becomes an invalid 'password' key that Neo4j 2026 strict config
+      # validation rejects -> the container crash-loops and never binds 7687. (The app
+      # CLIENT still reads NEO4J_PASSWORD from .env; only the SERVICE must not inherit it.)
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
       NEO4J_PLUGINS: '["graph-data-science"]'
       NEO4J_dbms_security_procedures_unrestricted: "gds.*"
       NEO4J_dbms_security_procedures_allowlist: "gds.*"
@@ -64,8 +68,10 @@ services:
       - neo4j-data:/data
       - neo4j-logs:/logs
     healthcheck:
+      # Password interpolated by compose at parse time (the server no longer carries a
+      # NEO4J_PASSWORD env var); it matches the NEO4J_AUTH password above.
       test:
-        ["CMD-SHELL", "cypher-shell -u neo4j -p \"$$NEO4J_PASSWORD\" 'RETURN 1' || exit 1"]
+        ["CMD-SHELL", "cypher-shell -u neo4j -p \"${NEO4J_PASSWORD}\" 'RETURN 1' || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 15

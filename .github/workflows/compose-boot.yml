@@ -1,0 +1,54 @@
+name: compose-boot
+
+# Boots the REAL deploy/compose.yaml stack on a runner and waits for the core services
+# (Postgres, Neo4j, MinIO) to pass their healthchecks, then tears down. The other CI jobs
+# use testcontainers, NOT compose, so deploy-config defects are invisible to them — e.g.
+# a bare NEO4J_PASSWORD env var that the Neo4j image maps to an invalid 'password' setting
+# which strict config-validation rejects, crash-looping the container so 7687 never binds.
+# This job catches that class of defect (ADR 0034).
+
+on:
+  push:
+    branches: [master, main, fix-neo4j-compose-auth-bootci]
+  pull_request:
+
+jobs:
+  compose-boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write a .env covering every compose variable
+        # Fill EVERY ${VAR} the compose references (required :? and defaulted :-), so a
+        # missing-var interpolation error can't masquerade as a boot failure.
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          compose = pathlib.Path("deploy/compose.yaml").read_text()
+          names = sorted(set(re.findall(r"\$\{([A-Z0-9_]+)", compose)))
+          known = {"NEO4J_PASSWORD": "ci-neo4j-password"}
+          pathlib.Path(".env").write_text(
+              "".join(f"{n}={known.get(n, 'ci-unused')}\n" for n in names)
+          )
+          print("compose vars:", ", ".join(names))
+          PY
+
+      - name: Validate compose interpolation
+        run: docker compose --env-file .env -f deploy/compose.yaml config >/dev/null
+
+      - name: Boot core services + wait for healthchecks (Neo4j must bind Bolt :7687)
+        run: |
+          docker compose --env-file .env -f deploy/compose.yaml \
+            up -d --wait --wait-timeout 300 postgres neo4j minio
+
+      - name: Status
+        run: docker compose --env-file .env -f deploy/compose.yaml ps
+
+      - name: Neo4j logs (on failure)
+        if: failure()
+        run: docker compose --env-file .env -f deploy/compose.yaml logs neo4j
+
+      - name: Tear down
+        if: always()
+        run: docker compose --env-file .env -f deploy/compose.yaml down -v
