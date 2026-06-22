@@ -19,19 +19,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Write a .env covering every compose variable
-        # Fill EVERY ${VAR} the compose references (required :? and defaulted :-), so a
-        # missing-var interpolation error can't masquerade as a boot failure.
+      - name: Write a .env for the required compose variables
+        # Provide only vars used WITHOUT a default: ${VAR:?...} (required) or bare ${VAR}.
+        # Vars with a ${VAR:-default} (e.g. NEO4J_MEM_LIMIT, heap/pagecache sizes) are left
+        # UNSET so their valid default applies — setting them to a placeholder would
+        # override a size default with an invalid value.
         run: |
           python3 - <<'PY'
           import re, pathlib
           compose = pathlib.Path("deploy/compose.yaml").read_text()
-          names = sorted(set(re.findall(r"\$\{([A-Z0-9_]+)", compose)))
+          need = set(re.findall(r"\$\{([A-Z0-9_]+):\?", compose)) | set(
+              re.findall(r"\$\{([A-Z0-9_]+)\}", compose)
+          )
           known = {"NEO4J_PASSWORD": "ci-neo4j-password"}
           pathlib.Path(".env").write_text(
-              "".join(f"{n}={known.get(n, 'ci-unused')}\n" for n in names)
+              "".join(f"{n}={known.get(n, 'ci-unused')}\n" for n in sorted(need))
           )
-          print("compose vars:", ", ".join(names))
+          print("required/bare compose vars set:", ", ".join(sorted(need)))
           PY
 
       - name: Validate compose interpolation
