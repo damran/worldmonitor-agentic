@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import fingerprints
 import pandas as pd
 from followthemoney import registry
 from splink import DuckDBAPI, Linker, SettingsCreator, block_on
@@ -42,28 +43,31 @@ class ScoredPair:
 
 
 def _name_comparison() -> dict[str, Any]:
+    # Compares the script-stable name FINGERPRINT (see `_name_fingerprint`), not the raw
+    # name — so two records of one entity that store names in different scripts still hit
+    # the exact level. jaro_winkler handles near-fingerprints (a typo / a dropped token).
     return {
-        "output_column_name": "name",
+        "output_column_name": "name_fp",
         "comparison_levels": [
             {
-                "sql_condition": '"name_l" IS NULL OR "name_r" IS NULL',
+                "sql_condition": '"name_fp_l" IS NULL OR "name_fp_r" IS NULL',
                 "is_null_level": True,
                 "label_for_charts": "null",
             },
             {
-                "sql_condition": '"name_l" = "name_r"',
+                "sql_condition": '"name_fp_l" = "name_fp_r"',
                 "label_for_charts": "exact",
                 "m_probability": 0.99,
                 "u_probability": 0.0001,
             },
             {
-                "sql_condition": 'jaro_winkler_similarity("name_l", "name_r") >= 0.92',
+                "sql_condition": 'jaro_winkler_similarity("name_fp_l", "name_fp_r") >= 0.92',
                 "label_for_charts": "jw>=.92",
                 "m_probability": 0.88,
                 "u_probability": 0.003,
             },
             {
-                "sql_condition": 'jaro_winkler_similarity("name_l", "name_r") >= 0.82',
+                "sql_condition": 'jaro_winkler_similarity("name_fp_l", "name_fp_r") >= 0.82',
                 "label_for_charts": "jw>=.82",
                 "m_probability": 0.6,
                 "u_probability": 0.03,
@@ -103,19 +107,41 @@ def _exact_comparison(column: str, *, m: float, u: float) -> dict[str, Any]:
     }
 
 
+def _name_fingerprint(entity: FtmEntity) -> str | None:
+    """Script-stable name key for matching, or ``None`` for a no-name entity.
+
+    ``entity.first("name")`` returns the SORT-FIRST of the multi-valued name, which flips
+    alphabet for bilingual records (Cyrillic vs Latin), so two records of ONE entity
+    projected different names and never matched — the multi-script ER miss (review;
+    ADR 0035). The ``fingerprints`` library (the OpenSanctions / nomenklatura ER stack,
+    already a locked dependency) transliterates to Latin, sorts tokens, and strips
+    legal-form words, so both records reduce to the SAME key — e.g. both
+    ``"ООО Легион Комплект"`` and ``"LIMITED LIABILITY COMPANY LEGION KOMPLEKT"`` →
+    ``"komplekt legion"``. Keyed off ``caption`` (FtM's deterministic best name) but
+    guarded on a real ``name`` value so a no-name entity (e.g. ``Sanction``, whose caption
+    falls back to a programme code) stays ``None`` and never matches on an empty name.
+
+    KNOWN GAP (deferred, ADR 0035): ``fingerprints`` renders abjad scripts (Arabic/Persian)
+    as lossy consonant skeletons, so it is not a reliable *sole* key for those. The robust
+    follow-up is nomenklatura ``LogicV2`` as a post-blocking re-scorer (its own ADR); it is
+    a row-wise Python matcher that does not vectorise in DuckDB, so it is out of scope here.
+    """
+    if not entity.first("name", quiet=True):
+        return None
+    fingerprint = fingerprints.generate(entity.caption)
+    return (fingerprints.remove_types(fingerprint) or None) if fingerprint else None
+
+
 def _flatten(entity: FtmEntity) -> dict[str, Any]:
     """Project an FtM entity onto the flat columns Splink compares.
 
     ``quiet=True`` so properties absent from a given schema (e.g. ``birthDate``
     on a Company) yield ``None`` rather than raising.
     """
-    # Use the actual name property only — entities with no name (e.g. Sanction)
-    # get name=None so they fall to the null level and never match on an empty name.
-    name = entity.first("name", quiet=True)
     countries = entity.get_type_values(registry.country)
     return {
         "unique_id": entity.id,
-        "name": name.lower() if name else None,
+        "name_fp": _name_fingerprint(entity),
         "country": countries[0] if countries else None,
         "birth_date": entity.first("birthDate", quiet=True),
         "wikidata_id": entity.first("wikidataId", quiet=True),
@@ -142,7 +168,7 @@ def score_pairs(
         ],
         blocking_rules_to_generate_predictions=[
             block_on("country"),
-            block_on("substr(name, 1, 4)"),
+            block_on("substr(name_fp, 1, 4)"),
             block_on("wikidata_id"),
         ],
         probability_two_random_records_match=prior,

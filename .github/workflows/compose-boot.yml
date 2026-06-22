@@ -9,7 +9,7 @@ name: compose-boot
 
 on:
   push:
-    branches: [master, main, fix-edge-materialization]
+    branches: [master, main, fix-flatten-name-projection]
   pull_request:
 
 jobs:

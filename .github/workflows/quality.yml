@@ -7,7 +7,7 @@ on:
   push:
     # Working-branch trigger so the gate runs without a PR (reviewer-gated merge to
     # master). Replace this branch entry at gate close.
-    branches: [master, main, fix-edge-materialization]
+    branches: [master, main, fix-flatten-name-projection]
   pull_request:
 
 permissions:

@@ -65,6 +65,11 @@ These need an architectural change or a gate decision; they are tracked, not fix
   Deferred.
 - **Single-writer-per-tenant (review H7 / X3)** — concurrent `resolve_pending` for one
   tenant can double-process; mitigated by the single-node lock until X3 is built.
+- **Robust multi-script name scoring (abjad gap of [0035])** — [0035] fixed the
+  cross-script ER miss with a `fingerprints` key, but `fingerprints` renders abjad
+  (Arabic/Persian) as lossy consonant skeletons, so it is not a reliable *sole* key there.
+  Follow-up: adopt nomenklatura `LogicV2` as a **post-blocking re-scoring** step (a row-wise
+  Python matcher that does not vectorise in DuckDB → its own ADR, not a `_flatten` tweak).
 
 ## Consequences
 
