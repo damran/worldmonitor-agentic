@@ -126,3 +126,45 @@ def test_no_name_entity_projects_null_fingerprint() -> None:
     assert _name_fingerprint(sanction) is None  # ...but the name-guard keeps it null
     # A named entity, by contrast, projects its script-stable key.
     assert _name_fingerprint(_org("a", [LEGION_CYR])) == "komplekt legion"
+
+
+def _named(entity_id: str, schema: str, name: str, country: str) -> FtmEntity:
+    return make_entity(
+        {
+            "id": entity_id,
+            "schema": schema,
+            "properties": {"name": [name], "country": [country], "topics": ["sanction"]},
+            "datasets": ["t"],
+        }
+    )
+
+
+def test_company_named_after_owner_does_not_merge_with_the_person() -> None:
+    """Over-merge + crash guard (real us_ofac 'Mamoun Darkazanli'): a company named after its
+    owner shares the name fingerprint with the Person ('darkazanli mamoun'), but they are
+    DISTINCT entities with NO common schema. The schema-compatibility gate drops the candidate
+    pair, so it neither over-merges nor crashes FtM's merge (which raises on Org+Person)."""
+    org = _named("o", "Organization", "MAMOUN DARKAZANLI IMPORT-EXPORT COMPANY", "de")
+    person = _named("p", "Person", "Mamoun Darkazanli", "de")
+    assert _name_fingerprint(org) == _name_fingerprint(person)  # the keys DO collide...
+    assert score_pairs([org, person]) == []  # ...but the incompatible pair is dropped
+    assert all(not c.is_merge for c in cluster_and_merge([org, person], score_pairs([org, person])))
+
+
+def test_organization_and_vessel_namesake_does_not_merge() -> None:
+    """Real us_ofac 'Yuzhmorgeologiya': an Organization and a Vessel of the same name have no
+    common schema — dropped, no over-merge, no crash."""
+    org = _named("o", "Organization", "Yuzhmorgeologiya AO", "ru")
+    vessel = _named("v", "Vessel", "YUZHMORGEOLOGIYA", "ru")
+    assert score_pairs([org, vessel]) == []
+    assert all(not c.is_merge for c in cluster_and_merge([org, vessel], score_pairs([org, vessel])))
+
+
+def test_compatible_schemas_still_merge() -> None:
+    """The gate must NOT block COMPATIBLE schemas: an Organization and a Company of the same
+    name share a common schema (Company) and must still merge (regression guard for the gate
+    being too broad)."""
+    org = _named("o", "Organization", "Acme Holdings", "us")
+    company = _named("c", "Company", "Acme Holdings", "us")
+    assert _top_probability([org, company]) >= 0.92
+    assert any(c.is_merge for c in cluster_and_merge([org, company], score_pairs([org, company])))

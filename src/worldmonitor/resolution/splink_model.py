@@ -19,7 +19,8 @@ from typing import Any
 
 import fingerprints
 import pandas as pd
-from followthemoney import registry
+from followthemoney import model, registry
+from followthemoney.exc import InvalidData
 from splink import DuckDBAPI, Linker, SettingsCreator, block_on
 
 from worldmonitor.ontology.ftm import FtmEntity
@@ -148,13 +149,33 @@ def _flatten(entity: FtmEntity) -> dict[str, Any]:
     }
 
 
+def _schema_compatible(left: FtmEntity, right: FtmEntity) -> bool:
+    """Whether two entities *could* be the same node — i.e. their schemas can merge.
+
+    Two FtM schemas merge only when one descends from the other (``Company`` + ``Organization``
+    → ``Company``); siblings with no common schema (``Organization`` + ``Person``,
+    ``Organization`` + ``Vessel``) cannot, and ``model.common_schema`` raises ``InvalidData``.
+    The name fingerprint is name-only, so a company named after its owner
+    (``"X Import-Export Company"`` and Person ``"X"``) collides on the key — gating candidate
+    pairs on schema compatibility stops that **distinct-entity over-merge** and, downstream,
+    the batch-aborting ``InvalidData`` that merging incompatible schemas would raise.
+    """
+    try:
+        model.common_schema(left.schema, right.schema)
+    except InvalidData:
+        return False
+    return True
+
+
 def score_pairs(
     entities: Sequence[FtmEntity],
     *,
     prior: float = DEFAULT_PRIOR,
     predict_threshold: float = DEFAULT_PREDICT_THRESHOLD,
 ) -> list[ScoredPair]:
-    """Block + score candidate duplicate pairs among ``entities``."""
+    """Block + score candidate duplicate pairs among ``entities`` (schema-incompatible
+    pairs — e.g. an ``Organization`` and a ``Person`` sharing a name — are dropped: they
+    are distinct nodes that cannot merge)."""
     if len(entities) < 2:
         return []
     frame = pd.DataFrame([_flatten(entity) for entity in entities])
@@ -177,11 +198,17 @@ def score_pairs(
     linker = Linker(frame, settings, db_api=DuckDBAPI())  # pyright: ignore[reportArgumentType]
     predictions = linker.inference.predict(threshold_match_probability=predict_threshold)
     result = predictions.as_pandas_dataframe()
-    return [
-        ScoredPair(
-            left_id=str(record["unique_id_l"]),
-            right_id=str(record["unique_id_r"]),
-            probability=float(record["match_probability"]),
+    by_id = {entity.id: entity for entity in entities}
+    pairs: list[ScoredPair] = []
+    for record in result.to_dict("records"):
+        left_id, right_id = str(record["unique_id_l"]), str(record["unique_id_r"])
+        if not _schema_compatible(by_id[left_id], by_id[right_id]):
+            continue  # distinct nodes (e.g. a company named after its owner) — never a match
+        pairs.append(
+            ScoredPair(
+                left_id=left_id,
+                right_id=right_id,
+                probability=float(record["match_probability"]),
+            )
         )
-        for record in result.to_dict("records")
-    ]
+    return pairs

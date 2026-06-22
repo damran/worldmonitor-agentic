@@ -21,6 +21,7 @@ dependencies = [
     "splink>=4.0",
     "duckdb>=1.0",
     "nomenklatura>=4.10",
+    "fingerprints>=1.2",
     "alembic>=1.18.4",
 ]
 

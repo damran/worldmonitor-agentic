@@ -42,13 +42,27 @@ stack) transliterates to Latin, sorts tokens, and strips legal-form words, so bo
 `jaro_winkler` comparison and `block_on("substr(name_fp, 1, 4)")`. The **0.92 merge
 threshold and the catastrophic-merge guard are unchanged.**
 
+**Schema-compatibility gate (required by the name-only key).** A name-only fingerprint
+collides a company with its **eponymous owner/vessel** — real `us_ofac_sdn` cases:
+`MAMOUN DARKAZANLI IMPORT-EXPORT COMPANY` (Organization) vs `Mamoun Darkazanli` (Person),
+`Yuzhmorgeologiya AO` (Organization) vs the vessel — both `→ "darkazanli mamoun"` /
+`"yuzhmorgeologiya"`. Those are **distinct entities that cannot merge** (FtM
+`model.common_schema` raises `InvalidData` for siblings with no common schema), and the
+unguarded merge **aborted the whole batch** before the guard could park anything. So
+`score_pairs` now drops any candidate pair whose schemas have no common schema
+(`_schema_compatible`), and `_merge_entities` skips a schema-incompatible member
+defensively (transitive clusters) instead of raising. Compatible pairs are unaffected
+(`Organization` + `Company` → `Company` still merges).
+
 Verified on real data: Legion merges (and, being sensitive, **parks**); the cross-script
 **no-shared-variant** case (one record only-Cyrillic, the other only-Latin) also merges;
 `my_aob_sanctions` "Sathiea Seelean" still merges (no regression). **Over-merge proven low
-with tests, not spot-checks:** `us_dod_chinese_milcorps` (735 entities sharing "Co., Ltd.")
-→ **0** merges; `my_aob_sanctions` (148) → exactly the **1** real pair; distinct orgs
-sharing a legal-form token or a single brand token stay below 0.92
-(`tests/unit/test_resolution_multiscript.py`).
+on the FULL flagship dataset, not spot-checks:** the full `us_ofac_sdn` (**70,822 entities**)
+runs `cluster_and_merge` without crashing; of the pairs ≥ 0.92 the only cross-schema one is
+the compatible `Organization↔Company`, and **all 41 merges park** (sensitive — none
+auto-fused); the `Org↔Person`/`Org↔Vessel` namesakes are dropped.
+`us_dod_chinese_milcorps` (735 sharing "Co., Ltd.") → **0** merges; `my_aob_sanctions`
+(148) → exactly the **1** real pair (`tests/unit/test_resolution_multiscript.py`).
 
 ## Consequence — the parking conclusion changes (real sensitive park now exists)
 
@@ -69,3 +83,14 @@ robust follow-up is nomenklatura **`LogicV2`** (the OpenSanctions production mat
 **post-blocking re-scoring step** — it is a row-wise Python matcher that does not vectorise
 in DuckDB/Splink, so it is a larger change owed **its own ADR**, not this gate. Noted at
 `_name_fingerprint` and in `0032`'s deferred list.
+
+**Identifier-aware discrimination (pre-existing, surfaced by this fix).** The model scores
+on `name_fp`/country/birthDate/wikidata and **ignores `registrationNumber`/`taxNumber`**, so
+two genuinely-distinct legal entities that share a trade name + country score 0.9825 — the
+real Legion pair is itself two distinct OFAC listings (different `registrationNumber`
+1177746464378 / 5177746188219) sharing the name "Legion Komplekt". A *sensitive* such pair
+**parks** (the guard catches it — the correct outcome, a human rejects it); a *non-sensitive*
+one would auto-merge. This is pre-existing (the fix only makes more name-matches reach the
+comparison), but the follow-up is to add `registrationNumber`/`taxNumber` as a
+**distinguishing** comparison level so a clashing id pushes a same-trade-name pair below the
+threshold. Tracked for the comprehensive ER audit.

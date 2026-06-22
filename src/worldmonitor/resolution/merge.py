@@ -12,17 +12,21 @@ canonical entity. nomenklatura ships no type stubs, so it is imported only here.
 # pyright: reportUnknownParameterType=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 import nomenklatura as nk
+from followthemoney.exc import InvalidData
 from nomenklatura import Judgement
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
 from worldmonitor.resolution.splink_model import ScoredPair
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MERGE_THRESHOLD = 0.92
 
@@ -156,7 +160,20 @@ def _merge_entities(
     base = by_id[member_ids[0]]
     merged = make_entity({**base.to_dict(), "id": canonical_id})
     for member_id in member_ids:
-        merged.merge(by_id[member_id])
+        try:
+            merged.merge(by_id[member_id])
+        except InvalidData:
+            # Defence-in-depth: score_pairs already drops schema-incompatible candidate
+            # pairs, but a TRANSITIVE cluster (A~B and B~C compatible, A~C not) could still
+            # gather members with no common schema. FtM merge raises InvalidData on those —
+            # skip the offending member (logged for audit) rather than abort the whole batch.
+            logger.warning(
+                "merge: skipped schema-incompatible member %s (%s) in cluster %s (%s)",
+                member_id,
+                by_id[member_id].schema.name,
+                canonical_id,
+                merged.schema.name,
+            )
     return merged
 
 
