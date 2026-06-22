@@ -33,8 +33,15 @@ services:
 
   # --- Neo4j 2026.x + Graph Data Science (system of record) ---
   neo4j:
+    # Pinned tag (do NOT float): this exact neo4j:2026.05.0-community + GDS auto-download
+    # pair is CI-proven — tests/integration/test_graph_gds.py runs green against it and
+    # tests/conftest.py uses the same tag. The GDS jar is keyed to the EXACT server
+    # version, so bumping the tag without re-validating GDS can break the boot.
     image: neo4j:2026.05.0-community
     restart: unless-stopped
+    # Cap container memory so the JVM stays inside the cgroup. Keep this ABOVE
+    # heap_max + pagecache + ~1g JVM/OS overhead (2g + 512m + ~1g = 3.5g < 4g default).
+    mem_limit: ${NEO4J_MEM_LIMIT:-4g}
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD}
@@ -42,6 +49,14 @@ services:
       NEO4J_dbms_security_procedures_unrestricted: "gds.*"
       NEO4J_dbms_security_procedures_allowlist: "gds.*"
       NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-512m}
+      # BOUND the JVM heap. Without this Neo4j auto-sizes max heap from visible RAM
+      # (~25%); under WSL2 (which reports a large fraction of host RAM) that over-commits
+      # and the kernel OOM-killer reaps the server before it binds 7687 — which presents
+      # exactly as "connection refused on 7687". Laptop-safe defaults; bump via env on a
+      # big host (see .env.example). NOTE the DOUBLED underscore: Neo4j escapes a literal
+      # "_" in a setting name as "__" (server.memory.heap.max_size -> ..._heap_max__size).
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL:-1g}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-2g}
     ports:
       - "7474:7474" # HTTP / Browser
       - "7687:7687" # Bolt

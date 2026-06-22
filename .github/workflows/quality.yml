@@ -7,7 +7,7 @@ on:
   push:
     # Working-branch trigger so the gate runs without a PR (reviewer-gated merge to
     # master). Replace this branch entry at gate close.
-    branches: [master, main, ws5-cheap-hardening]
+    branches: [master, main, fix-neo4j-compose-gds-heap]
   pull_request:
 
 permissions:
