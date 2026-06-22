@@ -9,7 +9,7 @@ name: compose-boot
 
 on:
   push:
-    branches: [master, main, docs-smoke-run-report]
+    branches: [master, main, richer-smoke-seed]
   pull_request:
 
 jobs:

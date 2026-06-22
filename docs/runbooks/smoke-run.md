@@ -35,6 +35,10 @@ export MERGE_GUARD_MODE="block"                     # default already; set expli
 export INGEST_CADENCE_SECONDS=3600                  # re-ingest each connector hourly
 export RESOLVE_CADENCE_SECONDS=120                  # resolve the queue every 2 min
 export DRIVER_TICK_SECONDS=15
+# Resolve the whole richer seed (~2.7k entities) in ONE batch so the OFAC collision
+# pair lands together — a merge only forms WITHIN a single batch (batch-first, ADR 0026),
+# so a value below the seed size could split the pair and silently skip the park.
+export RESOLVE_BATCH_SIZE=5000
 
 # Create the schema (Alembic, ADR 0030) and the landing bucket:
 python -m worldmonitor.db.migrate                   # alembic upgrade head
@@ -45,14 +49,15 @@ Confirm egress: the build env saw `data.opensanctions.org` return **403** — ve
 *your* host that both sources are reachable before a long run:
 
 ```bash
-curl -sI https://data.opensanctions.org/datasets/latest/sanctions/entities.ftm.json | head -1
-curl -sI https://download.geonames.org/export/dump/AD.zip | head -1
+curl -sI https://data.opensanctions.org/datasets/latest/us_dod_chinese_milcorps/entities.ftm.json | head -1
+curl -sI https://data.opensanctions.org/datasets/latest/us_ofac_sdn/entities.ftm.json | head -1
 ```
 
 ## 2. Seed connector instances (enabled)
 
-Configs are Fernet-encrypted at rest (ADR: decrypt-at-use). Seed two **enabled**
-instances — start with small datasets to validate, then point at larger ones for volume:
+Configs are Fernet-encrypted at rest (ADR: decrypt-at-use). This **richer seed** exercises
+the **edge** and **parking** paths on real data — the minimal `ie_unlawful_organizations`
++ Andorra seed proved only the node path (see `smoke-run-report-2026-06-22.md`):
 
 ```python
 # python - <<'PY'   (run with the env above exported)
@@ -68,11 +73,18 @@ sessions = session_factory(engine_from_settings(settings))
 
 TENANT = "smoke"
 instances = [
-    # OpenSanctions: 'sanctions' / 'peps' give heavy PEP/sanctioned data -> block-mode
-    # parking fires. Start with the tiny 'ie_unlawful_organizations' to validate.
-    ("opensanctions", {"dataset": "ie_unlawful_organizations"}),
-    # GeoNames: a small country (AD=Andorra) to validate; a big one (e.g. US) for volume.
-    ("geonames", {"country": "AD"}),
+    # EDGES (+ G3): DoD "Chinese Military Companies" — 208 Company + 130 Ownership edges
+    # (every endpoint present -> real Company-OWNS->Company relationships). NO 'limit':
+    # its last edge endpoint sits at stream position ~733/735, so any cap orphans edges.
+    # It also carries 397 Sanction entities whose Sanction.entity links are DROPPED by the
+    # known G3 abstract-Thing-range limit (surface in the report; do NOT fix G3 here).
+    ("opensanctions", {"dataset": "us_dod_chinese_milcorps"}),
+    # PARKING: OFAC SDN, first 2000 entities — contains the real name-collision pair
+    # "OOO Legion Komplekt" (two DISTINCT sanctioned ids, identical name + country=ru, no
+    # birthDate) that Splink fuses at 0.9825 >= 0.92 -> a sensitive merge that block mode
+    # PARKS. (limit=2000 is required to bound the 70k-entity dataset to a smoke size while
+    # still capturing both members of the pair, which sit within the first ~1950 lines.)
+    ("opensanctions", {"dataset": "us_ofac_sdn", "limit": 2000}),
 ]
 with sessions() as s:
     for connector_id, config in instances:
@@ -86,7 +98,10 @@ print("seeded", len(instances), "instances for tenant", TENANT)
 ```
 
 > The driver **refuses `ACTIVE`-capability** connectors visibly (a `task_run` error) —
-> both of these are passive `EXTERNAL_IMPORT`, so they run.
+> both are passive `EXTERNAL_IMPORT`, so they run.
+> The Andorra/GeoNames node baseline is intentionally dropped here: 3000 same-country
+> addresses in one batch bloat Splink's blocking group and would slow the focused run;
+> re-add `("geonames", {"country": "AD"})` only if you want the multi-source node breadth.
 
 ## 3. Launch the driver
 
@@ -131,10 +146,20 @@ python -m worldmonitor.review reject  --tenant smoke --canonical NK-... --approv
 **Success:**
 - `task_ingest_ok` increments per connector; `task_*_error` stays 0.
 - `queue_pending` drains to 0 within a resolve cadence after each ingest.
-- `graph_nodes`/`graph_edges` grow then plateau on re-ingest (idempotent MERGE — no
-  unbounded duplication within a run).
-- For OpenSanctions PEP/sanctioned data, `parked_merges` > 0 — block mode is parking
-  sensitive merges (expected and correct); sign-off `approve`/`reject` works.
+- `graph_nodes` grow then plateau on re-ingest (idempotent MERGE — no unbounded
+  duplication within a run).
+- **`graph_edges >= 130`** — the DoD `Ownership` edges materialize as real
+  `Company-OWNS->Company` relationships. This is the edge path on real data; `0` would mean
+  edge materialization is not firing (the minimal seed produced `0` because it had no
+  edge-schema entities).
+- **`parked_merges >= 1`** — block mode parks the OFAC "OOO Legion Komplekt" collision (a
+  sensitive merge); `python -m worldmonitor.review list --tenant smoke` shows it, and
+  `approve`/`reject` works. (The minimal seed produced `0`; this is the path it didn't cover.)
+- **G3 (expected, NOT to fix here):** the ~397 DoD `Sanction.entity` links + the OFAC
+  sanctions do **not** become graph edges — they hit the documented abstract-`Thing`-range
+  drop (ADR 0023, `ARCHITECTURE_REVIEW.md` G3). Count them (Sanction entities written as
+  nodes with no outgoing edge) and note it in the report; **do not fix G3** — that is a
+  separate decision.
 - `dead_letter` stays at 0 (or a small, explained count).
 - No `task_*_running` row stuck for longer than a run should take.
 
@@ -161,12 +186,21 @@ python -m worldmonitor.review reject  --tenant smoke --canonical NK-... --approv
 
 ```markdown
 # Smoke-run report — <date>, <host>
-- Datasets: opensanctions=<dataset>, geonames=<country>; duration: <hh:mm>; cadences: <...>
-- Egress check: opensanctions=<code>, geonames=<code>
+- Seed: us_dod_chinese_milcorps (edges) + us_ofac_sdn limit=2000 (parking);
+  duration: <hh:mm>; cadences: <...>; RESOLVE_BATCH_SIZE=<n>
+- Egress check: us_dod_chinese_milcorps=<code>, us_ofac_sdn=<code>
 
 ## Volumes
 - ingested (records landed): <n>   resolved (clusters/promoted): <n>
 - graph: nodes=<n> edges=<n>   parked_merges=<n>   dead_letter=<n>
+
+## Path coverage (the point of the richer run)
+- EDGES: graph_edges=<n> (expect >= 130 Company-OWNS->Company); `review`-confirmed a sample
+  Ownership lands on both Company nodes? <yes/no>
+- PARKING: parked_merges=<n> (expect >= 1); `review list --tenant smoke` shows the OFAC
+  "OOO Legion Komplekt" pair? <yes/no>; approve/reject exercised? <yes/no>
+- G3 (surface, do NOT fix): Sanction entities written=<n>, Sanction.entity edges in graph=0
+  (the documented Thing-range drop on real data)
 
 ## Driver behavior over time
 - RSS: start=<KB> end=<KB> trend=<flat/growing>
