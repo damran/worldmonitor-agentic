@@ -81,14 +81,17 @@ class MergeAudit(Base):
 
 
 class IngestDeadLetter(Base):
-    """A record that could not be landed or mapped during ingest (the dead-letter trail).
+    """A record quarantined during ingest OR resolution (the dead-letter trail).
 
-    ``run_ingest`` never lets one bad record abort the whole run (audit gap G8): a
-    failure is recorded here and ingest continues. ``stage`` is ``"land"`` (the raw
-    bytes could not be written to the landing zone — ``source_record`` is null) or
-    ``"map"`` (the raw landed but mapping to FtM raised — ``source_record`` points at
-    the landed bytes, replayable). ``error`` is a bounded exception summary. Every
-    row carries ``tenant_id`` (the GDPR/audit invariant holds for failures too).
+    No single bad record may abort a run (audit gaps G8, B-2): the failure is recorded
+    here and processing continues. ``stage`` is one of: ``"land"`` (raw bytes could not be
+    written to the landing zone — ``source_record`` is null) / ``"map"`` (the raw landed but
+    mapping to FtM raised — ``source_record`` points at the landed bytes); or, from
+    resolution (ADR 0038), ``"resolve-row"`` (a row ``make_entity`` could not parse),
+    ``"resolve-batch"`` (a window that could not be scored/clustered), ``"resolve-write"``
+    (a merged canonical that failed FtM validation), or ``"resolve-noid"`` (an unclustered /
+    id-less row). ``error`` is a bounded exception summary. Every row carries ``tenant_id``
+    (the GDPR/audit invariant holds for failures too); all quarantines are replayable.
     """
 
     __tablename__ = "ingest_dead_letter"

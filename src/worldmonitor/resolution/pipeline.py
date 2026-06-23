@@ -24,6 +24,7 @@ The guard *evaluation* (``resolution/review.py``) is unconditional; only the
 from __future__ import annotations
 
 import logging
+import uuid
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -31,10 +32,11 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from worldmonitor.db.models import ErQueueItem, ResolverJudgement
+from worldmonitor.db.models import ErQueueItem, IngestDeadLetter, ResolverJudgement
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
+from worldmonitor.ontology.validation import validate_or_raise
 from worldmonitor.resolution.audit import record_merge, record_merge_alert
 from worldmonitor.resolution.merge import (
     DEFAULT_MERGE_THRESHOLD,
@@ -48,6 +50,9 @@ from worldmonitor.resolution.splink_model import score_pairs
 from worldmonitor.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+# Bounded exception summary stored on a dead-letter row.
+_ERROR_SUMMARY_MAX = 2000
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +182,43 @@ def _approved_groups(judgements: Sequence[StoredJudgement]) -> list[frozenset[st
     return [frozenset(members) for members in groups.values()]
 
 
+def _summarize(exc: Exception) -> str:
+    """A bounded one-line summary of an exception for a dead-letter row."""
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _quarantine(session: Session, items: Sequence[ErQueueItem], *, stage: str, reason: str) -> None:
+    """Mark queue rows ``invalid`` and record a dead-letter (audit B-2, ADR 0038).
+
+    Containment for a poison input at any resolution stage: the offending rows leave the
+    ``pending`` set (so the bounded drain always terminates) and are recorded in
+    ``ingest_dead_letter`` with their ``source_record`` — replayable, never silently lost —
+    mirroring the ingest land/map dead-letter pattern. A poison row/batch must never wedge a
+    tenant's queue by re-loading and re-failing forever.
+    """
+    summary = reason[:_ERROR_SUMMARY_MAX]
+    for item in items:
+        item.status = "invalid"
+        session.add(
+            IngestDeadLetter(
+                id=str(uuid.uuid4()),
+                tenant_id=item.tenant_id,
+                connector_id=item.connector_id,
+                source_key=item.entity_id or item.source_record or item.id,
+                source_record=item.source_record,
+                stage=stage,
+                error=summary,
+            )
+        )
+    if items:
+        logger.warning(
+            "resolve: quarantined %d ER-queue row(s) at stage '%s' (invalid + dead-letter): %s",
+            len(items),
+            stage,
+            summary[:200],
+        )
+
+
 def _resolve_batch(
     session: Session,
     neo4j: Neo4jClient,
@@ -191,21 +233,48 @@ def _resolve_batch(
     """Resolve one bounded batch of queue ``items`` (the caller commits).
 
     Scores + clusters the batch, applies the catastrophic-merge guard, records the
-    audit/alert trail, rewrites referents to canonical ids (G2, ADR 0025), and
-    writes the auto-promoted canonical entities. Every queue row in the batch is
-    transitioned out of ``pending`` — all rows sharing one FtM id move together —
-    so a drained batch can never be re-loaded by the outer loop.
-    """
-    items_by_entity_id: dict[str | None, list[ErQueueItem]] = defaultdict(list)
-    for item in items:
-        items_by_entity_id[item.raw_entity.get("id")].append(item)
-    entities = [make_entity(item.raw_entity) for item in items]
-    by_id: dict[str | None, FtmEntity] = {entity.id: entity for entity in entities}
+    audit/alert trail, rewrites referents to canonical ids (G2, ADR 0025), and writes the
+    auto-promoted canonical entities. Every queue row leaves ``pending`` — all rows sharing
+    one FtM id move together — so a drained batch can never be re-loaded by the outer loop.
 
-    pairs = score_pairs(entities)
-    clusters = cluster_and_merge(
-        entities, pairs, merge_threshold=merge_threshold, judgements=judgements
-    )
+    **Every stage that can raise on bad input is isolated (audit B-2, ADR 0038)** so a single
+    poison input never aborts the batch and wedges the tenant's drain. A bad ROW is quarantined
+    individually (construction); an unscoreable/unclusterable BATCH is quarantined as a set;
+    an invalid merged entity is quarantined before the write. Quarantine = status ``invalid`` +
+    a dead-letter (replayable). A genuine write/infra failure is left to propagate so the driver
+    retries it idempotently (deterministic canonical id, ADR 0036) — only *poison input* is
+    quarantined, not a transient outage.
+    """
+    # Stage 1 — construct per row. A row whose raw_entity cannot be parsed into an FtM entity
+    # is quarantined individually; the good rows proceed.
+    items_by_entity_id: dict[str | None, list[ErQueueItem]] = defaultdict(list)
+    entities: list[FtmEntity] = []
+    for item in items:
+        try:
+            entity = make_entity(item.raw_entity)
+        except Exception as exc:  # bad/unknown schema, malformed raw_entity, ...
+            _quarantine(session, [item], stage="resolve-row", reason=_summarize(exc))
+            continue
+        entities.append(entity)
+        items_by_entity_id[entity.id].append(item)
+
+    # Stage 2 — score + cluster the constructed window. A batch that cannot be scored or
+    # clustered as a whole (e.g. an all-no-name window that trips Splink's name blocking) is
+    # quarantined as a set so the drain still terminates. Nothing has been written or audited
+    # yet, so there is no partial state to undo.
+    try:
+        pairs = score_pairs(entities)
+        clusters = cluster_and_merge(
+            entities, pairs, merge_threshold=merge_threshold, judgements=judgements
+        )
+    except Exception as exc:
+        constructed = [item for rows in items_by_entity_id.values() for item in rows]
+        _quarantine(session, constructed, stage="resolve-batch", reason=_summarize(exc))
+        return ResolveStats(
+            pending=len(items), clusters=0, promoted=0, review=0, alerts=0, batches=1
+        )
+
+    by_id: dict[str | None, FtmEntity] = {entity.id: entity for entity in entities}
     # Connected components of human-APPROVED (positive) pairs — each is exactly one
     # human-reviewed merge (ADR 0031). A flagged cluster is exempt from the guard ONLY
     # when ALL its members fall inside a SINGLE approved group: a new member (sensitive or
@@ -237,6 +306,24 @@ def _resolve_batch(
             review += 1
             continue
 
+        # This cluster WILL be written (auto-promote, or alert-mode flagged). Build the canonical
+        # entity (enrich runs only here — never for a parked cluster) and Stage 3 — write-stage
+        # poison guard: a merged canonical that is not a valid FtM entity is quarantined BEFORE
+        # anything is recorded, so an invalid entity cannot abort the batch's write OR leave a
+        # spurious audit/alert row. (A genuine write/infra failure in write_entities below is left
+        # to propagate so the driver retries it idempotently — ADR 0036; same class as enrich.)
+        entity = enrich(cluster.entity) if enrich is not None else cluster.entity
+        try:
+            validate_or_raise(entity.to_dict())
+        except Exception as exc:
+            _quarantine(
+                session,
+                [it for mid in cluster.member_ids for it in items_by_entity_id.get(mid, [])],
+                stage="resolve-write",
+                reason=_summarize(exc),
+            )
+            continue
+
         # mode="alert": the guard still flagged it, but the build phase proceeds —
         # write the merge and record a durable, auditable merge_alerts row.
         if flagged:
@@ -252,27 +339,26 @@ def _resolve_batch(
 
         record_merge(session, cluster, tenant_id=tenant_id, decision="merged", reason=reason)
         _set_status(cluster.member_ids, "resolved")
-        entity = enrich(cluster.entity) if enrich is not None else cluster.entity
         promoted_entities.append(entity)
         promoted_clusters.append(cluster)
         promoted += 1
 
-    # Safety sweep: cluster_and_merge drops any entity with a missing / None FtM id,
-    # so the queue rows carrying it get no status above and would be re-loaded by the
-    # bounded-drain loop forever. Quarantine them as "invalid" so the loop always makes
-    # progress (never fire-and-forget — log what was skipped).
+    # Safety sweep: any constructed row whose id never clustered (a missing/None FtM id, or an
+    # entity dropped during clustering) gets no status above and would be re-loaded by the drain
+    # forever — quarantine it (invalid + dead-letter) so the loop always makes progress.
     clustered_ids = {member_id for c in clusters for member_id in c.member_ids}
-    skipped = 0
-    for entity_id, rows in items_by_entity_id.items():
-        if entity_id not in clustered_ids:
-            for row in rows:
-                row.status = "invalid"
-            skipped += len(rows)
-    if skipped:
-        logger.warning(
-            "resolve_pending: quarantined %d ER-queue row(s) with an unusable FtM id as "
-            "'invalid' (unresolvable; kept the bounded-drain loop terminating)",
-            skipped,
+    leftover = [
+        item
+        for entity_id, rows in items_by_entity_id.items()
+        if entity_id not in clustered_ids
+        for item in rows
+    ]
+    if leftover:
+        _quarantine(
+            session,
+            leftover,
+            stage="resolve-noid",
+            reason="unclustered: missing/None FtM id or dropped during clustering",
         )
 
     if promoted_entities:
