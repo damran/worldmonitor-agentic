@@ -115,6 +115,14 @@ def cluster_and_merge(
     precedence over Splink: a Splink pair that a judgement already decided is skipped
     (the human decision wins), so a rejected cluster never re-merges and an approved
     one always does — neither re-parks on a later batch.
+
+    A negative judgement is enforced **transitively** (H-1, ADR 0037): a Splink positive
+    that would connect two entities across a stored negative (directly, or via a bridging
+    record that joins their components) is suppressed, so a rejected pair can never be
+    silently re-fused through a third record. Positives are applied strongest-first so the
+    bridging record lands on its highest-confidence side. The reject holds only while the
+    negative judgement exists — a later approve (positive) of the pair reverses it (a
+    positive connection is reported before the negative is consulted), so it is not permanent.
     """
     by_id = {entity.id: entity for entity in entities if entity.id is not None}
     resolver = _ephemeral_resolver()
@@ -137,7 +145,9 @@ def cluster_and_merge(
                 resolver.decide(judgement.left_id, judgement.right_id, verdict, user="signoff")
                 decided_pairs.add(frozenset((judgement.left_id, judgement.right_id)))
                 judged_ids.update((judgement.left_id, judgement.right_id))
-        for pair in pairs:
+        # Apply Splink positives strongest-first so that when a negative judgement breaks
+        # a chain (H-1), the bridging record joins its HIGHEST-confidence side deterministically.
+        for pair in sorted(pairs, key=lambda p: p.probability, reverse=True):
             key = frozenset((pair.left_id, pair.right_id))
             if key in decided_pairs:
                 continue  # a human sign-off already decided this pair — never override it
@@ -146,6 +156,23 @@ def cluster_and_merge(
                 and pair.left_id in by_id
                 and pair.right_id in by_id
             ):
+                # H-1 (ADR 0037): a human NEGATIVE judgement forbids co-clustering its pair —
+                # even TRANSITIVELY. nomenklatura's get_judgement is component-aware (it reports
+                # NEGATIVE when a negative edge exists between the two ids' positive-connected
+                # components), so skipping a positive it flags suppresses a bridging link that
+                # would otherwise re-fuse a rejected pair via a third record. Only the
+                # reject-crossing link is dropped; the other (valid) links still merge. Logged
+                # so this enforcement is observable (it removes a previously-silent override).
+                if resolver.get_judgement(pair.left_id, pair.right_id) == Judgement.NEGATIVE:
+                    logger.warning(
+                        "resolution: suppressed Splink merge %s~%s (score %.3f) — a human "
+                        "negative judgement forbids co-clustering these entities, directly or "
+                        "transitively (H-1, ADR 0037)",
+                        pair.left_id,
+                        pair.right_id,
+                        pair.probability,
+                    )
+                    continue
                 resolver.decide(
                     pair.left_id,
                     pair.right_id,
