@@ -1,8 +1,11 @@
 """CLI for reviewing parked sensitive/oversized merges (ADR 0031).
 
     python -m worldmonitor.review list    --tenant T
-    python -m worldmonitor.review approve --tenant T --canonical NK-... --approver alice
-    python -m worldmonitor.review reject  --tenant T --canonical NK-... --approver alice
+    python -m worldmonitor.review approve --tenant T --canonical wmc-... --approver alice
+    python -m worldmonitor.review reject  --tenant T --canonical wmc-... --approver alice
+
+(``--canonical`` is the parked merge's canonical id from ``list``; a merge's id is the
+deterministic ``wmc-`` content id, ADR 0036.)
 
 ``--approver`` is the operator identity (a string in v0; Zitadel-backed in Phase 2);
 ``--reason`` is optional. The API/UI surface is Phase 2; this is the v0 interface.

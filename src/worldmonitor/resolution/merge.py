@@ -12,6 +12,7 @@ canonical entity. nomenklatura ships no type stubs, so it is imported only here.
 # pyright: reportUnknownParameterType=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections import defaultdict
 from collections.abc import Sequence
@@ -29,6 +30,31 @@ from worldmonitor.resolution.splink_model import ScoredPair
 logger = logging.getLogger(__name__)
 
 DEFAULT_MERGE_THRESHOLD = 0.92
+
+# A MERGED cluster's canonical id is content-addressed: a deterministic function of its
+# sorted member ids (B-1, ADR 0036). nomenklatura still computes the CLUSTERING (transitive
+# positive judgements); only the *final* id is derived here, instead of nomenklatura's random
+# ``NK-<shortuuid>``. This makes a crash+retry idempotent: re-resolving the same member set
+# re-derives the SAME id, so the tenant-scoped graph MERGE converges on one node rather than
+# minting a duplicate/orphan. The id is intentionally NOT globally unique — every node and row
+# is keyed by ``(tenant_id, id)`` (the writer's composite MERGE key), so an identical member
+# set in two tenants still yields two distinct nodes (G4 preserved). SHA-256 makes an accidental
+# collision between genuinely distinct member sets infeasible; a singleton keeps its own id so
+# its node id and inbound edges are unchanged.
+_CANONICAL_ID_PREFIX = "wmc-"
+
+
+def _canonical_id(member_ids: tuple[str, ...]) -> str:
+    """Deterministic canonical id for a cluster (stable under the same membership).
+
+    A singleton keeps its own id; a real merge is content-addressed by the SHA-256 of its
+    sorted member ids (order-independent), so distinct clusters get distinct ids and a retry
+    of the same cluster re-derives the same id.
+    """
+    if len(member_ids) == 1:
+        return member_ids[0]
+    digest = hashlib.sha256("\x00".join(sorted(member_ids)).encode("utf-8")).hexdigest()
+    return f"{_CANONICAL_ID_PREFIX}{digest[:40]}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,8 +166,12 @@ def cluster_and_merge(
         raise
 
     clusters: list[ResolvedCluster] = []
-    for canonical_id, members in groups.items():
+    for members in groups.values():
         member_ids = tuple(sorted(members))
+        # B-1 (ADR 0036): derive the canonical id deterministically from the member set,
+        # not from nomenklatura's random mint (the grouping key above is discarded), so a
+        # crash+retry re-resolves to the SAME id and the graph MERGE converges.
+        canonical_id = _canonical_id(member_ids)
         clusters.append(
             ResolvedCluster(
                 canonical_id=canonical_id,

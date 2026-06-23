@@ -93,9 +93,13 @@ def test_resolver_is_isolated_per_batch_no_cross_tenant_leak() -> None:
     ]
     second_merge = next(c for c in cluster_and_merge(second, score_pairs(second)) if c.is_merge)
 
-    assert second_merge.canonical_id != first_canonical, (
-        "second batch reused the first's canonical => shared resolver ledger (G4 leak)"
-    )
+    # The real isolation proof is MEMBERSHIP: a shared resolver ledger would fuse c2 into the
+    # second batch's cluster ({c1,c2,c3}). Canonical ids are now content-addressed (ADR 0036),
+    # so the id-inequality below follows from the differing membership — it corroborates, but
+    # membership is what actually catches a leak.
     assert set(second_merge.member_ids) == {"c1", "c3"}, (
-        "second batch must contain only its own ids"
+        "second batch must contain only its own ids — a shared ledger would fuse in c2 (G4 leak)"
+    )
+    assert second_merge.canonical_id != first_canonical, (
+        "distinct membership => distinct content-addressed id (corroborates isolation)"
     )
