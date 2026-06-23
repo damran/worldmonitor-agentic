@@ -50,35 +50,44 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
     engine = engine_from_settings(settings)
     sessions = session_factory(engine)
+    neo4j = Neo4jClient.connect(
+        uri=settings.neo4j_uri, user=settings.neo4j_user, password=settings.neo4j_password
+    )
     try:
         if args.command == "list":
+            # Pass neo4j so a half-committed sign-off (graph written, audit still pending —
+            # the B-1 crash window) is surfaced as recoverable rather than silently stuck.
             with sessions() as session:
-                parked = signoff.list_parked(session, args.tenant)
+                parked = signoff.list_parked(session, args.tenant, neo4j)
             for merge in parked:
                 logger.info(
-                    "%s  reason=%s  members=%s  score=%.3f",
+                    "%s  reason=%s  members=%s  score=%.3f%s",
                     merge.canonical_id,
                     merge.reason,
                     list(merge.source_ids),
                     merge.score,
+                    "  [GRAPH-WRITTEN: incomplete sign-off — re-run approve/reject to recover]"
+                    if merge.graph_written
+                    else "",
                 )
             logger.info("%d parked merge(s)", len(parked))
             return 0
 
-        neo4j = Neo4jClient.connect(
-            uri=settings.neo4j_uri, user=settings.neo4j_user, password=settings.neo4j_password
-        )
-        try:
-            decide = signoff.approve if args.command == "approve" else signoff.reject
-            with sessions() as session:
-                result = decide(
-                    session,
-                    neo4j,
-                    tenant_id=args.tenant,
-                    canonical_id=args.canonical,
-                    approver=args.approver,
-                    reason=args.reason,
-                )
+        decide = signoff.approve if args.command == "approve" else signoff.reject
+        with sessions() as session:
+            result = decide(
+                session,
+                neo4j,
+                tenant_id=args.tenant,
+                canonical_id=args.canonical,
+                approver=args.approver,
+                reason=args.reason,
+            )
+        if result.already_applied:
+            logger.info(
+                "%s %s: already applied (idempotent no-op)", result.decision, result.canonical_id
+            )
+        else:
             logger.info(
                 "%s %s: wrote %d entity(ies), %d edge(s)",
                 result.decision,
@@ -86,10 +95,9 @@ def main(argv: list[str] | None = None) -> int:
                 result.entities_written,
                 result.edges_written,
             )
-        finally:
-            neo4j.close()
         return 0
     finally:
+        neo4j.close()
         engine.dispose()
 
 

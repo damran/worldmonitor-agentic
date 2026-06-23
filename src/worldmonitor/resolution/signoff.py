@@ -1,4 +1,4 @@
-"""Human sign-off on parked (sensitive / oversized) merges (ADR 0031).
+"""Human sign-off on parked (sensitive / oversized) merges (ADR 0031, 0036).
 
 Under ``MERGE_GUARD_MODE="block"`` the catastrophic-merge guard parks a flagged
 cluster as ``pending_review`` and never writes it (ADR 0024 → 0031). An operator
@@ -8,6 +8,18 @@ entities). Both persist a durable, **tenant-scoped** resolver judgement (positiv
 negative) so future batches respect the decision and the cluster never re-parks, and
 both record a ``sign_off`` audit row — the human-sign-off trail CLAUDE.md requires for
 changes affecting a real person.
+
+**Idempotent / crash-recoverable (B-1 Part 2, ADR 0036).** Like the resolve pipeline,
+sign-off writes Neo4j *before* it commits Postgres, so a crash in that window leaves the
+graph written while the audit row stays ``pending_review`` (Postgres rolled back). That
+half-committed state is now (a) **visible** — ``list_parked(..., neo4j=...)`` flags it via
+``graph_written`` — and (b) **recoverable** — re-running the SAME ``approve``/``reject``
+converges to one consistent outcome: the graph write is idempotent (the canonical id is
+deterministic, ADR 0036 Part 1; members keep their own ids), judgements insert
+ON-CONFLICT-DO-NOTHING, the audit row is mutated (never duplicated), and re-running an
+already-completed sign-off is a no-op (``already_applied``). Approving an already-rejected
+merge (or vice-versa) is refused, as is rejecting a merge whose canonical node a prior
+approve already wrote (which would orphan that node — there is no delete path; append-only).
 
 v0 is CLI-driven (``python -m worldmonitor.review``); the API/UI surface is Phase 2.
 Inbound cross-references (edges pointing AT the approved entity) are NOT restored here
@@ -19,9 +31,11 @@ from __future__ import annotations
 
 import itertools
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from worldmonitor.db.models import ErQueueItem, MergeAudit, ResolverJudgement, SignOff
@@ -43,6 +57,11 @@ class ParkedMerge:
     source_ids: tuple[str, ...]
     score: float
     reason: str
+    graph_written: bool = False
+    """True if the graph already holds a node for the canonical id or any member — the
+    signature of a sign-off whose graph write committed but whose Postgres audit did not
+    (the B-1 cross-store crash window). Only populated when ``list_parked`` is given a
+    ``neo4j`` client; ``False`` otherwise."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,28 +72,73 @@ class SignOffResult:
     decision: str  # "approved" | "rejected"
     entities_written: int
     edges_written: int
+    already_applied: bool = False
+    """True when the decision was already committed (an idempotent re-run / no-op)."""
 
 
-def list_parked(session: Session, tenant_id: str) -> list[ParkedMerge]:
-    """All parked (``pending_review``) merges awaiting sign-off for ``tenant_id``."""
-    rows = session.execute(
-        select(MergeAudit).where(
-            MergeAudit.tenant_id == tenant_id, MergeAudit.decision == "pending_review"
+def _node_exists(neo4j: Neo4jClient, tenant_id: str, node_id: str) -> bool:
+    rows = neo4j.execute_read(
+        "MATCH (n {tenant_id: $t, id: $id}) RETURN count(n) AS n", t=tenant_id, id=node_id
+    )
+    return bool(rows and rows[0]["n"])
+
+
+def _any_node_exists(neo4j: Neo4jClient, tenant_id: str, ids: Sequence[str]) -> bool:
+    rows = neo4j.execute_read(
+        "MATCH (n {tenant_id: $t}) WHERE n.id IN $ids RETURN count(n) AS n",
+        t=tenant_id,
+        ids=list(ids),
+    )
+    return bool(rows and rows[0]["n"])
+
+
+def list_parked(
+    session: Session, tenant_id: str, neo4j: Neo4jClient | None = None
+) -> list[ParkedMerge]:
+    """All parked (``pending_review``) merges awaiting sign-off for ``tenant_id``.
+
+    When ``neo4j`` is given, each merge is annotated with ``graph_written`` — True if a
+    node for the canonical id OR any member already exists in the graph. A parked merge is
+    never written during resolution (block mode), so a present node means a sign-off's graph
+    write committed but its Postgres audit did not (the B-1 crash window): the half-committed
+    state is surfaced here so an operator can re-run the SAME approve/reject to recover it,
+    rather than it sitting silently stuck.
+    """
+    rows = list(
+        session.execute(
+            select(MergeAudit).where(
+                MergeAudit.tenant_id == tenant_id, MergeAudit.decision == "pending_review"
+            )
+        ).scalars()
+    )
+    parked: list[ParkedMerge] = []
+    for r in rows:
+        graph_written = (
+            _any_node_exists(neo4j, tenant_id, [r.canonical_id, *r.source_ids])
+            if neo4j is not None
+            else False
         )
-    ).scalars()
-    return [ParkedMerge(r.canonical_id, tuple(r.source_ids), r.score, r.reason) for r in rows]
+        parked.append(
+            ParkedMerge(r.canonical_id, tuple(r.source_ids), r.score, r.reason, graph_written)
+        )
+    return parked
 
 
-def _parked_audit(session: Session, tenant_id: str, canonical_id: str) -> MergeAudit:
+def _require_audit(session: Session, tenant_id: str, canonical_id: str) -> MergeAudit:
+    """The merge_audit row for ``canonical_id`` regardless of decision (most recent).
+
+    Unlike a pending-only lookup, this lets ``approve``/``reject`` reason about the decision
+    state machine (already-merged / already-rejected) so a re-run converges instead of
+    failing to find a now-terminal row.
+    """
     audit = session.execute(
-        select(MergeAudit).where(
-            MergeAudit.tenant_id == tenant_id,
-            MergeAudit.canonical_id == canonical_id,
-            MergeAudit.decision == "pending_review",
-        )
-    ).scalar_one_or_none()
+        select(MergeAudit)
+        .where(MergeAudit.tenant_id == tenant_id, MergeAudit.canonical_id == canonical_id)
+        # created_at can tie (server-clock, same-txn); id as a deterministic tie-break.
+        .order_by(MergeAudit.created_at.desc(), MergeAudit.id.desc())
+    ).scalar()
     if audit is None:
-        raise SignOffError(f"no parked merge {canonical_id!r} for tenant {tenant_id!r}")
+        raise SignOffError(f"no merge {canonical_id!r} for tenant {tenant_id!r}")
     return audit
 
 
@@ -111,18 +175,32 @@ def _outbound_edges(session: Session, tenant_id: str, source_ids: list[str]) -> 
 def _record_judgements(
     session: Session, tenant_id: str, source_ids: list[str], verdict: str
 ) -> None:
-    """Persist a durable, tenant-scoped judgement for every member pair (ADR 0031)."""
-    for left, right in itertools.combinations(sorted(set(source_ids)), 2):
-        session.add(
-            ResolverJudgement(
-                id=str(uuid.uuid4()),
-                tenant_id=tenant_id,
-                left_id=left,
-                right_id=right,
-                judgement=verdict,
-                source="signoff",
-            )
-        )
+    """Persist a durable, tenant-scoped judgement for every member pair (ADR 0031).
+
+    Idempotent (B-1 Part 2): ON CONFLICT DO NOTHING on ``uq_resolver_judgement_pair`` so a
+    re-run of the same sign-off keeps the existing judgement rather than violating the pair
+    uniqueness. Pairs are stored canonically ordered (``left <= right``), matching the
+    constraint, and the judgement-consumption path (``cluster_and_merge``) is untouched — so
+    this does not change how judgements are read (relevant to the H-1 follow-up).
+    """
+    values = [
+        {
+            "id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "left_id": left,
+            "right_id": right,
+            "judgement": verdict,
+            "source": "signoff",
+        }
+        for left, right in itertools.combinations(sorted(set(source_ids)), 2)
+    ]
+    if not values:
+        return
+    session.execute(
+        pg_insert(ResolverJudgement)
+        .values(values)
+        .on_conflict_do_nothing(constraint="uq_resolver_judgement_pair")
+    )
 
 
 def _merge_members(canonical_id: str, members: list[FtmEntity]) -> FtmEntity:
@@ -147,9 +225,24 @@ def approve(
 
     Persists a POSITIVE judgement (so future batches always merge these members) and a
     ``sign_off`` row, marks the queue rows resolved, and flips the audit to ``merged``.
+    Idempotent: an already-merged audit is a no-op; an already-rejected one is refused.
     """
-    audit = _parked_audit(session, tenant_id, canonical_id)
+    audit = _require_audit(session, tenant_id, canonical_id)
+    if audit.decision == "merged":
+        return SignOffResult(canonical_id, "approved", 0, 0, already_applied=True)
+    if audit.decision == "rejected":
+        raise SignOffError(f"merge {canonical_id!r} was already rejected; cannot approve")
+
     source_ids = list(audit.source_ids)
+    # Orphan guard (mirror of reject's): a parked cluster is never written during resolution,
+    # so a member node already in the graph means a prior REJECT wrote the members standalone.
+    # Promoting now would strand those member nodes beside the canonical (append-only — no
+    # delete). Direct the operator to complete the reject instead.
+    if _any_node_exists(neo4j, tenant_id, source_ids):
+        raise SignOffError(
+            f"merge {canonical_id!r} already has member node(s) in the graph (a reject was "
+            "started); re-run reject to complete it rather than approving"
+        )
     member_rows = _member_rows(session, tenant_id, source_ids)
     if not member_rows:
         raise SignOffError(f"parked merge {canonical_id!r} has no member rows to promote")
@@ -159,6 +252,8 @@ def approve(
     edges = _outbound_edges(session, tenant_id, source_ids)
     for edge in edges:
         rewrite_referents(edge, referents)
+    # Graph write before the Postgres commit — idempotent on a re-run because the canonical
+    # id is deterministic (ADR 0036 Part 1), so a crashed approve re-MERGEs the same node.
     write_entities(neo4j, [canonical, *edges], tenant_id=tenant_id)
 
     _record_judgements(session, tenant_id, source_ids, "positive")
@@ -183,8 +278,25 @@ def reject(
 
     Persists a NEGATIVE judgement (so future batches never re-merge these members) and a
     ``sign_off`` row, marks the queue rows resolved, and flips the audit to ``rejected``.
+    Idempotent: an already-rejected audit is a no-op; an already-merged one is refused.
     """
-    audit = _parked_audit(session, tenant_id, canonical_id)
+    audit = _require_audit(session, tenant_id, canonical_id)
+    if audit.decision == "rejected":
+        return SignOffResult(canonical_id, "rejected", 0, 0, already_applied=True)
+    if audit.decision == "merged":
+        raise SignOffError(f"merge {canonical_id!r} was already approved; cannot reject")
+
+    # Orphan guard: a parked cluster is never written during resolution, so a canonical node
+    # in the graph means a prior approve already wrote it. Completing a reject would write the
+    # members alongside that node and strand it (append-only — no delete). Direct the operator
+    # to complete the approve instead. (A crashed reject writes only members under their own
+    # ids — no canonical node — so a same-op reject re-run is unaffected by this guard.)
+    if _node_exists(neo4j, tenant_id, canonical_id):
+        raise SignOffError(
+            f"merge {canonical_id!r} already has a canonical node in the graph (an approve was "
+            "started); re-run approve to complete it rather than rejecting"
+        )
+
     source_ids = list(audit.source_ids)
     member_rows = _member_rows(session, tenant_id, source_ids)
     if not member_rows:
@@ -192,7 +304,8 @@ def reject(
 
     members = [make_entity(r.raw_entity) for r in member_rows]
     # Members keep their own ids, so their outbound edges already reference them — no
-    # rewrite needed; just write the members alongside their edges.
+    # rewrite needed; just write the members alongside their edges. Idempotent on a re-run
+    # (MERGE on each member's own id).
     edges = _outbound_edges(session, tenant_id, source_ids)
     write_entities(neo4j, [*members, *edges], tenant_id=tenant_id)
 

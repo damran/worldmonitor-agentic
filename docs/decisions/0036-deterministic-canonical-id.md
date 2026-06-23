@@ -1,9 +1,9 @@
 # 0036 — Deterministic canonical id + cross-store commit ordering (audit B-1)
 
-- **Status:** Part 1 **accepted** (implemented); Part 2 **proposed** (awaiting maintainer decision — not implemented)
+- **Status:** Part 1 **accepted** (implemented); Part 2 **accepted — Option A** (implemented 2026-06-23)
 - **Date:** 2026-06-23
 - **Addresses:** `docs/reviews/PRODUCTION_READINESS_AUDIT_2026-06-23.md` finding **B-1**
-- **Touches:** `resolution/merge.py` (canonical-id minting). Builds on [0026](0026-batch-first-resolution.md) (batch-first), [0028](0028-per-batch-resolver-isolation.md) (ephemeral resolver / G4), [0031](0031-return-to-block-signoff.md) (sign-off).
+- **Touches:** `resolution/merge.py` (canonical-id minting, Part 1); `resolution/signoff.py` + `review.py` (idempotent/recoverable sign-off, Part 2). Builds on [0026](0026-batch-first-resolution.md) (batch-first), [0028](0028-per-batch-resolver-isolation.md) (ephemeral resolver / G4), [0031](0031-return-to-block-signoff.md) (sign-off).
 - **Relates to (does NOT build):** the deferred H1/H2 cross-store dual-write surface.
 
 ## Context
@@ -72,7 +72,7 @@ would see two canonical nodes and fail.
   anchor — e.g. a common Wikidata QID — as the canonical id when present; content-hash is the robust
   default and is what this ADR adopts.)
 
-## Part 2 — Cross-store commit ordering (PROPOSED — awaiting decision, NOT implemented)
+## Part 2 — Cross-store commit ordering (ACCEPTED — Option A, implemented)
 
 Part 1 removes the permanent corruption but leaves a **transient** residual: between a crash and the
 retry, the graph holds a canonical node whose `merge_audit`/status row is not yet committed (graph ahead
@@ -88,21 +88,50 @@ Three options (the fork the audit named):
 | **B — reorder + explicit reconcile** | Persist intent first (e.g. a `resolving` status / `canonical_id` + `graph_written` marker committed before the graph write), and add a startup/periodic reconcile that re-runs the (idempotent) graph write for any marked-but-unwritten row. | Bounded, explicit recovery not reliant on rows staying `pending`; handles sign-off symmetrically. | Medium — a schema column + a driver reconcile step. | Partial — introduces a reconcile loop akin to a lightweight outbox. |
 | **C — transactional outbox / saga** | Write a graph-write outbox row in the *same* Postgres txn as status/audit; a worker drains it to Neo4j at-least-once with idempotency (Part 1). | Strongest; correct under HA/multi-writer. | Large — new table, worker, delivery semantics. | **This *is* the deferred H1/H2 dual-write-consistency surface.** |
 
-**Recommendation: Option A now, hardened with a *minimal* slice of B for sign-off — and explicitly DEFER C.**
-Rationale: Part 1 already converts B-1 from permanent corruption into a self-healing transient for the
-pipeline (the dominant path), so the high-cost general machinery is not justified by this gate. The only
-genuine residual is the sign-off path, where the in-scope, low-risk hardening is: (1) make
-`approve`/`reject` **idempotent** (safe to re-run against an already-graph-written merge — Part 1 makes
-the node write idempotent; add the same guard to the judgement/sign-off rows), and (2) surface a
-"graph-written-but-audit-pending" parked merge so an operator is told to re-run. A **full outbox/saga
-(Option C) is the deferred H1/H2 surface** — building it in this gate would expand scope into deferred
-territory, which is a stop-and-flag condition, so it is explicitly **not** recommended here.
+**Decision: Option A** — lean on Part 1's idempotency, hardened with a sign-off idempotency guard +
+surfacing. **Option C is explicitly DEFERRED** (it *is* the H1/H2 dual-write surface). Rationale: Part 1
+already converts B-1 from permanent corruption into a self-healing transient for the pipeline (the
+dominant path), so the general machinery of B/C is not justified by this gate; the only genuine residual
+is the operator-driven **sign-off** path, and that is what Option A closes at the right size.
 
-**This section is a proposal only.** No Part-2 code is written pending the maintainer's choice of
-A / lite-B / C (or another).
+**What was built (`resolution/signoff.py`, `review.py`):**
+- **Idempotent re-run.** `approve`/`reject` fetch the merge_audit regardless of decision and branch on a
+  small state machine: a re-run from the *completed* state is a no-op (`SignOffResult.already_applied`),
+  the opposite decision is refused. The graph write is already idempotent (Part 1: a merge re-MERGEs the
+  same deterministic canonical id; a reject re-writes members under their own ids). Judgements insert
+  `ON CONFLICT DO NOTHING` on `uq_resolver_judgement_pair`; the audit row is *mutated*, never duplicated;
+  so a re-run produces **no duplicate canonical node, no orphan, no duplicate judgement/sign-off row.**
+- **Orphan-canonical guard.** `reject` refuses if a canonical node already exists in the graph (the
+  signature of a crashed *approve*) — completing a reject would strand that node, and there is no delete
+  path (append-only). The operator is directed to complete the approve instead.
+- **Surfacing.** `list_parked(session, tenant, neo4j)` annotates each parked merge with `graph_written`
+  (a node for the canonical id *or* any member already exists). Since block mode never writes a parked
+  cluster, a present node means a sign-off's graph write committed but its Postgres audit did not — the
+  half-committed crash window. The `review` CLI flags it `[GRAPH-WRITTEN: … re-run … to recover]`.
+- **No migration.** Reuses the existing `uq_resolver_judgement_pair` constraint and the audit state
+  machine; no schema change (avoids the online-migration risk the audit flagged as M-5).
+
+**Verification.** `tests/integration/test_b1_signoff_idempotency.py` simulates the crash window on the
+sign-off path (graph write commits, the next Postgres commit raises) for **both** approve and reject,
+asserts the state is surfaced (`graph_written`), then re-runs the SAME operation and asserts convergence
+(one canonical node / two members, audit terminal, exactly one judgement + one sign-off row), and that a
+further re-run is a clean no-op.
+
+**Known limitation (out of scope — Gate B).** If the *same* canonical pair is parked twice
+(a re-ingest mints new queue rows and re-parks before the first park is signed off), there are
+two `pending_review` audit rows for one `canonical_id`. Sign-off flips only the most-recent
+(`_require_audit` orders by `created_at, id` desc), leaving the older row surfacing as parked.
+This is the deferred cross-batch / re-ingest surface (Gate B), not the crash window; it is
+strictly safer than before (no `MultipleResultsFound`). Reconciling all rows for a
+`(tenant, canonical)` is a Gate B follow-up.
+
+**Relationship to H-1 (next gate).** Part 2 keeps judgement-write *semantics* unchanged (reject still
+persists a negative judgement; the consumption path in `cluster_and_merge` is untouched). `ON CONFLICT DO
+NOTHING` only dedups an identical pair; it does not alter which judgement wins. So the H-1 transitive-
+bridge fix (teaching `cluster_and_merge` to respect a negative judgement transitively) is unaffected and
+not pre-empted.
 
 ## Hard-stop note
 
-Per the gate scope: this ADR fixes **B-1 only**. It does not touch Gate B/C/S4, does not start G3, and
-does not address H-1/B-2/B-3. Option C (outbox) is identified as the deferred H1/H2 surface and is left
-unbuilt.
+This ADR fixes **B-1 only**. It does not touch Gate B/C/S4, does not start G3, and does not address
+H-1/B-2/B-3. Option C (outbox) is identified as the deferred H1/H2 surface and is left unbuilt.
