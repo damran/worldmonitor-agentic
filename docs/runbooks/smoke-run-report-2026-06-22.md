@@ -1,5 +1,14 @@
 # Smoke-run report — 2026-06-22
 
+> **Superseded for the validation conclusions by
+> [`smoke-run-report-2026-06-23.md`](smoke-run-report-2026-06-23.md).** This run's
+> `graph_edges=0` / `parked_merges=0` were *correct for its seed* (distinct orgs +
+> non-sensitive addresses) and its closing section listed the seed changes needed to
+> exercise edges and parking. The 2026-06-23 run applies exactly those (us_dod ownership +
+> the us_ofac Legion pair) and validates edge materialization, real-data sensitive parking,
+> and the durable reject→split→no-re-park loop. Keep this report as the record of that first
+> run; read the 2026-06-23 report for the current validation state.
+
 First sustained real-data run of the pipeline on an operator WSL2 host, following
 `docs/runbooks/smoke-run.md`. **Verdict: GREEN** — the spine ran end-to-end on real data
 with zero errors; the two zero-valued metrics were investigated and are both
