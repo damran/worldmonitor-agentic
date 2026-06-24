@@ -2,23 +2,26 @@
 
 Spec: ``docs/reviews/GATE_B5_SPEC.md`` §5 (INV-1..INV-3 / INV-1b / INV-1c) and §6 (the named-test
 table). ADR: ``docs/decisions/0040-er-anchor-conflict-negative-evidence.md`` — the anchor-conflict
-policy fork is **RESOLVED → (C) HYBRID** (2026-06-24): hard-block the pairwise anchor clash in Splink
-scoring AND park any residual / transitive anchor-conflict cluster in ``needs_review`` as
+policy fork is **RESOLVED → (C) HYBRID** (2026-06-24): hard-block the pairwise anchor clash in
+Splink scoring AND park any residual / transitive anchor-conflict cluster in ``needs_review`` as
 defense-in-depth. This file therefore asserts BOTH mechanisms.
 
 These tests are the gate's acceptance oracle, written FROM THE SPEC and independent of any
 implementation. They pin OUTCOMES only — merge / no-merge / park at the 0.92 boundary and the
-``get_anchors`` conflict representation — never the m/u calibration or the chosen encoding, which the
-builder is free to pick (ADR 0040 §Decision parts 1-3).
+``get_anchors`` conflict representation — never the m/u calibration or the chosen encoding, which
+the builder is free to pick (ADR 0040 §Decision parts 1-3).
 
-Three over-merge holes this gate closes (all reproduced against HEAD ``0ffc1a6`` — see ADR §Context):
+Three over-merge holes this gate closes (all reproduced against HEAD ``0ffc1a6`` — see ADR
+§Context):
 
-- Finding 1 (NEW HIGH, INV-1 / INV-1b / INV-1c): conflicting single-valued canonical anchors are not
-  negative evidence. Two records with DISTINCT authoritative ids (``wikidata_id`` Q1 vs Q2) auto-merge
-  (non-sensitive, size 2), and ``get_anchors`` then silently drops the losing anchor (``[0]`` winner).
+- Finding 1 (NEW HIGH, INV-1 / INV-1b / INV-1c): conflicting single-valued canonical anchors are
+  not negative evidence. Two records with DISTINCT authoritative ids (``wikidata_id`` Q1 vs Q2)
+  auto-merge (non-sensitive, size 2), and ``get_anchors`` then silently drops the losing anchor
+  (``[0]`` winner).
 - Finding 2 (H-5, INV-2): a shared ``wikidata_id`` exact level (BF 199 800) overrides total name
   disagreement — a shared anchor alone clears 0.92.
-- Finding 3 (Judge MEDIUM, INV-3): a shared ``wikidataId`` overrides a CLASHING B-3 distinguishing id.
+- Finding 3 (Judge MEDIUM, INV-3): a shared ``wikidataId`` overrides a CLASHING B-3 distinguishing
+  id.
 
 Sensitivity is OFF (no ``topics`` / ``sanction``) on every fixture: that is LOAD-BEARING. The
 catastrophic-merge guard fires today only on sensitivity or cluster size > 10, so a non-sensitive
@@ -27,8 +30,8 @@ would mask the auto-merge behind the existing guard and make these tests vacuous
 
 Anchor representation (ADR §Context, spec §6): canonical anchors live in
 ``entity.context["wm_anchor_<field>"]`` (set via :func:`set_anchor`), NOT in FtM properties. The
-anchor-CLASH *scoring* level (Finding 1) is over that context, so the INV-1 / INV-1b fixtures set the
-context via ``set_anchor`` (their ``_flatten`` ``wikidata_id`` column stays ``None``). The
+anchor-CLASH *scoring* level (Finding 1) is over that context, so the INV-1 / INV-1b fixtures set
+the context via ``set_anchor`` (their ``_flatten`` ``wikidata_id`` column stays ``None``). The
 shared-anchor-OVERRIDE findings (2, 3) exercise the EXISTING ``wikidata_id`` exact comparison, which
 reads the ``wikidataId`` FtM *property* (``_flatten``'s already-projected column) — so the INV-2 /
 INV-2b / INV-3 fixtures set the ``wikidataId`` property, not the anchor context.
@@ -81,12 +84,13 @@ def _company(
     registration_number: list[str] | None = None,
     country: str | None = "gb",
 ) -> FtmEntity:
-    """A NON-sensitive Company fixture (no ``topics``/``sanction``; sensitivity off is load-bearing).
+    """A NON-sensitive Company fixture (no ``topics``/``sanction``; sensitivity off is
+    load-bearing).
 
     ``anchor_field``/``anchor_value`` set a CANONICAL ANCHOR in ``entity.context`` via the real
-    :func:`set_anchor` API (the column the anchor-CLASH scoring level reads). ``wikidata_id`` sets the
-    FtM ``wikidataId`` *property* (the column the EXISTING shared-anchor exact level reads — Findings
-    2/3). ``registration_number`` is the B-3 ``identifier``-typed distinguishing id.
+    :func:`set_anchor` API (the column the anchor-CLASH scoring level reads). ``wikidata_id`` sets
+    the FtM ``wikidataId`` *property* (the column the EXISTING shared-anchor exact level reads —
+    Findings 2/3). ``registration_number`` is the B-3 ``identifier``-typed distinguishing id.
     """
     props: dict[str, list[str]] = {"name": [name]}
     if country is not None:
@@ -125,8 +129,8 @@ def test_conflicting_wikidata_anchor_blocks_merge() -> None:
     no cluster forms.
 
     HEAD reproduction: the anchor lives only in ``entity.context`` (``_flatten``'s ``wikidata_id``
-    column is ``None``), so it is not scored at all and the pair auto-merges at ~0.9825 on name+country
-    alone. After fork-C's anchor-clash level it must score below 0.92.
+    column is ``None``), so it is not scored at all and the pair auto-merges at ~0.9825 on
+    name+country alone. After fork-C's anchor-clash level it must score below 0.92.
     """
     a = _company("a", NAME, anchor_field="wikidata_id", anchor_value=Q1)
     b = _company("b", NAME, anchor_field="wikidata_id", anchor_value=Q2)
@@ -140,9 +144,9 @@ def test_conflicting_anchor_cluster_parks() -> None:
     is therefore NOT silently auto-promoted.
 
     The conflict is computed over the cluster's SOURCE members (``by_id``), not the merged
-    ``cluster.entity`` (whose ``merge_context`` unions Q1+Q2 and which ``get_anchors`` would mask —
-    that masking is Finding 1). The cluster is built directly so this asserts the guard regardless of
-    whether the pairwise scoring level also blocks it (defense-in-depth).
+    ``cluster.entity`` (whose ``merge_context`` unions Q1+Q2 and which ``get_anchors`` would mask
+    — that masking is Finding 1). The cluster is built directly so this asserts the guard regardless
+    of whether the pairwise scoring level also blocks it (defense-in-depth).
     """
     a = _company("a", NAME, anchor_field="wikidata_id", anchor_value=Q1)
     b = _company("b", NAME, anchor_field="wikidata_id", anchor_value=Q2)
@@ -166,7 +170,8 @@ def test_conflicting_anchor_cluster_parks() -> None:
     )
     flagged, reason = needs_review(cluster, {"a": a, "b": b})
     assert flagged is True
-    # The reason must name the conflicting anchor field and BOTH values so the park is a usable lead.
+    # The reason must name the conflicting anchor field and BOTH values so the park is a usable
+    # lead.
     lowered = reason.lower()
     assert "wikidata_id" in lowered
     assert Q1 in reason and Q2 in reason
@@ -177,11 +182,12 @@ def test_conflicting_anchor_cluster_parks() -> None:
 def test_transitive_conflicting_anchor_cluster_parks() -> None:
     """INV-1 (C, the case pairwise scoring alone MISSES): A~M and M~Z each clean (same name+country,
     middle ``m`` carries NO anchor), A and Z carry the only anchor clash (Q1 vs Q2). The three are
-    assembled into ONE cluster by ``cluster_and_merge`` (clean bridges), and ``needs_review`` PARKS it
-    because its source members span two distinct ``wikidata_id`` anchors.
+    assembled into ONE cluster by ``cluster_and_merge`` (clean bridges), and ``needs_review`` PARKS
+    it because its source members span two distinct ``wikidata_id`` anchors.
 
     Splink only scores PAIRS, so the fork-C scoring level cannot see this transitive conflict — only
-    the assembled-cluster guard can. This is the reason the hybrid park exists (ADR 0040 §trade-offs).
+    the assembled-cluster guard can. This is the reason the hybrid park exists (ADR 0040
+    §trade-offs).
     """
     a = _company("a", NAME, anchor_field="wikidata_id", anchor_value=Q1)
     m = _company("m", NAME)  # clean bridge: shares name+country with both, carries no anchor
@@ -190,8 +196,8 @@ def test_transitive_conflicting_anchor_cluster_parks() -> None:
     by_id = {e.id: e for e in entities}
     clusters = cluster_and_merge(entities, score_pairs(entities))
     merged = [c for c in clusters if c.is_merge]
-    # The clean bridges assemble the three into one cluster (the transitive conflict the guard exists
-    # to catch). If the cluster did not form there would be nothing to park — that is the wrong tree.
+    # The clean bridges assemble the three into one cluster (the transitive conflict the guard
+    # exists to catch). If the cluster did not form there would be nothing to park — wrong tree.
     assert len(merged) == 1, "clean bridges A~M, M~Z must assemble one transitive cluster"
     transitive = merged[0]
     assert set(transitive.member_ids) == {"a", "m", "z"}
@@ -231,11 +237,11 @@ def test_conflicting_anchor_blocks_or_parks_per_field(field: str) -> None:
 
 
 def test_get_anchors_omits_conflicting_field() -> None:
-    """INV-1c: an entity whose context holds ``wm_anchor_wikidata_id=['Q1','Q2']`` (the union a fused
-    anchor-conflict cluster carries) MUST NOT yield ``{'wikidata_id': 'Q1'}`` — the silent ``[0]``
-    winner of Finding 1. Per ADR 0040 §Decision the conflicting field is OMITTED (no arbitrary value
-    projected onto the node); the conflict is the guard's job to park (INV-1), not ``get_anchors``'s
-    job to invent a winner.
+    """INV-1c: an entity whose context holds ``wm_anchor_wikidata_id=['Q1','Q2']`` (the union a
+    fused anchor-conflict cluster carries) MUST NOT yield ``{'wikidata_id': 'Q1'}`` — the silent
+    ``[0]`` winner of Finding 1. Per ADR 0040 §Decision the conflicting field is OMITTED (no
+    arbitrary value projected onto the node); the conflict is the guard's job to park (INV-1), not
+    ``get_anchors``'s job to invent a winner.
     """
     entity = make_entity(
         {"id": "c", "schema": "Company", "properties": {"name": [NAME]}, "datasets": ["t"]}
@@ -248,9 +254,9 @@ def test_get_anchors_omits_conflicting_field() -> None:
 
 
 def test_get_anchors_clean_single_value_unchanged() -> None:
-    """INV-1c: a clean single-value anchor context (``['Q1']``) STILL returns ``{'wikidata_id':'Q1'}``
-    as a ``dict[str, str]`` — the writer contract (``graph/writer.py:165`` spread) is preserved; the
-    only behavior change is for a CONFLICTING field.
+    """INV-1c: a clean single-value anchor context (``['Q1']``) STILL returns
+    ``{'wikidata_id':'Q1'}`` as a ``dict[str, str]`` — the writer contract (``graph/writer.py:165``
+    spread) is preserved; the only behavior change is for a CONFLICTING field.
     """
     entity = _company("c", NAME, anchor_field="wikidata_id", anchor_value=Q1)
     anchors = get_anchors(entity)
@@ -265,11 +271,13 @@ def test_get_anchors_clean_single_value_unchanged() -> None:
 
 
 def test_shared_wikidata_with_name_disagreement_does_not_merge() -> None:
-    """INV-2: two Companies sharing a ``wikidataId`` (Q42) + same country but TOTAL name disagreement
-    (name at the ``else`` level — no shared tokens) → top probability below threshold, no merge.
+    """INV-2: two Companies sharing a ``wikidataId`` (Q42) + same country but TOTAL name
+    disagreement (name at the ``else`` level — no shared tokens) → top probability below
+    threshold, no merge.
 
     HEAD reproduction (ADR §Context, Finding 2): posterior 0.9795 — the shared-anchor BF 199 800
-    swamps the name ``else`` BF (0.0421) and clears 0.92. The Part-1 m/u relax must drop this < 0.92.
+    swamps the name ``else`` BF (0.0421) and clears 0.92. The Part-1 m/u relax must drop this below
+    0.92.
     """
     a = _company("a", "Alpha Manufacturing", wikidata_id="Q42", country="gb")
     b = _company("b", "Zeta Logistics", wikidata_id="Q42", country="gb")
@@ -296,9 +304,9 @@ def test_shared_wikidata_alone_does_not_merge() -> None:
 
 
 def test_shared_wikidata_with_matching_name_still_merges() -> None:
-    """INV-2b: two Companies, same ``wikidataId`` (Q7) + same name (exact fingerprint) + same country,
-    no clash → still merges (>= 0.92). A genuine duplicate that legitimately shares a QID must NOT
-    regress from the Part-1 m/u relax.
+    """INV-2b: two Companies, same ``wikidataId`` (Q7) + same name (exact fingerprint) + same
+    country, no clash → still merges (>= 0.92). A genuine duplicate that legitimately shares a QID
+    must NOT regress from the Part-1 m/u relax.
 
     HEAD: ~0.99999 (already merges); the relax must keep this above the threshold.
     """
@@ -319,7 +327,8 @@ def test_clashing_reg_id_not_overridden_by_shared_wikidata() -> None:
     no merge. The B-3 clash must win against a single shared anchor.
 
     HEAD reproduction (ADR §Context, Finding 3): posterior 0.999947 — the shared-wikidata BF swamps
-    the B-3 clash BF (negative-evidence precedence inverted). Parts 1+2 must restore the clash's veto.
+    the B-3 clash BF (negative-evidence precedence inverted). Parts 1+2 must restore the clash's
+    veto.
     """
     a = _company("a", NAME, wikidata_id="Q99", registration_number=["111111"])
     b = _company("b", NAME, wikidata_id="Q99", registration_number=["222222"])
