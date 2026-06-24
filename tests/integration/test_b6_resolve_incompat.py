@@ -25,7 +25,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from worldmonitor.db.engine import create_all, make_engine, session_factory
@@ -56,6 +56,7 @@ def _queue_item(tenant_id: str, data: dict[str, object], *, source: str) -> ErQu
         id=str(uuid.uuid4()),
         tenant_id=tenant_id,
         connector_id="opensanctions",
+        entity_id=entity.id,  # real ingest stamps this (ingest.py); the pipeline maps rows by it
         raw_entity=entity.to_dict(),
         source_record=provenance.source_record,
         status="pending",
@@ -208,8 +209,15 @@ def test_rerun_converges_on_the_same_nodes(clean_graph: Neo4jClient, postgres_ds
     companies_first = _node_ids(clean_graph, tenant_id, "Company")
     persons_first = _node_ids(clean_graph, tenant_id, "Person")
 
-    # Re-seed the SAME records (a re-ingest) and resolve again.
-    _seed_transitive(sessions, tenant_id)
+    # Re-resolve the SAME records (e.g. a crash that rolled back the Postgres commit AFTER the
+    # graph write — the ADR-0036 recovery scenario): reset the rows to pending and resolve again.
+    # The durable positive judgements remain, so the transitive cluster reassembles; the
+    # content-addressed canonical id must converge on the same nodes — no duplicate / orphan.
+    with sessions() as session:
+        session.execute(
+            update(ErQueueItem).where(ErQueueItem.tenant_id == tenant_id).values(status="pending")
+        )
+        session.commit()
     with sessions() as session:
         resolve_pending(session=session, neo4j=clean_graph, tenant_id=tenant_id)
 
