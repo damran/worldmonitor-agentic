@@ -219,6 +219,42 @@ def _quarantine(session: Session, items: Sequence[ErQueueItem], *, stage: str, r
         )
 
 
+def _record_skip(
+    session: Session, items: Sequence[ErQueueItem], *, stage: str, reason: str
+) -> None:
+    """Durably record a NON-status-mutating skip event (H-2, ADR 0041).
+
+    Unlike ``_quarantine``, this does NOT set ``item.status`` — it only writes a replayable
+    ``IngestDeadLetter`` for each row. A schema-incompatible member that was dropped from a
+    transitive cluster is re-emitted as its own correct-schema singleton (merge.py), so its row
+    must still resolve normally to ``'resolved'`` with its own node; the dead-letter is the audit
+    of the drop (closing the previously-silent log-only gap), not a quarantine. Recording it as a
+    status-mutating quarantine would mark the row ``'invalid'`` and prevent its own node being
+    written.
+    """
+    summary = reason[:_ERROR_SUMMARY_MAX]
+    for item in items:
+        session.add(
+            IngestDeadLetter(
+                id=str(uuid.uuid4()),
+                tenant_id=item.tenant_id,
+                connector_id=item.connector_id,
+                source_key=item.entity_id or item.source_record or item.id,
+                source_record=item.source_record,
+                stage=stage,
+                error=summary,
+            )
+        )
+    if items:
+        logger.warning(
+            "resolve: recorded %d schema-incompatible member skip(s) at stage '%s' "
+            "(dead-letter only, row still resolves to its own node): %s",
+            len(items),
+            stage,
+            summary[:200],
+        )
+
+
 def _resolve_batch(
     session: Session,
     neo4j: Neo4jClient,
@@ -292,6 +328,20 @@ def _resolve_batch(
     promoted_clusters: list[ResolvedCluster] = []
     promoted = review = alerts = 0
     for cluster in clusters:
+        if cluster.merge_incompatible:
+            # H-2 (ADR 0041): this singleton was demoted out of a transitive cluster because its
+            # schema had no common FtM base with the other members. Durably record the drop
+            # WITHOUT mutating status, so the row still resolves normally below to its OWN
+            # correct-schema node (the singleton path). This closes the previously log-only
+            # audit gap; the leftover safety sweep is unaffected because the member is now in
+            # clustered_ids via this singleton (so it is not double-quarantined as resolve-noid).
+            _record_skip(
+                session,
+                items_by_entity_id.get(cluster.member_ids[0], []),
+                stage="resolve-incompat",
+                reason="schema-incompatible member dropped from transitive cluster (H-2)",
+            )
+
         flagged, reason = needs_review(cluster, by_id)
         members = set(cluster.member_ids)
         if flagged and any(members <= group for group in approved_groups):

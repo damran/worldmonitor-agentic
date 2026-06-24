@@ -90,8 +90,13 @@ class IngestDeadLetter(Base):
     resolution (ADR 0038), ``"resolve-row"`` (a row ``make_entity`` could not parse),
     ``"resolve-batch"`` (a window that could not be scored/clustered), ``"resolve-write"``
     (a merged canonical that failed FtM validation), or ``"resolve-noid"`` (an unclustered /
-    id-less row). ``error`` is a bounded exception summary. Every row carries ``tenant_id``
-    (the GDPR/audit invariant holds for failures too); all quarantines are replayable.
+    id-less row); or, from H-2 / sign-off integrity (ADR 0041),
+    ``"resolve-incompat"`` (a schema-incompatible member dropped from a transitive cluster and
+    re-emitted as its own singleton — a NON-status-mutating skip audit, the row still resolves)
+    or ``"signoff-poison"`` (a malformed ``raw_entity`` skipped during a sign-off queue scan so
+    one poison row cannot wedge approve/reject for the tenant). ``error`` is a bounded exception
+    summary. Every row carries ``tenant_id`` (the GDPR/audit invariant holds for failures too);
+    all quarantines are replayable.
     """
 
     __tablename__ = "ingest_dead_letter"

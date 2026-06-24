@@ -38,11 +38,20 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from worldmonitor.db.models import ErQueueItem, MergeAudit, ResolverJudgement, SignOff
+from worldmonitor.db.models import (
+    ErQueueItem,
+    IngestDeadLetter,
+    MergeAudit,
+    ResolverJudgement,
+    SignOff,
+)
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
 from worldmonitor.resolution.referents import rewrite_referents
+
+# Bounded exception summary stored on a dead-letter row (mirrors the pipeline's bound).
+_ERROR_SUMMARY_MAX = 2000
 
 
 class SignOffError(RuntimeError):
@@ -142,6 +151,29 @@ def _require_audit(session: Session, tenant_id: str, canonical_id: str) -> Merge
     return audit
 
 
+def _dead_letter_poison(session: Session, row: ErQueueItem, exc: Exception) -> None:
+    """Durably record a poison sign-off queue row (ADR 0041 slice-2).
+
+    A single malformed ``raw_entity`` in the tenant's queue must not raise mid-scan and wedge
+    approve/reject for EVERY parked merge of the tenant (the B-2 per-input isolation pattern,
+    never previously applied to sign-off). The offending row is skipped and recorded here —
+    replayable, not silently swallowed — at stage ``'signoff-poison'`` (14 chars, fits
+    ``String(16)``). This does NOT mutate the row's status (sign-off does not own the queue's
+    quarantine lifecycle); it only adds an audit trail of the skip.
+    """
+    session.add(
+        IngestDeadLetter(
+            id=str(uuid.uuid4()),
+            tenant_id=row.tenant_id,
+            connector_id=row.connector_id,
+            source_key=row.entity_id or row.source_record or row.id,
+            source_record=row.source_record,
+            stage="signoff-poison",
+            error=f"{type(exc).__name__}: {exc}"[:_ERROR_SUMMARY_MAX],
+        )
+    )
+
+
 def _member_rows(session: Session, tenant_id: str, source_ids: list[str]) -> list[ErQueueItem]:
     wanted = set(source_ids)
     rows = session.execute(
@@ -149,7 +181,18 @@ def _member_rows(session: Session, tenant_id: str, source_ids: list[str]) -> lis
             ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "pending_review"
         )
     ).scalars()
-    return [row for row in rows if row.raw_entity.get("id") in wanted]
+    # The status == 'pending_review' filter is UNCHANGED (it selects exactly the parked rows);
+    # only the per-row id extraction is hardened so a poison raw_entity cannot crash the scan.
+    members: list[ErQueueItem] = []
+    for row in rows:
+        try:
+            row_id = row.raw_entity.get("id")
+        except Exception as exc:  # malformed raw_entity (not a mapping, etc.)
+            _dead_letter_poison(session, row, exc)
+            continue
+        if row_id in wanted:
+            members.append(row)
+    return members
 
 
 def _outbound_edges(session: Session, tenant_id: str, source_ids: list[str]) -> list[FtmEntity]:
@@ -158,12 +201,20 @@ def _outbound_edges(session: Session, tenant_id: str, source_ids: list[str]) -> 
     These connect the reviewed entity outward (e.g. an Ownership whose owner is a
     parked member). Loaded from the tenant's queue (v0: a full scan — sign-off is a
     manual, infrequent operation).
+
+    Per-row hardened (ADR 0041 slice-2): a single poison ``raw_entity`` that ``make_entity``
+    cannot parse is skipped and dead-lettered (``'signoff-poison'``) rather than raising and
+    wedging approve/reject for the whole tenant. The set of rows scanned is unchanged.
     """
     members = set(source_ids)
     rows = session.execute(select(ErQueueItem).where(ErQueueItem.tenant_id == tenant_id)).scalars()
     edges: list[FtmEntity] = []
     for row in rows:
-        entity = make_entity(row.raw_entity)
+        try:
+            entity = make_entity(row.raw_entity)
+        except Exception as exc:  # unknown schema / malformed raw_entity
+            _dead_letter_poison(session, row, exc)
+            continue
         source_prop = entity.schema.source_prop
         if not entity.schema.edge or source_prop is None:
             continue

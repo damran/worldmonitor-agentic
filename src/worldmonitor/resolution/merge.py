@@ -66,6 +66,10 @@ class ResolvedCluster:
     entity: FtmEntity
     score: float
     """Weakest-link match probability within the cluster (1.0 for a singleton)."""
+    merge_incompatible: bool = False
+    """True for a singleton re-emitted because it was schema-incompatible with its transitive
+    cluster (H-2, ADR 0041); the pipeline dead-letters the skip while still materialising its
+    own correct-schema node. An ordinary (genuinely-merged or unjudged) cluster keeps it False."""
 
     @property
     def is_merge(self) -> bool:
@@ -199,23 +203,63 @@ def cluster_and_merge(
         # not from nomenklatura's random mint (the grouping key above is discarded), so a
         # crash+retry re-resolves to the SAME id and the graph MERGE converges.
         canonical_id = _canonical_id(member_ids)
+        merged, dropped = _merge_entities(canonical_id, member_ids, by_id)
+        if not dropped:
+            clusters.append(
+                ResolvedCluster(
+                    canonical_id=canonical_id,
+                    member_ids=member_ids,
+                    entity=merged,
+                    score=_cluster_score(member_ids, pair_scores),
+                )
+            )
+            continue
+        # H-2 (ADR 0041): one or more members had no common FtM schema with the merge base and
+        # could NOT be merged in. Rebuild the KEPT (genuinely-merged) cluster with a canonical id
+        # RE-DERIVED from only the kept set (ADR 0036 — the content-address must reflect what was
+        # actually merged, or a crash+retry would diverge), then re-emit EACH dropped member as
+        # its own correct-schema singleton so no cross-schema member ever enters a merged node and
+        # every member keeps its own node.
+        dropped_set = set(dropped)
+        kept = tuple(m for m in member_ids if m not in dropped_set)
+        kept_canon = _canonical_id(kept)
+        kept_entity, _ = _merge_entities(kept_canon, kept, by_id)
         clusters.append(
             ResolvedCluster(
-                canonical_id=canonical_id,
-                member_ids=member_ids,
-                entity=_merge_entities(canonical_id, member_ids, by_id),
-                score=_cluster_score(member_ids, pair_scores),
+                canonical_id=kept_canon,
+                member_ids=kept,
+                entity=kept_entity,
+                score=_cluster_score(kept, pair_scores),
             )
         )
+        for member_id in sorted(dropped):
+            clusters.append(
+                ResolvedCluster(
+                    canonical_id=member_id,
+                    member_ids=(member_id,),
+                    entity=by_id[member_id],
+                    score=1.0,
+                    merge_incompatible=True,
+                )
+            )
     return clusters
 
 
 def _merge_entities(
     canonical_id: str, member_ids: tuple[str, ...], by_id: dict[str, FtmEntity]
-) -> FtmEntity:
-    """Combine member entities into one canonical FtM entity under ``canonical_id``."""
+) -> tuple[FtmEntity, tuple[str, ...]]:
+    """Combine member entities into one canonical FtM entity under ``canonical_id``.
+
+    Returns ``(merged, dropped)`` where ``dropped`` is the set of member ids that had no
+    common FtM schema with the merge base and so could NOT be merged in (H-2, ADR 0041).
+    The base ``member_ids[0]`` is always mergeable into itself, so it is never in ``dropped``.
+    Surfacing the dropped set (instead of only logging it) lets ``cluster_and_merge`` re-emit
+    each dropped member as its own correct-schema singleton, so a cross-schema member never
+    enters a merged node and is never silently swallowed into the wrong-schema canonical.
+    """
     base = by_id[member_ids[0]]
     merged = make_entity({**base.to_dict(), "id": canonical_id})
+    dropped: list[str] = []
     for member_id in member_ids:
         try:
             merged.merge(by_id[member_id])
@@ -223,7 +267,8 @@ def _merge_entities(
             # Defence-in-depth: score_pairs already drops schema-incompatible candidate
             # pairs, but a TRANSITIVE cluster (A~B and B~C compatible, A~C not) could still
             # gather members with no common schema. FtM merge raises InvalidData on those —
-            # skip the offending member (logged for audit) rather than abort the whole batch.
+            # skip the offending member (logged for audit) AND surface it to the caller (H-2,
+            # ADR 0041) rather than abort the whole batch or swallow it silently.
             logger.warning(
                 "merge: skipped schema-incompatible member %s (%s) in cluster %s (%s)",
                 member_id,
@@ -231,7 +276,8 @@ def _merge_entities(
                 canonical_id,
                 merged.schema.name,
             )
-    return merged
+            dropped.append(member_id)
+    return merged, tuple(dropped)
 
 
 def _cluster_score(member_ids: tuple[str, ...], pair_scores: dict[frozenset[str], float]) -> float:
