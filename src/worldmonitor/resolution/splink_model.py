@@ -23,6 +23,7 @@ from followthemoney import model, registry
 from followthemoney.exc import InvalidData
 from splink import DuckDBAPI, Linker, SettingsCreator, block_on
 
+from worldmonitor.ontology.anchors import CANONICAL_ID_FIELDS
 from worldmonitor.ontology.ftm import FtmEntity
 
 # Splink is chatty on stdout/stderr; keep the pipeline quiet.
@@ -221,6 +222,66 @@ def _distinguishing_id_comparison() -> dict[str, Any]:
     }
 
 
+def _anchor_clash_comparison() -> dict[str, Any]:
+    # Negative-evidence comparison over the CANONICAL anchors (Gate B-5 / ADR 0040, Finding 1),
+    # symmetric in shape with B-3's ``_distinguishing_id_comparison``. Each ``CANONICAL_ID_FIELDS``
+    # anchor is single-valued and authoritative, so two records holding DISTINCT values for the
+    # SAME field are, by definition, two different real-world entities — the catastrophic merge the
+    # guard exists to prevent. The CLASH level uses m << u (the same shape ADR 0039 locked for the
+    # reg-id clash: m=0.0005, u=0.30, BF ~0.001667) so a single anchor clash drives the posterior
+    # below the 0.92 merge boundary even against name-exact × country-exact (and against an
+    # additional shared ``wikidataId`` property after the Part-1 relax). The rule iterates ALL
+    # CANONICAL_ID_FIELDS, so it is NOT hard-coded to wikidata (INV-1b).
+    #
+    # The columns are the ``anchor_<field>`` projection of the ``wm_anchor_<field>`` CONTEXT
+    # (``_anchor_value`` / ``_flatten``), NOT the FtM ``wikidataId`` property — they are independent
+    # signals (Finding 1 vs Findings 2/3). Each column is a non-null VARCHAR with ``''`` for a
+    # missing anchor (type stability + neutral null), so the level conditions key off ``= ''``.
+    #
+    # Level order is load-bearing: the null level (no field is present on BOTH sides) is evaluated
+    # FIRST, so a single-sided / absent anchor can NEVER reach the clash branch (a missing anchor is
+    # neutral, never penalising — mirrors B-3 INV-3b). The clash level then fires when ANY field has
+    # both sides present and DISTINCT. The ELSE level (some field present-and-equal, none clashing)
+    # is neutral (m == u, BF 1): a shared anchor CONTEXT is not double-counted here (the FtM
+    # property's exact level already scores a shared wikidata).
+    fields = CANONICAL_ID_FIELDS
+    both_present_any = " OR ".join(
+        f"(\"{_ANCHOR_COL_PREFIX}{f}_l\" <> '' AND \"{_ANCHOR_COL_PREFIX}{f}_r\" <> '')"
+        for f in fields
+    )
+    clash_any = " OR ".join(
+        f"(\"{_ANCHOR_COL_PREFIX}{f}_l\" <> '' AND \"{_ANCHOR_COL_PREFIX}{f}_r\" <> '' "
+        f'AND "{_ANCHOR_COL_PREFIX}{f}_l" <> "{_ANCHOR_COL_PREFIX}{f}_r")'
+        for f in fields
+    )
+    return {
+        "output_column_name": "anchor_clash",
+        "comparison_levels": [
+            {
+                # No canonical anchor field is present on BOTH sides -> nothing to compare.
+                "sql_condition": f"NOT ({both_present_any})",
+                "is_null_level": True,
+                "label_for_charts": "null",
+            },
+            {
+                # Some field is present on both sides with DISTINCT values -> distinct entities.
+                "sql_condition": clash_any,
+                "label_for_charts": "clash",
+                "m_probability": 0.0005,
+                "u_probability": 0.30,
+            },
+            {
+                # Some field present-and-equal on both sides, none clashing -> neutral (BF 1). The
+                # shared wikidataId PROPERTY is corroborated by its own exact level, not here.
+                "sql_condition": "ELSE",
+                "label_for_charts": "shared-or-neutral",
+                "m_probability": 0.5,
+                "u_probability": 0.5,
+            },
+        ],
+    }
+
+
 def _name_fingerprint(entity: FtmEntity) -> str | None:
     """Script-stable name key for matching, or ``None`` for a no-name entity.
 
@@ -262,6 +323,34 @@ def _name_fingerprint(entity: FtmEntity) -> str | None:
     return stripped
 
 
+# Column-name prefix for the projected canonical-anchor CONTEXT (Gate B-5 / ADR 0040, Slice 1).
+# These columns are projected from ``entity.context["wm_anchor_<field>"]`` (ADR 0018 / anchors.py),
+# NOT from FtM properties — the anchor-clash level reads the context, distinct from the existing
+# ``wikidata_id`` exact level which reads the ``wikidataId`` FtM *property* (Finding 1 vs 2/3).
+_ANCHOR_COL_PREFIX = "anchor_"
+
+
+def _anchor_value(entity: FtmEntity, field: str) -> str:
+    """Project one canonical anchor from the entity context into a clash-comparable VARCHAR.
+
+    Returns the entity's single value for ``field`` (the FIRST value if the context already holds
+    a list), or the EMPTY STRING ``""`` when the field is absent. The empty-string sentinel — never
+    ``None`` — keeps the projected column a stable ``VARCHAR`` even for an all-anchorless batch
+    (an all-``None`` pandas column is inferred as ``INTEGER`` and breaks the comparison SQL — the
+    same type-stability concern as ``_distinguishing_ids``). The anchor-clash comparison keys its
+    null level off ``= ''`` (either side absent), so a missing anchor stays neutral.
+    """
+    raw = entity.context.get(f"wm_anchor_{field}")
+    if isinstance(raw, list):
+        for candidate in raw:
+            if isinstance(candidate, str) and candidate:
+                return candidate
+        return ""
+    if isinstance(raw, str):
+        return raw
+    return ""
+
+
 def _flatten(entity: FtmEntity) -> dict[str, Any]:
     """Project an FtM entity onto the flat columns Splink compares.
 
@@ -269,7 +358,7 @@ def _flatten(entity: FtmEntity) -> dict[str, Any]:
     on a Company) yield ``None`` rather than raising.
     """
     countries = entity.get_type_values(registry.country)
-    return {
+    row: dict[str, Any] = {
         "unique_id": entity.id,
         "name_fp": _name_fingerprint(entity),
         "country": countries[0] if countries else None,
@@ -277,6 +366,12 @@ def _flatten(entity: FtmEntity) -> dict[str, Any]:
         "wikidata_id": entity.first("wikidataId", quiet=True),
         "reg_id": _distinguishing_ids(entity),
     }
+    # Project the canonical-anchor CONTEXT (one column per CANONICAL_ID_FIELDS field) for the
+    # anchor-clash comparison (Gate B-5 / ADR 0040, Finding 1). This is the wm_anchor_* context,
+    # NOT the wikidataId FtM property above.
+    for field in CANONICAL_ID_FIELDS:
+        row[f"{_ANCHOR_COL_PREFIX}{field}"] = _anchor_value(entity, field)
+    return row
 
 
 def _schema_compatible(left: FtmEntity, right: FtmEntity) -> bool:
@@ -315,8 +410,18 @@ def score_pairs(
             _name_comparison(),
             _exact_comparison("country", m=0.85, u=0.15),
             _exact_comparison("birth_date", m=0.9, u=0.02),
-            _exact_comparison("wikidata_id", m=0.999, u=0.000005),
+            # Gate B-5 / ADR 0040 Part 1 (Findings 2 + 3): a shared ``wikidataId`` FtM property is
+            # corroboration, NOT an override. The pre-B-5 ``u=0.000005`` gave Bayes factor 199 800,
+            # which alone cleared 0.92 against total name disagreement (H-5) and even swamped a
+            # CLASHING B-3 distinguishing id (Judge MEDIUM). ``u=0.02`` (a ~1-in-50 QID
+            # mis-enrichment / collision rate, orders of magnitude above the old 5e-6) drops the BF
+            # to ~50 — a strong corroborator (comparable to a shared registrationNumber's BF 95)
+            # that can no longer ALONE clear the threshold against an active name disagreement, and
+            # is vetoed by a present-but-clashing distinguishing id. A shared anchor WITH name
+            # corroboration still merges (INV-2b). See ADR 0040 Builder record for measured scores.
+            _exact_comparison("wikidata_id", m=0.999, u=0.02),
             _distinguishing_id_comparison(),
+            _anchor_clash_comparison(),
         ],
         blocking_rules_to_generate_predictions=[
             block_on("country"),
