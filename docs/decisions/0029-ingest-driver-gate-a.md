@@ -64,8 +64,9 @@ tested primitives with **no new resolution-correctness surface**.
 - ⚠️ Active connectors cannot run at all until the scope-token gate (fork F2) is built — intentional.
 
 ## Note — 2026-06-25 (ADR 0042: single-tenant)
-The system is now **single-tenant** (locked decision D1; [ADR 0042](0042-single-tenant.md) supersedes
-[ADR 0017](0017-tenant-scoping.md)) and `tenant_id` has been removed from all code. This amends the
+The system is now **single-tenant** (locked decision D1; [ADR 0042](0042-single-tenancy-teardown.md)
+supersedes [ADR 0017](0017-app-layer-tenant-isolation.md)) and `tenant_id` has been removed from all
+code. This amends the
 tenancy claims above without rewriting the Gate A decision:
 - **Per-tenant resolution routing is gone.** The driver no longer runs the distinct-tenant `select` that
   enumerated tenants, nor the `_resolve_tenant` per-tenant loop. `run_resolution` is now a **single pass**
