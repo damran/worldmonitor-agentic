@@ -329,3 +329,48 @@ def test_t5d_member_not_in_graph_is_clean_no_flag(
         "not an error and not a flag — k-hop runs before write_entities (VERIFIED_API.md)"
     )
     assert reason == "", "an absent member yields no k-hop reason"
+
+
+# --------------------------------------------------------------------------------------------
+# T5e — coupling-guard: the REAL emitted k-hop reason is classified non-exemptible (fence drift).
+# --------------------------------------------------------------------------------------------
+
+
+def test_t5e_real_khop_reason_is_nonexemptible(clean_graph: Neo4jClient, khop_depth: int) -> None:
+    """Coupling-guard: the ACTUAL reason ``needs_review`` EMITS for a k-hop-flagged cluster is
+    classified non-exemptible by ``guard.sensitivity.is_nonexemptible_reason``.
+
+    The approved-group exemption (``pipeline.py``) un-flags a cluster ⊆ an approved group UNLESS the
+    flag is non-exemptible; a Stage-2 k-hop graph-proximity flag MUST be non-exemptible (a prior
+    approval had no graph awareness — spec §5 / ADR 0047 Decision 5). The fence keys on a
+    MARKER baked into the guard's returned ``reason``. This reuses the T5a risk-adjacent
+    fixture (``near-1`` one hop from a ``:Sanction`` node), captures the REAL emitted k-hop
+    reason, and feeds it straight into the classifier — so the test BREAKS the instant the
+    Stage-2 reason-builder and ``is_nonexemptible_reason``'s marker DRIFT apart (the
+    person-relevant fail-open this pins).
+
+    REGRESSION-PIN: it PASSES on the current wired code; it is the integration half of the
+    marker-coupling guard whose Chow half is
+    ``tests/unit/test_exemption_fence.py::test_real_chow_reason_is_nonexemptible``.
+    """
+    from worldmonitor.guard.sensitivity import is_nonexemptible_reason
+
+    assert khop_depth == 1
+    clean_graph.execute_write(
+        "CREATE (risk:Entity:Person:Sanction {id: $risk}) "
+        "CREATE (near:Entity:Person {id: $near}) "
+        "CREATE (risk)-[:LINKED]->(near)",
+        risk="risk-1",
+        near="near-1",
+    )
+    merge = _merge_pair("near-1")
+    by_id = _by_id(merge)
+
+    flagged, reason = needs_review(merge, by_id, neo4j=clean_graph)
+    assert flagged is True, "fixture: near-1 one hop from a :Sanction node must flag via Stage 2"
+    assert is_nonexemptible_reason(reason) is True, (
+        "the REAL emitted k-hop reason must be classified non-exemptible — if this fails "
+        "the Stage-2 reason-builder has DRIFTED from is_nonexemptible_reason's marker and "
+        "the approved-group exemption fence would silently fail OPEN "
+        "(spec §5 / ADR 0047 Dec 5; DENY E-STALE-EXEMPT)"
+    )
