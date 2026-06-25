@@ -46,7 +46,6 @@ def test_live_opensanctions_spine(
     clean_graph: Neo4jClient, minio: tuple[str, str, str], postgres_dsn: str
 ) -> None:
     """collect -> landing -> ER queue -> resolve -> graph over a live dataset."""
-    tenant = "phase1-live"
     endpoint, access_key, secret_key = minio
     landing = LandingStore.connect(
         endpoint=endpoint, access_key=access_key, secret_key=secret_key, bucket="landing"
@@ -60,37 +59,33 @@ def test_live_opensanctions_spine(
         run_ingest(
             OpenSanctionsConnector(),
             {"dataset": "ie_unlawful_organizations"},
-            tenant_id=tenant,
             landing=landing,
             session=session,
         )
     with sessions() as session:
-        resolve_pending(session=session, neo4j=clean_graph, tenant_id=tenant)
+        resolve_pending(session=session, neo4j=clean_graph)
 
     # The sanctioned entity is a single resolved node...
-    node = get_entity(clean_graph, tenant_id=tenant, entity_id=_IRA_ID)
+    node = get_entity(clean_graph, entity_id=_IRA_ID)
     assert node is not None
     assert "Irish Republican Army" in node["name"]
-    assert node["tenant_id"] == tenant
 
     # ...carries the sanction topic (ftmg encodes topics as labels)...
     labels = clean_graph.execute_read(
-        "MATCH (n:Entity {tenant_id: $t, id: $id}) RETURN labels(n) AS labels", t=tenant, id=_IRA_ID
+        "MATCH (n:Entity {id: $id}) RETURN labels(n) AS labels", id=_IRA_ID
     )[0]["labels"]
     assert "Sanction" in labels
 
     # ...with provenance back to the raw landing record...
-    provenance = get_provenance(clean_graph, tenant_id=tenant, entity_id=_IRA_ID)
+    provenance = get_provenance(clean_graph, entity_id=_IRA_ID)
     assert provenance["prov_source_id"] == "opensanctions:ie_unlawful_organizations"
     assert provenance["prov_source_record"].startswith("s3://landing/")
 
-    # The whole dataset resolved into the tenant's graph (entities + the Sanction
-    # records), all tenant-scoped. (Neighbour linking is asserted in the dedup test
+    # The whole dataset resolved into the graph (entities + the Sanction
+    # records). (Neighbour linking is asserted in the dedup test
     # via an Ownership edge: ftmg does not materialise entity-links whose range is
     # the abstract `Thing` schema, e.g. Sanction.entity — a noted follow-up.)
-    count = clean_graph.execute_read(
-        "MATCH (n:Entity {tenant_id: $t}) RETURN count(n) AS n", t=tenant
-    )[0]["n"]
+    count = clean_graph.execute_read("MATCH (n:Entity) RETURN count(n) AS n")[0]["n"]
     assert count >= 3
 
     engine.dispose()
@@ -100,7 +95,6 @@ def test_deliberate_duplicate_collapses_to_one_node(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
     """A duplicated input yields one resolved node; a sanctioned entity is anchored."""
-    tenant = "phase1-dedup"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
@@ -116,7 +110,6 @@ def test_deliberate_duplicate_collapses_to_one_node(
         entity = stamp(make_entity(data), provenance)
         return ErQueueItem(
             id=str(uuid.uuid4()),
-            tenant_id=tenant,
             connector_id="opensanctions",
             raw_entity=entity.to_dict(),
             source_record=provenance.source_record,
@@ -176,26 +169,24 @@ def test_deliberate_duplicate_collapses_to_one_node(
         resolve_pending(
             session=session,
             neo4j=clean_graph,
-            tenant_id=tenant,
             enrich=WikidataEnricher(lookup=False).enrich,
         )
 
     # The deliberate duplicate collapses to exactly one resolved node.
     petrov_nodes = clean_graph.execute_read(
-        "MATCH (n:Company {tenant_id: $t}) WHERE 'Petrov Holdings Ltd' IN n.name RETURN n.id AS id",
-        t=tenant,
+        "MATCH (n:Company) WHERE 'Petrov Holdings Ltd' IN n.name RETURN n.id AS id",
     )
     assert len(petrov_nodes) == 1, "duplicate company must collapse to a single node"
 
     # The sanctioned entity: one node, canonical-ID anchored, provenance to landing.
-    ivan_node = get_entity(clean_graph, tenant_id=tenant, entity_id="ivan")
+    ivan_node = get_entity(clean_graph, entity_id="ivan")
     assert ivan_node is not None
     assert ivan_node["wikidata_id"] == "Q31337"
-    provenance = get_provenance(clean_graph, tenant_id=tenant, entity_id="ivan")
+    provenance = get_provenance(clean_graph, entity_id="ivan")
     assert provenance["prov_source_record"] == "s3://landing/ivan.json"
 
     # Neighbours linked correctly (the non-merged company it owns).
-    neighbor_ids = {n["id"] for n in get_neighbors(clean_graph, tenant_id=tenant, entity_id="ivan")}
+    neighbor_ids = {n["id"] for n in get_neighbors(clean_graph, entity_id="ivan")}
     assert "distinct-co" in neighbor_ids
 
     engine.dispose()

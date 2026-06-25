@@ -1,14 +1,15 @@
 """CLI for reviewing parked sensitive/oversized merges (ADR 0031).
 
-    python -m worldmonitor.review list    --tenant T
-    python -m worldmonitor.review approve --tenant T --canonical wmc-... --approver alice
-    python -m worldmonitor.review reject  --tenant T --canonical wmc-... --approver alice
+    python -m worldmonitor.review list
+    python -m worldmonitor.review approve --canonical wmc-... --approver alice
+    python -m worldmonitor.review reject  --canonical wmc-... --approver alice
 
 (``--canonical`` is the parked merge's canonical id from ``list``; a merge's id is the
 deterministic ``wmc-`` content id, ADR 0036.)
 
 ``--approver`` is the operator identity (a string in v0; Zitadel-backed in Phase 2);
-``--reason`` is optional. The API/UI surface is Phase 2; this is the v0 interface.
+``--reason`` is optional. The platform is single-tenant (D1, ADR 0042). The API/UI
+surface is Phase 2; this is the v0 interface.
 """
 
 from __future__ import annotations
@@ -30,14 +31,12 @@ def _parser() -> argparse.ArgumentParser:
         description="Review parked sensitive/oversized merges (ADR 0031).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    listed = sub.add_parser("list", help="list parked merges awaiting sign-off")
-    listed.add_argument("--tenant", required=True)
+    sub.add_parser("list", help="list parked merges awaiting sign-off")
     for name, helptext in (
         ("approve", "promote a parked merge"),
         ("reject", "split a parked merge"),
     ):
         action = sub.add_parser(name, help=helptext)
-        action.add_argument("--tenant", required=True)
         action.add_argument("--canonical", required=True)
         action.add_argument("--approver", required=True)
         action.add_argument("--reason", default="")
@@ -58,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
             # Pass neo4j so a half-committed sign-off (graph written, audit still pending —
             # the B-1 crash window) is surfaced as recoverable rather than silently stuck.
             with sessions() as session:
-                parked = signoff.list_parked(session, args.tenant, neo4j)
+                parked = signoff.list_parked(session, neo4j)
             for merge in parked:
                 logger.info(
                     "%s  reason=%s  members=%s  score=%.3f%s",
@@ -78,7 +77,6 @@ def main(argv: list[str] | None = None) -> int:
             result = decide(
                 session,
                 neo4j,
-                tenant_id=args.tenant,
                 canonical_id=args.canonical,
                 approver=args.approver,
                 reason=args.reason,

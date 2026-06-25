@@ -14,14 +14,12 @@ def record_merge(
     session: Session,
     cluster: ResolvedCluster,
     *,
-    tenant_id: str,
     decision: str,
     reason: str = "",
 ) -> MergeAudit:
     """Write one :class:`MergeAudit` row for a resolution decision (caller commits)."""
     audit = MergeAudit(
         id=str(uuid.uuid4()),
-        tenant_id=tenant_id,
         canonical_id=cluster.canonical_id,
         source_ids=list(cluster.member_ids),
         score=cluster.score,
@@ -36,7 +34,6 @@ def record_merge_alert(
     session: Session,
     cluster: ResolvedCluster,
     *,
-    tenant_id: str,
     reason: str,
 ) -> MergeAlert:
     """Write one :class:`MergeAlert` row for a flagged-but-merged cluster (caller commits).
@@ -46,7 +43,6 @@ def record_merge_alert(
     """
     alert = MergeAlert(
         id=str(uuid.uuid4()),
-        tenant_id=tenant_id,
         canonical_id=cluster.canonical_id,
         source_ids=list(cluster.member_ids),
         reason=reason,

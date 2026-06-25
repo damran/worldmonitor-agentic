@@ -105,13 +105,12 @@ def _harness(postgres_dsn: str, clean_graph: Neo4jClient, connector: Connector):
     return engine, sessions, driver, cipher
 
 
-def _add_instance(sessions, *, tenant_id: str, connector_id: str, cipher: ConfigCipher) -> str:
+def _add_instance(sessions, *, connector_id: str, cipher: ConfigCipher) -> str:
     instance_id = str(uuid.uuid4())
     with sessions() as session:
         session.add(
             ConnectorInstance(
                 id=instance_id,
-                tenant_id=tenant_id,
                 connector_id=connector_id,
                 config_encrypted=cipher.encrypt(json.dumps({"dataset": "d"})),
                 status="enabled",
@@ -124,9 +123,8 @@ def _add_instance(sessions, *, tenant_id: str, connector_id: str, cipher: Config
 def test_driver_runs_due_instance_and_records_task(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
-    tenant_id = "drv-happy-tenant"
     engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, _FakeConnector("fake-a"))
-    instance_id = _add_instance(sessions, tenant_id=tenant_id, connector_id="fake-a", cipher=cipher)
+    instance_id = _add_instance(sessions, connector_id="fake-a", cipher=cipher)
 
     # The driver runs ALL due instances (global, by design); the shared session-scoped
     # Postgres holds other tests' instances too, so assert membership, not equality.
@@ -140,15 +138,11 @@ def test_driver_runs_due_instance_and_records_task(
         assert instance.last_run == _NOW
         assert instance.next_run is not None and instance.next_run > _NOW  # cadence advanced
 
-        task = session.execute(
-            select(TaskRun).where(TaskRun.tenant_id == tenant_id, TaskRun.kind == "ingest")
-        ).scalar_one()
+        task = session.execute(select(TaskRun).where(TaskRun.kind == "ingest")).scalar_one()
         assert task.status == "ok"
         assert task.stats is not None and task.stats["queued"] == 2
 
-        queued = session.execute(
-            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.tenant_id == tenant_id)
-        ).scalar_one()
+        queued = session.execute(select(func.count()).select_from(ErQueueItem)).scalar_one()
         assert queued == 2
     engine.dispose()
 
@@ -157,24 +151,21 @@ def test_driver_reingest_is_idempotent_no_double_enqueue(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
     """A6: re-running the same instance does not double-enqueue (restart-safe)."""
-    tenant_id = "drv-idem-tenant"
     engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, _FakeConnector("fake-b"))
-    _add_instance(sessions, tenant_id=tenant_id, connector_id="fake-b", cipher=cipher)
+    _add_instance(sessions, connector_id="fake-b", cipher=cipher)
 
     driver.run_due_ingests(now=_NOW)
     later = _NOW + timedelta(seconds=10_000)  # past next_run, so the instance is due again
     driver.run_due_ingests(now=later)
 
     with sessions() as session:
-        queued = session.execute(
-            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.tenant_id == tenant_id)
-        ).scalar_one()
+        queued = session.execute(select(func.count()).select_from(ErQueueItem)).scalar_one()
         assert queued == 2, "re-ingest must not double-enqueue the same records"
 
         # The second ingest enqueued nothing new (all conflicts).
         second = session.execute(
             select(TaskRun)
-            .where(TaskRun.tenant_id == tenant_id, TaskRun.kind == "ingest")
+            .where(TaskRun.kind == "ingest")
             .order_by(TaskRun.started_at.desc())
             .limit(1)
         ).scalar_one()
@@ -185,10 +176,9 @@ def test_driver_reingest_is_idempotent_no_double_enqueue(
 def test_driver_records_error_and_does_not_leave_instance_running(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
-    tenant_id = "drv-fail-tenant"
     connector = _FakeConnector("fake-c", raise_on_collect=True)
     engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, connector)
-    instance_id = _add_instance(sessions, tenant_id=tenant_id, connector_id="fake-c", cipher=cipher)
+    instance_id = _add_instance(sessions, connector_id="fake-c", cipher=cipher)
 
     driver.run_due_ingests(now=_NOW)
 
@@ -200,7 +190,7 @@ def test_driver_records_error_and_does_not_leave_instance_running(
             instance.next_run is not None and instance.next_run > _NOW
         )  # still retries next cycle
 
-        task = session.execute(select(TaskRun).where(TaskRun.tenant_id == tenant_id)).scalar_one()
+        task = session.execute(select(TaskRun)).scalar_one()
         assert task.status == "error"
         assert "source unreachable" in task.error
     engine.dispose()
@@ -210,22 +200,19 @@ def test_driver_refuses_active_connector_visibly(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
     """An ACTIVE-capability connector is refused with a recorded error, never run silently."""
-    tenant_id = "drv-active-tenant"
     connector = _FakeConnector("fake-active", capability=Capability.ACTIVE)
     engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, connector)
-    _add_instance(sessions, tenant_id=tenant_id, connector_id="fake-active", cipher=cipher)
+    _add_instance(sessions, connector_id="fake-active", cipher=cipher)
 
     driver.run_due_ingests(now=_NOW)
 
     with sessions() as session:
-        task = session.execute(select(TaskRun).where(TaskRun.tenant_id == tenant_id)).scalar_one()
+        task = session.execute(select(TaskRun)).scalar_one()
         assert task.status == "error"
         assert "ACTIVE" in task.error  # the refusal reason is recorded, not silent
 
         # Nothing was ingested.
-        queued = session.execute(
-            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.tenant_id == tenant_id)
-        ).scalar_one()
+        queued = session.execute(select(func.count()).select_from(ErQueueItem)).scalar_one()
         assert queued == 0
     engine.dispose()
 
@@ -233,15 +220,12 @@ def test_driver_refuses_active_connector_visibly(
 def test_driver_recovers_stale_running_on_startup(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
-    tenant_id = "drv-stale-tenant"
     engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, _FakeConnector("fake-d"))
-    instance_id = _add_instance(sessions, tenant_id=tenant_id, connector_id="fake-d", cipher=cipher)
+    instance_id = _add_instance(sessions, connector_id="fake-d", cipher=cipher)
     # Simulate a crash: instance + task left "running".
     with sessions() as session:
         session.get(ConnectorInstance, instance_id).status = "running"  # type: ignore[union-attr]
-        session.add(
-            TaskRun(id=str(uuid.uuid4()), tenant_id=tenant_id, kind="ingest", status="running")
-        )
+        session.add(TaskRun(id=str(uuid.uuid4()), kind="ingest", status="running"))
         session.commit()
 
     reset = driver.recover_stale()
@@ -249,7 +233,7 @@ def test_driver_recovers_stale_running_on_startup(
 
     with sessions() as session:
         assert session.get(ConnectorInstance, instance_id).status == "enabled"  # type: ignore[union-attr]
-        task = session.execute(select(TaskRun).where(TaskRun.tenant_id == tenant_id)).scalar_one()
+        task = session.execute(select(TaskRun)).scalar_one()
         assert task.status == "error"
     engine.dispose()
 
@@ -257,7 +241,6 @@ def test_driver_recovers_stale_running_on_startup(
 def test_driver_resolution_pass_resolves_and_does_not_overlap(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
-    tenant_id = "drv-resolve-tenant"
     engine, sessions, driver, _cipher = _harness(
         postgres_dsn, clean_graph, _FakeConnector("fake-e")
     )
@@ -276,7 +259,6 @@ def test_driver_resolution_pass_resolves_and_does_not_overlap(
         )
         return ErQueueItem(
             id=str(uuid.uuid4()),
-            tenant_id=tenant_id,
             connector_id="fake-e",
             entity_id=entity_id,
             raw_entity=entity.to_dict(),
@@ -298,24 +280,18 @@ def test_driver_resolution_pass_resolves_and_does_not_overlap(
         driver._resolve_lock.release()
 
     # Now it runs: both candidates resolve and land in the graph.
-    resolved_tenants = driver.run_resolution(now=_NOW)
-    assert tenant_id in resolved_tenants
+    resolved = driver.run_resolution(now=_NOW)
+    assert driver._RESOLVED_MARKER in resolved
 
     with sessions() as session:
         pending = session.execute(
-            select(func.count())
-            .select_from(ErQueueItem)
-            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "pending")
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "pending")
         ).scalar_one()
         assert pending == 0
-        task = session.execute(
-            select(TaskRun).where(TaskRun.tenant_id == tenant_id, TaskRun.kind == "resolve")
-        ).scalar_one()
+        task = session.execute(select(TaskRun).where(TaskRun.kind == "resolve")).scalar_one()
         assert task.status == "ok"
 
-    nodes = clean_graph.execute_read(
-        "MATCH (n:Company {tenant_id: $t}) RETURN count(n) AS n", t=tenant_id
-    )[0]["n"]
+    nodes = clean_graph.execute_read("MATCH (n:Company) RETURN count(n) AS n")[0]["n"]
     assert nodes == 2  # two distinct companies, both written
     engine.dispose()
 
@@ -326,21 +302,13 @@ def test_prune_task_runs_removes_old_finished_only(
     """Pruning deletes finished task_run rows past the retention window (default 30d);
     recent rows and any ``running`` row are kept (WS5 hardening)."""
     engine, sessions, driver, _ = _harness(postgres_dsn, clean_graph, _FakeConnector("stub"))
-    tenant = "prune-tenant"
     old = _NOW - timedelta(days=60)
     with sessions() as session:
-        session.add(
-            TaskRun(
-                id="prune-old-ok", tenant_id=tenant, kind="ingest", status="ok", finished_at=old
-            )
-        )
-        session.add(
-            TaskRun(id="prune-old-running", tenant_id=tenant, kind="ingest", status="running")
-        )
+        session.add(TaskRun(id="prune-old-ok", kind="ingest", status="ok", finished_at=old))
+        session.add(TaskRun(id="prune-old-running", kind="ingest", status="running"))
         session.add(
             TaskRun(
                 id="prune-recent-ok",
-                tenant_id=tenant,
                 kind="resolve",
                 status="ok",
                 finished_at=_NOW,
@@ -351,10 +319,7 @@ def test_prune_task_runs_removes_old_finished_only(
     driver.prune_task_runs(now=_NOW)
 
     with sessions() as session:
-        remaining = {
-            row.id
-            for row in session.execute(select(TaskRun).where(TaskRun.tenant_id == tenant)).scalars()
-        }
+        remaining = {row.id for row in session.execute(select(TaskRun)).scalars()}
     assert "prune-old-ok" not in remaining, "an old finished row is pruned"
     assert {"prune-old-running", "prune-recent-ok"} <= remaining, "running + recent rows are kept"
     engine.dispose()
@@ -365,8 +330,8 @@ def test_run_due_ingests_survives_a_crashing_instance(
 ) -> None:
     """One instance crashing must never abort the tick or crash the driver loop (B1)."""
     engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, _FakeConnector("stub"))
-    id1 = _add_instance(sessions, tenant_id="resil-tenant", connector_id="stub", cipher=cipher)
-    id2 = _add_instance(sessions, tenant_id="resil-tenant", connector_id="stub", cipher=cipher)
+    id1 = _add_instance(sessions, connector_id="stub", cipher=cipher)
+    id2 = _add_instance(sessions, connector_id="stub", cipher=cipher)
 
     attempted: list[str] = []
 

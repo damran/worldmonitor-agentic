@@ -1,8 +1,9 @@
-"""Auth + tenant-context middleware.
+"""Auth middleware.
 
 Every request to a non-public path must carry a valid Zitadel bearer token.
-On success the verified :class:`Principal` (including ``tenant_id``) is attached
-to ``request.state`` so routes and downstream layers stay tenant-scoped.
+On success the verified :class:`Principal` is attached to ``request.state`` so
+routes and downstream layers can read the authenticated caller. The platform is
+single-tenant (D1, ADR 0042).
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ def _unauthorized(detail: str) -> JSONResponse:
 
 
 class AuthMiddleware:
-    """Pure-ASGI middleware enforcing OIDC auth and setting tenant context."""
+    """Pure-ASGI middleware enforcing OIDC auth."""
 
     def __init__(
         self,

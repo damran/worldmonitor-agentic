@@ -1,1 +1,1 @@
-"""Zitadel/OIDC, RBAC, tenant context, capability gating."""
+"""Zitadel/OIDC, RBAC, capability gating."""

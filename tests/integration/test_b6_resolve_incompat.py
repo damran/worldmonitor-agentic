@@ -44,7 +44,7 @@ _KEPT_IDS = ("a1", "a2")
 _DROPPED_ID = "z1"
 
 
-def _queue_item(tenant_id: str, data: dict[str, object], *, source: str) -> ErQueueItem:
+def _queue_item(data: dict[str, object], *, source: str) -> ErQueueItem:
     provenance = Provenance(
         source_id="opensanctions:test",
         retrieved_at="2026-06-23T00:00:00Z",
@@ -54,7 +54,6 @@ def _queue_item(tenant_id: str, data: dict[str, object], *, source: str) -> ErQu
     entity = stamp(make_entity(data), provenance)
     return ErQueueItem(
         id=str(uuid.uuid4()),
-        tenant_id=tenant_id,
         connector_id="opensanctions",
         entity_id=entity.id,  # real ingest stamps this (ingest.py); the pipeline maps rows by it
         raw_entity=entity.to_dict(),
@@ -63,11 +62,10 @@ def _queue_item(tenant_id: str, data: dict[str, object], *, source: str) -> ErQu
     )
 
 
-def _judgement(tenant_id: str, left: str, right: str, verdict: str) -> ResolverJudgement:
+def _judgement(left: str, right: str, verdict: str) -> ResolverJudgement:
     low, high = sorted((left, right))
     return ResolverJudgement(
         id=str(uuid.uuid4()),
-        tenant_id=tenant_id,
         left_id=low,
         right_id=high,
         judgement=verdict,
@@ -93,34 +91,30 @@ def _company(entity_id: str) -> dict[str, object]:
     }
 
 
-def _seed_transitive(sessions: sessionmaker[Session], tenant_id: str) -> None:
+def _seed_transitive(sessions: sessionmaker[Session]) -> None:
     """Seed two Persons + one Company and force a transitive cluster via positive judgements."""
     with sessions() as session:
-        session.add(_queue_item(tenant_id, _person("a1"), source="a1"))
-        session.add(_queue_item(tenant_id, _person("a2"), source="a2"))
-        session.add(_queue_item(tenant_id, _company("z1"), source="z1"))
+        session.add(_queue_item(_person("a1"), source="a1"))
+        session.add(_queue_item(_person("a2"), source="a2"))
+        session.add(_queue_item(_company("z1"), source="z1"))
         # a1~a2 (Person~Person) AND a2~z1 (Person~Company): a transitive chain that gathers a
         # cross-schema member. score_pairs alone never compares a1 vs z1, so positives force it.
-        session.add(_judgement(tenant_id, "a1", "a2", "positive"))
-        session.add(_judgement(tenant_id, "a2", "z1", "positive"))
+        session.add(_judgement("a1", "a2", "positive"))
+        session.add(_judgement("a2", "z1", "positive"))
         session.commit()
 
 
-def _status_of(sessions: sessionmaker[Session], tenant_id: str, entity_id: str) -> str:
+def _status_of(sessions: sessionmaker[Session], entity_id: str) -> str:
     with sessions() as session:
         return session.execute(
-            select(ErQueueItem.status).where(
-                ErQueueItem.tenant_id == tenant_id, ErQueueItem.entity_id == entity_id
-            )
+            select(ErQueueItem.status).where(ErQueueItem.entity_id == entity_id)
         ).scalar_one()
 
 
-def _node_ids(neo4j: Neo4jClient, tenant_id: str, label: str) -> list[str]:
+def _node_ids(neo4j: Neo4jClient, label: str) -> list[str]:
     return [
         row["id"]
-        for row in neo4j.execute_read(
-            f"MATCH (n:{label} {{tenant_id: $t}}) RETURN n.id AS id ORDER BY n.id", t=tenant_id
-        )
+        for row in neo4j.execute_read(f"MATCH (n:{label}) RETURN n.id AS id ORDER BY n.id")
     ]
 
 
@@ -128,41 +122,36 @@ def test_dropped_member_resolves_to_its_own_node_excluded_from_merge_and_dead_le
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
     """INV-4: z1 gets its own Company node, excluded from the merge audit, and dead-lettered."""
-    tenant_id = "b6-resolve-incompat"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
     ensure_constraints(clean_graph)
-    _seed_transitive(sessions, tenant_id)
+    _seed_transitive(sessions)
 
     with sessions() as session:
-        resolve_pending(session=session, neo4j=clean_graph, tenant_id=tenant_id)
+        resolve_pending(session=session, neo4j=clean_graph)
 
     # The dropped member z1 keeps its OWN correct-schema Company node — not swallowed.
-    company_ids = _node_ids(clean_graph, tenant_id, "Company")
+    company_ids = _node_ids(clean_graph, "Company")
     assert company_ids == [_DROPPED_ID], (
         "the schema-incompatible member must be written as its own correct-schema Company node"
     )
     # The kept members a1, a2 collapse to exactly ONE Person canonical node.
-    person_ids = _node_ids(clean_graph, tenant_id, "Person")
+    person_ids = _node_ids(clean_graph, "Person")
     assert len(person_ids) == 1, "the kept Person members merge into one canonical node"
     kept_canonical = person_ids[0]
     assert kept_canonical not in _KEPT_IDS, "the kept node is a merged canonical, not a member id"
     assert kept_canonical != _DROPPED_ID
 
     # The dropped member's queue row ends 'resolved' (its own node was written), NOT swallowed.
-    assert _status_of(sessions, tenant_id, _DROPPED_ID) == "resolved"
+    assert _status_of(sessions, _DROPPED_ID) == "resolved"
     for member_id in _KEPT_IDS:
-        assert _status_of(sessions, tenant_id, member_id) == "resolved"
+        assert _status_of(sessions, member_id) == "resolved"
 
     with sessions() as session:
         # The merged cluster's MergeAudit must EXCLUDE the dropped id from source_ids.
         merge_audits = list(
-            session.execute(
-                select(MergeAudit).where(
-                    MergeAudit.tenant_id == tenant_id, MergeAudit.decision == "merged"
-                )
-            ).scalars()
+            session.execute(select(MergeAudit).where(MergeAudit.decision == "merged")).scalars()
         )
         kept_audit = next(a for a in merge_audits if set(a.source_ids) == set(_KEPT_IDS))
         assert _DROPPED_ID not in kept_audit.source_ids, (
@@ -175,7 +164,6 @@ def test_dropped_member_resolves_to_its_own_node_excluded_from_merge_and_dead_le
         dead_letters = list(
             session.execute(
                 select(IngestDeadLetter).where(
-                    IngestDeadLetter.tenant_id == tenant_id,
                     IngestDeadLetter.stage == "resolve-incompat",
                 )
             ).scalars()
@@ -197,32 +185,29 @@ def test_rerun_converges_on_the_same_nodes(clean_graph: Neo4jClient, postgres_ds
     The kept canonical id is the content-address of the ACTUAL merged set, so a re-run never
     mints a duplicate/orphan node for the kept merge or the dropped singleton.
     """
-    tenant_id = "b6-resolve-incompat-rerun"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
     ensure_constraints(clean_graph)
-    _seed_transitive(sessions, tenant_id)
+    _seed_transitive(sessions)
 
     with sessions() as session:
-        resolve_pending(session=session, neo4j=clean_graph, tenant_id=tenant_id)
-    companies_first = _node_ids(clean_graph, tenant_id, "Company")
-    persons_first = _node_ids(clean_graph, tenant_id, "Person")
+        resolve_pending(session=session, neo4j=clean_graph)
+    companies_first = _node_ids(clean_graph, "Company")
+    persons_first = _node_ids(clean_graph, "Person")
 
     # Re-resolve the SAME records (e.g. a crash that rolled back the Postgres commit AFTER the
     # graph write — the ADR-0036 recovery scenario): reset the rows to pending and resolve again.
     # The durable positive judgements remain, so the transitive cluster reassembles; the
     # content-addressed canonical id must converge on the same nodes — no duplicate / orphan.
     with sessions() as session:
-        session.execute(
-            update(ErQueueItem).where(ErQueueItem.tenant_id == tenant_id).values(status="pending")
-        )
+        session.execute(update(ErQueueItem).values(status="pending"))
         session.commit()
     with sessions() as session:
-        resolve_pending(session=session, neo4j=clean_graph, tenant_id=tenant_id)
+        resolve_pending(session=session, neo4j=clean_graph)
 
-    companies_second = _node_ids(clean_graph, tenant_id, "Company")
-    persons_second = _node_ids(clean_graph, tenant_id, "Person")
+    companies_second = _node_ids(clean_graph, "Company")
+    persons_second = _node_ids(clean_graph, "Person")
     assert companies_second == companies_first == [_DROPPED_ID], (
         "the dropped singleton converges on its own id — no duplicate/orphan"
     )
@@ -234,9 +219,7 @@ def test_rerun_converges_on_the_same_nodes(clean_graph: Neo4jClient, postgres_ds
     with sessions() as session:
         # No row left pending — the drain terminated on both passes.
         pending = session.execute(
-            select(func.count())
-            .select_from(ErQueueItem)
-            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "pending")
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "pending")
         ).scalar_one()
         assert pending == 0
 

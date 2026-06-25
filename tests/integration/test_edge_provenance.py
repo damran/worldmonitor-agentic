@@ -26,20 +26,19 @@ def _stamped(data: dict[str, object], provenance: Provenance) -> FtmEntity:
     return stamp(make_entity(data), provenance)
 
 
-def _edge_by_id(client: Neo4jClient, tenant_id: str, edge_id: str) -> dict[str, object] | None:
+def _edge_by_id(client: Neo4jClient, edge_id: str) -> dict[str, object] | None:
     """Read the provenance an edge (matched by its FtM id) carries, or None."""
     rows = client.execute_read(
-        "MATCH ()-[r]->() WHERE r.tenant_id = $t AND r.id = $id "
+        "MATCH ()-[r]->() WHERE r.id = $id "
         "RETURN r.prov_source_id AS source_id, r.prov_retrieved_at AS retrieved_at, "
         "r.prov_reliability AS reliability, r.prov_source_record AS source_record",
-        t=tenant_id,
         id=edge_id,
     )
     return rows[0] if rows else None
 
 
 def test_first_class_edges_carry_assertion_provenance(
-    clean_graph: Neo4jClient, tenant_id: str
+    clean_graph: Neo4jClient,
 ) -> None:
     """An Ownership edge and a second edge type (Directorship) land with prov_*
     traceable to their s3:// landing record, and EVERY relationship carries
@@ -100,10 +99,10 @@ def test_first_class_edges_carry_assertion_provenance(
         directorship_prov,
     )
 
-    write_entities(clean_graph, [person, company, ownership, directorship], tenant_id=tenant_id)
+    write_entities(clean_graph, [person, company, ownership, directorship])
 
     # The Ownership edge traces back to the ownership assertion's landing record.
-    own_edge = _edge_by_id(clean_graph, tenant_id, "own-1")
+    own_edge = _edge_by_id(clean_graph, "own-1")
     assert own_edge is not None, "the Ownership relationship must be written"
     assert own_edge["source_id"] == ownership_prov.source_id
     assert own_edge["source_record"] == ownership_prov.source_record
@@ -111,7 +110,7 @@ def test_first_class_edges_carry_assertion_provenance(
     assert own_edge["retrieved_at"] == ownership_prov.retrieved_at
 
     # The second edge type carries its own assertion's provenance.
-    dir_edge = _edge_by_id(clean_graph, tenant_id, "dir-1")
+    dir_edge = _edge_by_id(clean_graph, "dir-1")
     assert dir_edge is not None, "the Directorship relationship must be written"
     assert dir_edge["source_id"] == directorship_prov.source_id
     assert dir_edge["source_record"] == directorship_prov.source_record
@@ -130,7 +129,7 @@ def test_first_class_edges_carry_assertion_provenance(
 
 
 def test_edge_provenance_is_the_asserting_source_not_an_endpoint(
-    clean_graph: Neo4jClient, tenant_id: str
+    clean_graph: Neo4jClient,
 ) -> None:
     """When the edge's source differs from BOTH endpoints' sources, the edge must
     reflect the asserting entity's provenance — never an endpoint's. This is the
@@ -177,9 +176,9 @@ def test_edge_provenance_is_the_asserting_source_not_an_endpoint(
         ownership_prov,
     )
 
-    write_entities(clean_graph, [person, company, ownership], tenant_id=tenant_id)
+    write_entities(clean_graph, [person, company, ownership])
 
-    edge = _edge_by_id(clean_graph, tenant_id, "own-2")
+    edge = _edge_by_id(clean_graph, "own-2")
     assert edge is not None, "the Ownership relationship must be written"
     # The edge reflects the asserting source...
     assert edge["source_id"] == ownership_prov.source_id
@@ -191,9 +190,8 @@ def test_edge_provenance_is_the_asserting_source_not_an_endpoint(
     # Cross-check: the endpoint NODES still carry their own, different provenance,
     # proving the edge did not simply inherit a neighbour node's.
     nodes = clean_graph.execute_read(
-        "MATCH (n:Entity) WHERE n.tenant_id = $t AND n.id IN ['p-2', 'c-2'] "
+        "MATCH (n:Entity) WHERE n.id IN ['p-2', 'c-2'] "
         "RETURN n.id AS id, n.prov_source_id AS source_id ORDER BY id",
-        t=tenant_id,
     )
     by_id = {n["id"]: n["source_id"] for n in nodes}
     assert by_id["p-2"] == person_prov.source_id

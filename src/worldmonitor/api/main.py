@@ -1,7 +1,8 @@
 """FastAPI application factory.
 
 The app boots with an unauthenticated ``/health`` probe; every other route is
-gated by Zitadel OIDC and carries tenant context (see :mod:`.middleware`).
+gated by Zitadel OIDC (see :mod:`.middleware`). The platform is single-tenant
+(D1, ADR 0042).
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ def create_app(
     async def me(  # pyright: ignore[reportUnusedFunction]
         principal: Annotated[Principal, Depends(get_principal)],
     ) -> dict[str, str]:
-        """Echo the authenticated principal and its tenant — auth-gated."""
-        return {"subject": principal.subject, "tenant_id": principal.tenant_id}
+        """Echo the authenticated principal — auth-gated."""
+        return {"subject": principal.subject}
 
     return app

@@ -1,12 +1,11 @@
 """Schema constraints + indexes for the resolved graph.
 
-Per-tenant uniqueness on the canonical anchor IDs (Wikidata / GeoNames / LEI /
-OpenCorporates) so the same real-world identifier can't land twice *inside* a
-tenant, plus a ``tenant_id`` index because every read is tenant-scoped. The
-anchors are populated later (entity resolution + reference anchors); creating the
+Uniqueness on the canonical anchor IDs (Wikidata / GeoNames / LEI /
+OpenCorporates) so the same real-world identifier can't land twice. The anchors
+are populated later (entity resolution + reference anchors); creating the
 constraints now is harmless and makes the invariant enforceable from the first
-write. Uniqueness is composite (``tenant_id`` + the ID) so two tenants may each
-hold the same canonical entity, and nodes without an anchor are unconstrained.
+write. The platform is single-tenant (D1, ADR 0042), so uniqueness is on the ID
+alone; nodes without an anchor are unconstrained.
 """
 
 from __future__ import annotations
@@ -23,12 +22,9 @@ CANONICAL_ID_PROPERTIES = CANONICAL_ID_FIELDS
 
 
 def ensure_constraints(client: Neo4jClient) -> None:
-    """Idempotently create canonical-ID uniqueness constraints + the tenant index."""
+    """Idempotently create the canonical-ID uniqueness constraints."""
     for prop in CANONICAL_ID_PROPERTIES:
         client.execute_write(
-            f"CREATE CONSTRAINT entity_tenant_{prop} IF NOT EXISTS "
-            f"FOR (n:{ENTITY_LABEL}) REQUIRE (n.tenant_id, n.{prop}) IS UNIQUE"
+            f"CREATE CONSTRAINT entity_{prop} IF NOT EXISTS "
+            f"FOR (n:{ENTITY_LABEL}) REQUIRE n.{prop} IS UNIQUE"
         )
-    client.execute_write(
-        f"CREATE INDEX entity_tenant_id IF NOT EXISTS FOR (n:{ENTITY_LABEL}) ON (n.tenant_id)"
-    )

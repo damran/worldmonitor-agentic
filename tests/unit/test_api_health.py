@@ -6,7 +6,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from worldmonitor.api.main import create_app
-from worldmonitor.authz.oidc import ORG_ID_CLAIM, InvalidTokenError
+from worldmonitor.authz.oidc import InvalidTokenError
 from worldmonitor.settings import Settings
 
 
@@ -16,7 +16,7 @@ class _FakeVerifier:
     def verify(self, token: str) -> Mapping[str, Any]:
         if token != "good":
             raise InvalidTokenError("bad token")
-        return {"sub": "user-123", ORG_ID_CLAIM: "tenant-abc"}
+        return {"sub": "user-123"}
 
 
 def _client(verifier: object | None) -> TestClient:
@@ -40,10 +40,10 @@ def test_protected_route_rejects_bad_token() -> None:
     assert resp.status_code == 401
 
 
-def test_protected_route_accepts_valid_token_and_sets_tenant() -> None:
+def test_protected_route_accepts_valid_token() -> None:
     resp = _client(_FakeVerifier()).get("/me", headers={"Authorization": "Bearer good"})
     assert resp.status_code == 200
-    assert resp.json() == {"subject": "user-123", "tenant_id": "tenant-abc"}
+    assert resp.json() == {"subject": "user-123"}
 
 
 def test_unconfigured_auth_rejects_protected_route() -> None:

@@ -1,8 +1,8 @@
 """The long-running ingest driver (ADR 0029).
 
 Turns the call-once primitives (``run_ingest``, ``resolve_pending``) into a running
-system: it reads the tenant-scoped ``ConnectorInstance`` registry, runs each enabled
-connector on a cadence, and resolves the queue on its own independent cadence.
+system: it reads the ``ConnectorInstance`` registry, runs each enabled connector on a
+cadence, and resolves the queue on its own independent cadence.
 
 Scope (Gate A, batch sources on a timer, single-node):
 * Runs **EXTERNAL_IMPORT** connectors via the bounded/windowed ``run_ingest``.
@@ -177,14 +177,12 @@ class IngestDriver:
             session.add(
                 TaskRun(
                     id=task_id,
-                    tenant_id=instance.tenant_id,
                     connector_instance_id=instance_id,
                     kind="ingest",
                     status="running",
                 )
             )
-            tenant_id, connector_id, config_token = (
-                instance.tenant_id,
+            connector_id, config_token = (
                 instance.connector_id,
                 instance.config_encrypted,
             )
@@ -204,14 +202,13 @@ class IngestDriver:
                 result = run_ingest(
                     connector,
                     config,
-                    tenant_id=tenant_id,
                     landing=self._landing,
                     session=work,
                 )
             stats = asdict(result)
         except Exception as exc:
             status, error = "error", f"{type(exc).__name__}: {exc}"[:_ERROR_SUMMARY_MAX]
-            logger.warning("ingest task failed [%s/%s]: %s", tenant_id, connector_id, exc)
+            logger.warning("ingest task failed [%s]: %s", connector_id, exc)
 
         # 3. Finalize task + instance (status, cadence).
         self._finalize(
@@ -219,49 +216,49 @@ class IngestDriver:
         )
 
     # -- resolution pass ----------------------------------------------------- #
+    # Marker returned by ``run_resolution`` when a single-tenant resolution pass ran
+    # (there was a pending backlog). The per-tenant id list of the multi-tenant design
+    # collapses to this one constant under D1 (ADR 0042); an empty list still means
+    # "no work / skipped this tick".
+    _RESOLVED_MARKER = "__all__"
+
     def run_resolution(self, *, now: datetime) -> list[str]:
-        """Resolve pending candidates for every tenant with a backlog.
+        """Resolve pending candidates in a SINGLE pass when there is a backlog.
 
         Serialized: if a resolution is already running (a slow prior tick), this
-        tick is skipped rather than overlapping it. Returns the tenant ids resolved.
+        tick is skipped rather than overlapping it. Returns ``[_RESOLVED_MARKER]`` if a
+        resolution pass ran this tick, or ``[]`` if there was no backlog or the tick was
+        skipped (single-tenant, D1 / ADR 0042).
         """
         if not self._resolve_lock.acquire(blocking=False):
             logger.info("resolution already in progress; skipping this tick")
             return []
         try:
             with self._sessions() as session:
-                tenant_ids = [
-                    row[0]
-                    for row in session.execute(
-                        select(ErQueueItem.tenant_id)
-                        .where(ErQueueItem.status == "pending")
-                        .distinct()
-                    )
-                ]
-            for tenant_id in tenant_ids:
-                try:
-                    self._resolve_tenant(tenant_id, now=now)
-                except Exception:
-                    # One tenant's failure must never abort the pass or crash the driver.
-                    logger.exception("resolution for tenant %s crashed; continuing", tenant_id)
-            return tenant_ids
+                has_backlog = session.execute(
+                    select(ErQueueItem.id).where(ErQueueItem.status == "pending").limit(1)
+                ).first()
+            if has_backlog is None:
+                return []
+            self._resolve(now=now)
+            return [self._RESOLVED_MARKER]
         finally:
             self._resolve_lock.release()
 
-    def _resolve_tenant(self, tenant_id: str, *, now: datetime) -> None:
+    def _resolve(self, *, now: datetime) -> None:
         with self._sessions() as session:
             task_id = str(uuid.uuid4())
-            session.add(TaskRun(id=task_id, tenant_id=tenant_id, kind="resolve", status="running"))
+            session.add(TaskRun(id=task_id, kind="resolve", status="running"))
             session.commit()
 
         status, error, stats = "ok", "", None
         try:
             with self._sessions() as work:
-                result = resolve_pending(session=work, neo4j=self._neo4j, tenant_id=tenant_id)
+                result = resolve_pending(session=work, neo4j=self._neo4j)
             stats = asdict(result)
         except Exception as exc:
             status, error = "error", f"{type(exc).__name__}: {exc}"[:_ERROR_SUMMARY_MAX]
-            logger.warning("resolve task failed [%s]: %s", tenant_id, exc)
+            logger.warning("resolve task failed: %s", exc)
 
         self._finalize(
             task_id, None, status=status, error=error, stats=stats, now=now, kind="resolve"

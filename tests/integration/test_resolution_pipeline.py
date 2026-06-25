@@ -21,10 +21,9 @@ from worldmonitor.resolution.pipeline import resolve_pending
 pytestmark = pytest.mark.integration
 
 
-def _queue_item(tenant_id: str, entity: dict[str, object]) -> ErQueueItem:
+def _queue_item(entity: dict[str, object]) -> ErQueueItem:
     return ErQueueItem(
         id=str(uuid.uuid4()),
-        tenant_id=tenant_id,
         connector_id="opensanctions",
         raw_entity=entity,
         source_record=f"s3://landing/{entity['id']}.json",
@@ -78,23 +77,18 @@ def _candidates() -> list[dict[str, object]]:
 
 
 def test_resolve_pending_pipeline(clean_graph: Neo4jClient, postgres_dsn: str) -> None:
-    # Dedicated tenant so this test is isolated from other tests' ER-queue rows in
-    # the shared (session-scoped) Postgres.
-    tenant_id = "er-pipeline-tenant"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
 
     with sessions() as session:
         for candidate in _candidates():
-            session.add(_queue_item(tenant_id, candidate))
+            session.add(_queue_item(candidate))
         session.commit()
 
     with sessions() as session:
         # mode="block" (current/pre-ADR-0024 behavior): sanctioned merge is parked.
-        stats = resolve_pending(
-            session=session, neo4j=clean_graph, tenant_id=tenant_id, guard_mode="block"
-        )
+        stats = resolve_pending(session=session, neo4j=clean_graph, guard_mode="block")
 
     # 3 clusters: {c1,c2} merged, {c3} singleton, {p1,p2} sanctioned -> review.
     assert stats.pending == 5
@@ -105,24 +99,17 @@ def test_resolve_pending_pipeline(clean_graph: Neo4jClient, postgres_dsn: str) -
 
     # The duplicate companies collapsed to ONE node; distinct company stands alone;
     # no sanctioned person was written to the graph.
-    company_nodes = clean_graph.execute_read(
-        "MATCH (n:Company) RETURN n.id AS id, n.tenant_id AS tenant"
-    )
+    company_nodes = clean_graph.execute_read("MATCH (n:Company) RETURN n.id AS id")
     assert len(company_nodes) == 2
-    assert all(row["tenant"] == tenant_id for row in company_nodes)
     person_nodes = clean_graph.execute_read("MATCH (n:Person) RETURN count(n) AS n")
     assert person_nodes[0]["n"] == 0
 
     with sessions() as session:
         merged = session.execute(
-            select(func.count())
-            .select_from(MergeAudit)
-            .where(MergeAudit.tenant_id == tenant_id, MergeAudit.decision == "merged")
+            select(func.count()).select_from(MergeAudit).where(MergeAudit.decision == "merged")
         ).scalar_one()
         review = session.execute(
-            select(MergeAudit).where(
-                MergeAudit.tenant_id == tenant_id, MergeAudit.decision == "pending_review"
-            )
+            select(MergeAudit).where(MergeAudit.decision == "pending_review")
         ).scalar_one()
         assert merged == 2  # the {c1,c2} merge + the {c3} singleton
         assert sorted(review.source_ids) == ["p1", "p2"]
@@ -130,14 +117,12 @@ def test_resolve_pending_pipeline(clean_graph: Neo4jClient, postgres_dsn: str) -
 
         # Queue statuses reflect the decisions.
         resolved = session.execute(
-            select(func.count())
-            .select_from(ErQueueItem)
-            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "resolved")
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "resolved")
         ).scalar_one()
         in_review = session.execute(
             select(func.count())
             .select_from(ErQueueItem)
-            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "pending_review")
+            .where(ErQueueItem.status == "pending_review")
         ).scalar_one()
         assert resolved == 3
         assert in_review == 2
@@ -154,20 +139,17 @@ def test_resolve_pending_alert_mode_writes_and_records(
     {p1,p2} cluster is no longer parked — it merges, lands in Neo4j, and leaves a
     durable, auditable trail.
     """
-    tenant_id = "er-pipeline-alert-tenant"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
 
     with sessions() as session:
         for candidate in _candidates():
-            session.add(_queue_item(tenant_id, candidate))
+            session.add(_queue_item(candidate))
         session.commit()
 
     with sessions() as session:
-        stats = resolve_pending(
-            session=session, neo4j=clean_graph, tenant_id=tenant_id, guard_mode="alert"
-        )
+        stats = resolve_pending(session=session, neo4j=clean_graph, guard_mode="alert")
 
     # All 3 clusters proceed; the flagged one is promoted-with-alert, none parked.
     assert stats.pending == 5
@@ -177,9 +159,7 @@ def test_resolve_pending_alert_mode_writes_and_records(
     assert stats.alerts == 1
 
     # The sanctioned person WAS written to the graph (unlike block mode).
-    person_nodes = clean_graph.execute_read(
-        "MATCH (n:Person {tenant_id: $t}) RETURN n.id AS id", t=tenant_id
-    )
+    person_nodes = clean_graph.execute_read("MATCH (n:Person) RETURN n.id AS id")
     assert len(person_nodes) == 1, "the flagged sanctioned merge must be written in alert mode"
 
     with sessions() as session:
@@ -187,27 +167,23 @@ def test_resolve_pending_alert_mode_writes_and_records(
         in_review = session.execute(
             select(func.count())
             .select_from(MergeAudit)
-            .where(MergeAudit.tenant_id == tenant_id, MergeAudit.decision == "pending_review")
+            .where(MergeAudit.decision == "pending_review")
         ).scalar_one()
         assert in_review == 0
 
         # The durable alert trail: exactly one row, for the sanctioned {p1,p2} merge.
-        alert = session.execute(
-            select(MergeAlert).where(MergeAlert.tenant_id == tenant_id)
-        ).scalar_one()
+        alert = session.execute(select(MergeAlert)).scalar_one()
         assert sorted(alert.source_ids) == ["p1", "p2"]
         assert "sensitive" in alert.reason.lower()
 
         # Queue: all items resolved, none left in review.
         resolved = session.execute(
-            select(func.count())
-            .select_from(ErQueueItem)
-            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "resolved")
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "resolved")
         ).scalar_one()
         in_review_items = session.execute(
             select(func.count())
             .select_from(ErQueueItem)
-            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "pending_review")
+            .where(ErQueueItem.status == "pending_review")
         ).scalar_one()
         assert resolved == 5
         assert in_review_items == 0

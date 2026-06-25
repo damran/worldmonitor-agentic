@@ -2,8 +2,8 @@
 
 A :class:`TokenVerifier` validates a bearer JWT against Zitadel's published
 signing keys (JWKS) and returns its claims. :class:`Principal` is the
-authenticated identity attached to each request, carrying the ``tenant_id`` so
-every downstream layer stays tenant-scoped.
+authenticated identity attached to each request. The platform is single-tenant
+(D1, ADR 0042).
 """
 
 from __future__ import annotations
@@ -15,9 +15,6 @@ from typing import Any, Protocol, runtime_checkable
 import jwt
 from jwt import PyJWKClient
 
-# Zitadel emits the org id (= our tenant) in this reserved claim.
-ORG_ID_CLAIM = "urn:zitadel:iam:org:id"
-
 
 class InvalidTokenError(Exception):
     """Raised when a bearer token cannot be verified."""
@@ -28,14 +25,12 @@ class Principal:
     """An authenticated caller derived from a verified token."""
 
     subject: str
-    tenant_id: str
     claims: Mapping[str, Any]
 
     @classmethod
     def from_claims(cls, claims: Mapping[str, Any]) -> Principal:
         return cls(
             subject=str(claims.get("sub", "")),
-            tenant_id=str(claims.get(ORG_ID_CLAIM, "")),
             claims=dict(claims),
         )
 

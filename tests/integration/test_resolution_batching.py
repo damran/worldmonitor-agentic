@@ -26,10 +26,9 @@ from worldmonitor.resolution.pipeline import resolve_pending
 pytestmark = pytest.mark.integration
 
 
-def _queue_item(tenant_id: str, entity: dict[str, object]) -> ErQueueItem:
+def _queue_item(entity: dict[str, object]) -> ErQueueItem:
     return ErQueueItem(
         id=str(uuid.uuid4()),
-        tenant_id=tenant_id,
         connector_id="opensanctions",
         raw_entity=entity,
         source_record=f"s3://landing/{entity['id']}.json",
@@ -51,16 +50,15 @@ def _petrov(entity_id: str) -> dict[str, object]:
     return _company(entity_id, "Petrov Holdings Ltd", "cy")
 
 
-def _seed(sessions, tenant_id: str, entities: list[dict[str, object]]) -> None:
+def _seed(sessions, entities: list[dict[str, object]]) -> None:
     with sessions() as session:
         for entity in entities:
-            session.add(_queue_item(tenant_id, entity))
+            session.add(_queue_item(entity))
         session.commit()
 
 
 def test_drains_whole_queue_in_bounded_batches(clean_graph: Neo4jClient, postgres_dsn: str) -> None:
     """Five distinct candidates with batch_size=2 drain across 3 batches, all written."""
-    tenant_id = "batch-drain-tenant"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
@@ -73,12 +71,10 @@ def test_drains_whole_queue_in_bounded_batches(clean_graph: Neo4jClient, postgre
         _company("d4", "Umbrella", "fr"),
         _company("d5", "Stark Industries", "jp"),
     ]
-    _seed(sessions, tenant_id, distinct)
+    _seed(sessions, distinct)
 
     with sessions() as session:
-        stats = resolve_pending(
-            session=session, neo4j=clean_graph, tenant_id=tenant_id, batch_size=2
-        )
+        stats = resolve_pending(session=session, neo4j=clean_graph, batch_size=2)
 
     # 5 rows / window of 2 -> batches of [2, 2, 1] = 3 batches; all promoted.
     assert stats.batches == 3
@@ -87,17 +83,13 @@ def test_drains_whole_queue_in_bounded_batches(clean_graph: Neo4jClient, postgre
     assert stats.promoted == 5
     assert stats.review == 0
 
-    nodes = clean_graph.execute_read(
-        "MATCH (n:Company {tenant_id: $t}) RETURN count(n) AS n", t=tenant_id
-    )[0]["n"]
+    nodes = clean_graph.execute_read("MATCH (n:Company) RETURN count(n) AS n")[0]["n"]
     assert nodes == 5, "every distinct candidate must be written, across all batches"
 
     # The queue is fully drained — nothing left pending.
     with sessions() as session:
         pending = session.execute(
-            select(func.count())
-            .select_from(ErQueueItem)
-            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "pending")
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "pending")
         ).scalar_one()
         assert pending == 0
 
@@ -106,26 +98,21 @@ def test_drains_whole_queue_in_bounded_batches(clean_graph: Neo4jClient, postgre
 
 def test_within_batch_duplicates_merge(clean_graph: Neo4jClient, postgres_dsn: str) -> None:
     """Two duplicates in the SAME batch still collapse to one canonical node."""
-    tenant_id = "batch-within-tenant"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
     ensure_constraints(clean_graph)
 
-    _seed(sessions, tenant_id, [_petrov("petrov-a"), _petrov("petrov-b")])
+    _seed(sessions, [_petrov("petrov-a"), _petrov("petrov-b")])
 
     with sessions() as session:
         # batch_size comfortably holds both, so they are scored together and merge.
-        stats = resolve_pending(
-            session=session, neo4j=clean_graph, tenant_id=tenant_id, batch_size=10
-        )
+        stats = resolve_pending(session=session, neo4j=clean_graph, batch_size=10)
 
     assert stats.batches == 1
     assert stats.clusters == 1
     assert stats.promoted == 1
-    nodes = clean_graph.execute_read(
-        "MATCH (n:Company {tenant_id: $t}) RETURN count(n) AS n", t=tenant_id
-    )[0]["n"]
+    nodes = clean_graph.execute_read("MATCH (n:Company) RETURN count(n) AS n")[0]["n"]
     assert nodes == 1, "duplicates in one batch must merge"
 
     engine.dispose()
@@ -140,26 +127,21 @@ def test_cross_batch_duplicates_are_not_merged_v0_limitation(
     never scored against each other. They land as two separate nodes. Closing this
     gap is incremental ER, deferred to the ER-streaming gate (ADR 0019).
     """
-    tenant_id = "batch-cross-tenant"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
     ensure_constraints(clean_graph)
 
-    _seed(sessions, tenant_id, [_petrov("petrov-a"), _petrov("petrov-b")])
+    _seed(sessions, [_petrov("petrov-a"), _petrov("petrov-b")])
 
     with sessions() as session:
-        stats = resolve_pending(
-            session=session, neo4j=clean_graph, tenant_id=tenant_id, batch_size=1
-        )
+        stats = resolve_pending(session=session, neo4j=clean_graph, batch_size=1)
 
     # Two single-item batches; each is a singleton cluster, promoted separately.
     assert stats.batches == 2
     assert stats.clusters == 2
     assert stats.promoted == 2
-    nodes = clean_graph.execute_read(
-        "MATCH (n:Company {tenant_id: $t}) RETURN count(n) AS n", t=tenant_id
-    )[0]["n"]
+    nodes = clean_graph.execute_read("MATCH (n:Company) RETURN count(n) AS n")[0]["n"]
     assert nodes == 2, "cross-batch duplicates are not merged in v0 (incremental ER deferred)"
 
     engine.dispose()
@@ -169,7 +151,6 @@ def test_batched_resolution_rerun_is_idempotent_noop(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
     """After a batched drain, re-running resolves nothing and writes nothing."""
-    tenant_id = "batch-idem-tenant"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
@@ -177,28 +158,21 @@ def test_batched_resolution_rerun_is_idempotent_noop(
 
     _seed(
         sessions,
-        tenant_id,
         [_company("d1", "Acme Corporation", "us"), _company("d2", "Globex", "gb"), _petrov("p-a")],
     )
 
     with sessions() as session:
-        first = resolve_pending(
-            session=session, neo4j=clean_graph, tenant_id=tenant_id, batch_size=2
-        )
+        first = resolve_pending(session=session, neo4j=clean_graph, batch_size=2)
     assert first.pending == 3
     assert first.batches == 2  # [2, 1]
 
     def _node_count() -> int:
-        return clean_graph.execute_read(
-            "MATCH (n:Entity {tenant_id: $t}) RETURN count(n) AS n", t=tenant_id
-        )[0]["n"]
+        return clean_graph.execute_read("MATCH (n:Entity) RETURN count(n) AS n")[0]["n"]
 
     before = _node_count()
 
     with sessions() as session:
-        second = resolve_pending(
-            session=session, neo4j=clean_graph, tenant_id=tenant_id, batch_size=2
-        )
+        second = resolve_pending(session=session, neo4j=clean_graph, batch_size=2)
 
     # Nothing pending the second time: no batches run, graph unchanged.
     assert second.pending == 0
@@ -219,7 +193,6 @@ def test_unresolvable_id_row_is_quarantined_not_looped_forever(
     forever. The safety sweep marks it 'invalid' so the drain terminates; the valid
     row alongside it still resolves.
     """
-    tenant_id = "batch-invalid-tenant"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
@@ -232,26 +205,20 @@ def test_unresolvable_id_row_is_quarantined_not_looped_forever(
         "properties": {"name": ["No Id Co"], "jurisdiction": ["gb"]},
         "datasets": ["t"],
     }
-    _seed(sessions, tenant_id, [valid, unusable])
+    _seed(sessions, [valid, unusable])
 
     # If the sweep regressed, this call would never return (infinite drain loop).
     with sessions() as session:
-        stats = resolve_pending(
-            session=session, neo4j=clean_graph, tenant_id=tenant_id, batch_size=10
-        )
+        stats = resolve_pending(session=session, neo4j=clean_graph, batch_size=10)
 
     assert stats.promoted == 1  # only the valid row resolves
 
     with sessions() as session:
         invalid = session.execute(
-            select(func.count())
-            .select_from(ErQueueItem)
-            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "invalid")
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "invalid")
         ).scalar_one()
         pending = session.execute(
-            select(func.count())
-            .select_from(ErQueueItem)
-            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "pending")
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "pending")
         ).scalar_one()
         assert invalid == 1
         assert pending == 0  # queue fully drained, nothing left to loop on

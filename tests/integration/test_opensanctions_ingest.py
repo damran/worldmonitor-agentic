@@ -20,7 +20,7 @@ pytestmark = pytest.mark.integration
 _DATASET = "ie_unlawful_organizations"
 
 
-def test_collect_land_queue(minio: tuple[str, str, str], postgres_dsn: str, tenant_id: str) -> None:
+def test_collect_land_queue(minio: tuple[str, str, str], postgres_dsn: str) -> None:
     endpoint, access_key, secret_key = minio
     landing = LandingStore.connect(
         endpoint=endpoint, access_key=access_key, secret_key=secret_key, bucket="landing"
@@ -34,7 +34,6 @@ def test_collect_land_queue(minio: tuple[str, str, str], postgres_dsn: str, tena
         stats = run_ingest(
             connector,
             {"dataset": _DATASET, "limit": 4},
-            tenant_id=tenant_id,
             landing=landing,
             session=session,
         )
@@ -42,22 +41,16 @@ def test_collect_land_queue(minio: tuple[str, str, str], postgres_dsn: str, tena
     assert stats.collected >= 1
     assert stats.collected == stats.landed == stats.queued
 
-    # Raw records landed in MinIO under the tenant/connector prefix.
-    keys = landing.list_keys(prefix=f"{tenant_id}/opensanctions/")
+    # Raw records landed in MinIO under the connector prefix.
+    keys = landing.list_keys(prefix="opensanctions/")
     assert len(keys) == stats.landed
 
-    # Candidates are in the ER queue, tenant-scoped, with provenance + landing pointer.
+    # Candidates are in the ER queue, with provenance + landing pointer.
     with sessions() as session:
-        count = session.execute(
-            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.tenant_id == tenant_id)
-        ).scalar_one()
+        count = session.execute(select(func.count()).select_from(ErQueueItem)).scalar_one()
         assert count == stats.queued
 
-        # Tenant-scope this lookup: the ER queue is shared (session-scoped Postgres),
-        # so an unfiltered limit(1) could pick another test's row.
-        row = session.execute(
-            select(ErQueueItem).where(ErQueueItem.tenant_id == tenant_id).limit(1)
-        ).scalar_one()
+        row = session.execute(select(ErQueueItem).limit(1)).scalar_one()
         assert row.connector_id == "opensanctions"
         assert row.raw_entity["schema"]
         assert row.raw_entity["wm_prov_source_id"] == [f"opensanctions:{_DATASET}"]

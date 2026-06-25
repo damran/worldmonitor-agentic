@@ -117,9 +117,9 @@ def _sessions(postgres_dsn: str):
     return engine, session_factory(engine)
 
 
-def _count(sessions, model, tenant_id: str, **filters: object) -> int:
+def _count(sessions, model, **filters: object) -> int:
     with sessions() as session:
-        stmt = select(func.count()).select_from(model).where(model.tenant_id == tenant_id)
+        stmt = select(func.count()).select_from(model)
         for attr, value in filters.items():
             stmt = stmt.where(getattr(model, attr) == value)
         return session.execute(stmt).scalar_one()
@@ -127,7 +127,6 @@ def _count(sessions, model, tenant_id: str, **filters: object) -> int:
 
 def test_windowed_commits_persist_progress_before_a_source_failure(postgres_dsn: str) -> None:
     """Records committed in earlier windows survive a later collect() failure."""
-    tenant_id = "ingest-window-tenant"
     engine, sessions = _sessions(postgres_dsn)
     connector = _FakeConnector([_record("r0"), _record("r1"), _record("r2")], raise_at_end=True)
     landing = _FakeLanding()
@@ -137,18 +136,16 @@ def test_windowed_commits_persist_progress_before_a_source_failure(postgres_dsn:
         run_ingest(
             connector,
             {"dataset": "d"},
-            tenant_id=tenant_id,
             landing=landing,  # type: ignore[arg-type]
             session=session,
             commit_every=1,
         )
 
-    assert _count(sessions, ErQueueItem, tenant_id) == 3, "committed windows must persist"
+    assert _count(sessions, ErQueueItem) == 3, "committed windows must persist"
     engine.dispose()
 
 
 def test_full_run_commits_in_windows(postgres_dsn: str) -> None:
-    tenant_id = "ingest-window2-tenant"
     engine, sessions = _sessions(postgres_dsn)
     connector = _FakeConnector([_record(f"r{i}") for i in range(5)])
     landing = _FakeLanding()
@@ -157,7 +154,6 @@ def test_full_run_commits_in_windows(postgres_dsn: str) -> None:
         stats = run_ingest(
             connector,
             {"dataset": "d"},
-            tenant_id=tenant_id,
             landing=landing,  # type: ignore[arg-type]
             session=session,
             commit_every=2,
@@ -169,13 +165,12 @@ def test_full_run_commits_in_windows(postgres_dsn: str) -> None:
     assert stats.dead_lettered == 0
     assert stats.windows == 3  # [2, 2, 1]
     assert stats.stopped_reason == "exhausted"
-    assert _count(sessions, ErQueueItem, tenant_id) == 5
+    assert _count(sessions, ErQueueItem) == 5
     engine.dispose()
 
 
 def test_max_records_caps_an_unbounded_collect(postgres_dsn: str) -> None:
     """An infinite collect() is stopped by the record cap."""
-    tenant_id = "ingest-cap-tenant"
     engine, sessions = _sessions(postgres_dsn)
     connector = _FakeConnector(infinite=True)
     landing = _FakeLanding()
@@ -184,7 +179,6 @@ def test_max_records_caps_an_unbounded_collect(postgres_dsn: str) -> None:
         stats = run_ingest(
             connector,
             {"dataset": "d"},
-            tenant_id=tenant_id,
             landing=landing,  # type: ignore[arg-type]
             session=session,
             max_records=3,
@@ -193,13 +187,12 @@ def test_max_records_caps_an_unbounded_collect(postgres_dsn: str) -> None:
     assert stats.collected == 3
     assert stats.queued == 3
     assert stats.stopped_reason == "max_records"
-    assert _count(sessions, ErQueueItem, tenant_id) == 3
+    assert _count(sessions, ErQueueItem) == 3
     engine.dispose()
 
 
 def test_wall_clock_timeout_terminates_an_unbounded_collect(postgres_dsn: str) -> None:
     """An infinite collect() that keeps yielding is stopped by the deadline (no hang)."""
-    tenant_id = "ingest-timeout-tenant"
     engine, sessions = _sessions(postgres_dsn)
     connector = _FakeConnector(infinite=True, per_record_sleep=0.05)
     landing = _FakeLanding()
@@ -208,7 +201,6 @@ def test_wall_clock_timeout_terminates_an_unbounded_collect(postgres_dsn: str) -
         stats = run_ingest(
             connector,
             {"dataset": "d"},
-            tenant_id=tenant_id,
             landing=landing,  # type: ignore[arg-type]
             session=session,
             timeout=0.2,
@@ -223,7 +215,6 @@ def test_wall_clock_timeout_terminates_an_unbounded_collect(postgres_dsn: str) -
 
 def test_map_failure_is_dead_lettered_and_run_continues(postgres_dsn: str) -> None:
     """A record that fails to map is recorded in ingest_dead_letter; others still enqueue."""
-    tenant_id = "ingest-dlq-map-tenant"
     engine, sessions = _sessions(postgres_dsn)
     connector = _FakeConnector(
         [_record("r0"), _record("r1"), _record("r2")], fail_map_on=frozenset({"r1"})
@@ -234,7 +225,6 @@ def test_map_failure_is_dead_lettered_and_run_continues(postgres_dsn: str) -> No
         stats = run_ingest(
             connector,
             {"dataset": "d"},
-            tenant_id=tenant_id,
             landing=landing,  # type: ignore[arg-type]
             session=session,
         )
@@ -244,12 +234,10 @@ def test_map_failure_is_dead_lettered_and_run_continues(postgres_dsn: str) -> No
     assert stats.queued == 2  # r0, r2
     assert stats.dead_lettered == 1
     assert stats.stopped_reason == "exhausted"
-    assert _count(sessions, ErQueueItem, tenant_id) == 2
+    assert _count(sessions, ErQueueItem) == 2
 
     with sessions() as session:
-        dl = session.execute(
-            select(IngestDeadLetter).where(IngestDeadLetter.tenant_id == tenant_id)
-        ).scalar_one()
+        dl = session.execute(select(IngestDeadLetter)).scalar_one()
         assert dl.stage == "map"
         assert dl.source_key == "r1"
         assert dl.source_record is not None
@@ -260,7 +248,6 @@ def test_map_failure_is_dead_lettered_and_run_continues(postgres_dsn: str) -> No
 
 def test_land_failure_is_dead_lettered_with_no_landing_pointer(postgres_dsn: str) -> None:
     """A record that fails to land is dead-lettered with a null source_record."""
-    tenant_id = "ingest-dlq-land-tenant"
     engine, sessions = _sessions(postgres_dsn)
     connector = _FakeConnector([_record("r0"), _record("r1"), _record("r2")])
     landing = _FakeLanding(fail_on=frozenset({"r1.json"}))
@@ -269,7 +256,6 @@ def test_land_failure_is_dead_lettered_with_no_landing_pointer(postgres_dsn: str
         stats = run_ingest(
             connector,
             {"dataset": "d"},
-            tenant_id=tenant_id,
             landing=landing,  # type: ignore[arg-type]
             session=session,
         )
@@ -280,9 +266,7 @@ def test_land_failure_is_dead_lettered_with_no_landing_pointer(postgres_dsn: str
     assert stats.dead_lettered == 1
 
     with sessions() as session:
-        dl = session.execute(
-            select(IngestDeadLetter).where(IngestDeadLetter.tenant_id == tenant_id)
-        ).scalar_one()
+        dl = session.execute(select(IngestDeadLetter)).scalar_one()
         assert dl.stage == "land"
         assert dl.source_key == "r1"
         assert dl.source_record is None  # nothing landed

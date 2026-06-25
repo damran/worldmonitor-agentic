@@ -1,10 +1,12 @@
 """followthemoney-graph (ftmg) adapter — writes FtM entities into Neo4j.
 
 ftmg owns the FtM -> property-graph transformation (schema -> labels, edges,
-property links, topic labels). It is single-tenant by design, so this adapter
-wraps ftmg's query generators and its :class:`QueryBatcher` to (a) inject
-``tenant_id`` into every parameter set and (b) tenant-scope every MERGE/MATCH
-key — upholding the non-negotiable "tenant_id on every node and edge" invariant.
+property links, topic labels), and is single-tenant by design. This adapter wraps
+ftmg's query generators and its :class:`QueryBatcher` to project provenance
+(``prov_*``) + the canonical anchors onto every node AND every relationship —
+upholding the non-negotiable "provenance on every node and edge" invariant (G1).
+ftmg's native ``{id}`` MERGE/MATCH key is used directly (the platform is
+single-tenant, D1 / ADR 0042).
 
 ftmg ships no type stubs, so it is imported only here; the boundary's ``Unknown``
 types are relaxed for this module alone while the public API stays fully typed.
@@ -35,38 +37,12 @@ from worldmonitor.ontology.ftm import FtmEntity
 from worldmonitor.provenance.model import provenance_node_properties
 
 
-class WriterError(RuntimeError):
-    """Raised when ftmg emits a query this adapter cannot tenant-scope."""
-
-
-# ftmg's generated node-key patterns -> tenant-scoped replacements. If a future
-# ftmg release changes these, `_tenantize_query` fails loudly rather than
-# silently writing tenant-leaky data.
-_KEY_REWRITES: dict[str, str] = {
-    "{id: props.id}": "{id: props.id, tenant_id: props.tenant_id}",
-    "{id: item.source_id}": "{id: item.source_id, tenant_id: item.tenant_id}",
-    "{id: item.target_id}": "{id: item.target_id, tenant_id: item.tenant_id}",
-    "{id: item.id}": "{id: item.id, tenant_id: item.tenant_id}",
-}
-
-
-def _tenantize_query(query: str) -> str:
-    """Rewrite ftmg's node-key matches to be tenant-scoped, or raise."""
-    rewritten = query
-    for old, new in _KEY_REWRITES.items():
-        rewritten = rewritten.replace(old, new)
-    if "tenant_id" not in rewritten:
-        raise WriterError(f"ftmg query could not be tenant-scoped:\n{query}")
-    return rewritten
-
-
-def _inject_tenant(
+def _inject_props(
     params: dict[str, Any],
-    tenant_id: str,
     node_props_by_id: dict[str, dict[str, str]] | None = None,
     edge_props: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Stamp ``tenant_id`` onto params, plus the provenance the batch kind needs.
+    """Project the provenance the batch kind needs onto its params (G1).
 
     Node params (Pass 1) get their anchors + provenance via ``node_props_by_id``.
     Relationship params (Pass 2) carry a nested ``props`` dict that ftmg ``SET``s
@@ -76,13 +52,11 @@ def _inject_tenant(
     untouched (the labelled node already carries its own provenance).
     """
     stamped = dict(params)
-    stamped["tenant_id"] = tenant_id
     props = stamped.get("props")
     if isinstance(props, dict):
-        # Relationship batch: ftmg sets `r = item.props`, so tenant_id and the
-        # asserting entity's provenance must live inside the nested props.
+        # Relationship batch: ftmg sets `r = item.props`, so the asserting entity's
+        # provenance must live inside the nested props.
         nested: dict[str, Any] = dict(props)
-        nested["tenant_id"] = tenant_id
         if edge_props:
             nested.update(edge_props)
         stamped["props"] = nested
@@ -94,16 +68,15 @@ def _inject_tenant(
     return stamped
 
 
-def _tenantize(
+def _with_props(
     batch: Any,
-    tenant_id: str,
     node_props_by_id: dict[str, dict[str, str]] | None = None,
     edge_props: dict[str, str] | None = None,
 ) -> Any:
-    """Return a copy of an ftmg ``QueryBatch`` that is tenant-scoped (+ node/edge props)."""
+    """Return a copy of an ftmg ``QueryBatch`` with node/edge provenance projected (G1)."""
     return QueryBatch(
-        query=_tenantize_query(batch.query),
-        params=_inject_tenant(batch.params, tenant_id, node_props_by_id, edge_props),
+        query=batch.query,
+        params=_inject_props(batch.params, node_props_by_id, edge_props),
     )
 
 
@@ -142,20 +115,17 @@ def _ftmg_config(client: Neo4jClient) -> Any:
     )
 
 
-def write_entities(client: Neo4jClient, entities: Iterable[FtmEntity], *, tenant_id: str) -> None:
-    """Write FtM ``entities`` into Neo4j for ``tenant_id`` (nodes, then edges/links).
+def write_entities(client: Neo4jClient, entities: Iterable[FtmEntity]) -> None:
+    """Write FtM ``entities`` into Neo4j (nodes, then edges/links).
 
-    Mirrors ftmg's two-pass load — nodes first so relationships can MATCH them.
-    Every node and relationship carries ``tenant_id`` and every key match is
-    tenant-scoped, so tenants can never collide on a shared FtM id. Provenance
-    (``prov_*``) is projected onto every node *and* every relationship: an edge
-    carries the provenance of the assertion that created it — the edge entity
-    itself (Ownership/Sanction/…) or, for an entity-reference link, the
+    Mirrors ftmg's two-pass load — nodes first so relationships can MATCH them,
+    keyed by ftmg's native FtM/canonical ``{id}`` (single-tenant, D1 / ADR 0042).
+    Provenance (``prov_*``) is projected onto every node *and* every relationship:
+    an edge carries the provenance of the assertion that created it — the edge
+    entity itself (Ownership/Sanction/…) or, for an entity-reference link, the
     property-holder — **not** either endpoint's. This upholds "provenance on every
-    node *and edge*" (the GDPR/audit-log invariant).
+    node *and edge*" (the GDPR/audit-log invariant, G1).
     """
-    if not tenant_id:
-        raise WriterError("tenant_id is required")
     materialized = list(entities)
     config = _ftmg_config(client)
     node_props_by_id = {
@@ -172,7 +142,7 @@ def write_entities(client: Neo4jClient, entities: Iterable[FtmEntity], *, tenant
             if entity.schema.edge:
                 continue
             for batch in generate_node_entity(config, entity):
-                batcher.add(_tenantize(batch, tenant_id, node_props_by_id))
+                batcher.add(_with_props(batch, node_props_by_id))
         batcher.flush()
 
     # Pass 2 — relationships: edge entities, property links, and topic labels.
@@ -188,15 +158,13 @@ def write_entities(client: Neo4jClient, entities: Iterable[FtmEntity], *, tenant
             edge_prov = provenance_node_properties(entity)
             if entity.schema.edge:
                 for batch in generate_edge_entity(config, entity):
-                    batcher.add(_tenantize(batch, tenant_id, edge_props=edge_prov))
+                    batcher.add(_with_props(batch, edge_props=edge_prov))
             else:
                 # Entity-typed property links: realign the `entity:`-prefixed endpoint ids
                 # to the raw node ids so the link materializes (H3). Edge-schema and topic
                 # batches already key on raw ids, so only this generator is realigned.
                 for batch in generate_entity_links(config, entity):
-                    batcher.add(
-                        _tenantize(_align_entity_link_ids(batch), tenant_id, edge_props=edge_prov)
-                    )
+                    batcher.add(_with_props(_align_entity_link_ids(batch), edge_props=edge_prov))
                 for batch in generate_topic_labels(config, entity):
-                    batcher.add(_tenantize(batch, tenant_id, edge_props=edge_prov))
+                    batcher.add(_with_props(batch, edge_props=edge_prov))
         batcher.flush()

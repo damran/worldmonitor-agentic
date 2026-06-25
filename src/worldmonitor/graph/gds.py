@@ -1,8 +1,9 @@
 """Graph Data Science — one degree-centrality run over the resolved graph.
 
-Projects a tenant's resolved subgraph and ranks nodes by degree centrality to
-surface the most-connected entities (flagging sanctioned ones). The projection is
-tenant-scoped via a Cypher projection and always dropped afterwards.
+Projects the resolved graph and ranks nodes by degree centrality to surface the
+most-connected entities (flagging sanctioned ones). The platform is single-tenant
+(D1, ADR 0042); the projection is built via a Cypher projection and always dropped
+afterwards.
 """
 
 from __future__ import annotations
@@ -31,16 +32,14 @@ class DegreeResult:
 def degree_centrality(
     client: Neo4jClient,
     *,
-    tenant_id: str,
     top: int = 10,
     graph_name: str = _DEFAULT_GRAPH,
 ) -> list[DegreeResult]:
-    """Project ``tenant_id``'s resolved graph and return the top nodes by degree."""
+    """Project the resolved graph and return the top nodes by degree."""
     client.execute_write(
-        "MATCH (s:Entity {tenant_id: $tenant_id}) "
-        "OPTIONAL MATCH (s)-[]->(tgt:Entity {tenant_id: $tenant_id}) "
+        "MATCH (s:Entity) "
+        "OPTIONAL MATCH (s)-[]->(tgt:Entity) "
         "WITH gds.graph.project($graph, s, tgt) AS g RETURN g.graphName AS name",
-        tenant_id=tenant_id,
         graph=graph_name,
     )
     try:

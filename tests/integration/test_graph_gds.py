@@ -13,7 +13,7 @@ pytestmark = pytest.mark.integration
 
 
 def test_degree_centrality_flags_central_sanctioned_node(
-    neo4j_gds_client: Neo4jClient, tenant_id: str
+    neo4j_gds_client: Neo4jClient,
 ) -> None:
     client = neo4j_gds_client
     client.execute_write("MATCH (n) DETACH DELETE n")
@@ -49,9 +49,9 @@ def test_degree_centrality_flags_central_sanctioned_node(
         )
         for i in range(3)
     ]
-    write_entities(client, [hub, *subsidiaries, *ownerships], tenant_id=tenant_id)
+    write_entities(client, [hub, *subsidiaries, *ownerships])
 
-    results = degree_centrality(client, tenant_id=tenant_id, top=10)
+    results = degree_centrality(client, top=10)
 
     assert results, "expected degree-centrality results"
     top = results[0]

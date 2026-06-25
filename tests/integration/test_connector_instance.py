@@ -30,7 +30,6 @@ def test_connector_instance_roundtrip_encrypted(postgres_dsn: str) -> None:
         session.add(
             ConnectorInstance(
                 id="inst-1",
-                tenant_id="test-tenant",
                 connector_id="opensanctions",
                 config_encrypted=blob,
                 status="enabled",
@@ -42,7 +41,6 @@ def test_connector_instance_roundtrip_encrypted(postgres_dsn: str) -> None:
         row = session.execute(
             select(ConnectorInstance).where(ConnectorInstance.id == "inst-1")
         ).scalar_one()
-        assert row.tenant_id == "test-tenant"
         assert row.connector_id == "opensanctions"
         assert row.created_at is not None
         # Stored ciphertext must not leak the plaintext secret.

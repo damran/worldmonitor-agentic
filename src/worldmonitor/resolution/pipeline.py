@@ -1,9 +1,8 @@
 """Entity-resolution pipeline: ER queue → score → cluster/merge → guard → graph.
 
-Reads pending candidates for a tenant and resolves them (Splink score →
-nomenklatura cluster → FtM merge), applies the catastrophic-merge guard, records
-the audit trail, rewrites referents to canonical ids, and upserts auto-promoted
-canonical entities into Neo4j.
+Reads pending candidates and resolves them (Splink score → nomenklatura cluster →
+FtM merge), applies the catastrophic-merge guard, records the audit trail, rewrites
+referents to canonical ids, and upserts auto-promoted canonical entities into Neo4j.
 
 The queue is drained in **bounded batches** (ADR 0026): ``resolve_pending`` loads
 at most ``RESOLVE_BATCH_SIZE`` pending rows, resolves that window, commits, and
@@ -73,13 +72,12 @@ def resolve_pending(
     *,
     session: Session,
     neo4j: Neo4jClient,
-    tenant_id: str,
     merge_threshold: float = DEFAULT_MERGE_THRESHOLD,
     enrich: Callable[[FtmEntity], FtmEntity] | None = None,
     guard_mode: str | None = None,
     batch_size: int | None = None,
 ) -> ResolveStats:
-    """Resolve pending ER-queue candidates for ``tenant_id``, draining in batches.
+    """Resolve pending ER-queue candidates, draining in batches.
 
     The queue is processed in bounded windows of ``batch_size`` rows (default
     ``RESOLVE_BATCH_SIZE`` from settings): each batch is scored, clustered,
@@ -100,17 +98,14 @@ def resolve_pending(
         raise ValueError(f"batch_size must be a positive integer, got {size}")
 
     # Durable sign-off judgements (ADR 0031) — loaded once, seeded into every batch's
-    # ephemeral resolver so a reviewed cluster never re-parks. Tenant-scoped (G4).
-    judgements = _load_judgements(session, tenant_id)
+    # ephemeral resolver so a reviewed cluster never re-parks.
+    judgements = _load_judgements(session)
     pending = clusters = promoted = review = alerts = batches = 0
     while True:
         items = list(
             session.execute(
                 select(ErQueueItem)
-                .where(
-                    ErQueueItem.tenant_id == tenant_id,
-                    ErQueueItem.status == "pending",
-                )
+                .where(ErQueueItem.status == "pending")
                 .order_by(ErQueueItem.created_at, ErQueueItem.id)
                 .limit(size)
             ).scalars()
@@ -121,7 +116,6 @@ def resolve_pending(
             session,
             neo4j,
             items,
-            tenant_id=tenant_id,
             mode=mode,
             merge_threshold=merge_threshold,
             enrich=enrich,
@@ -145,11 +139,9 @@ def resolve_pending(
     )
 
 
-def _load_judgements(session: Session, tenant_id: str) -> list[StoredJudgement]:
-    """Load this tenant's durable sign-off judgements (ADR 0031) to seed each batch."""
-    rows = session.execute(
-        select(ResolverJudgement).where(ResolverJudgement.tenant_id == tenant_id)
-    ).scalars()
+def _load_judgements(session: Session) -> list[StoredJudgement]:
+    """Load the durable sign-off judgements (ADR 0031) to seed each batch."""
+    rows = session.execute(select(ResolverJudgement)).scalars()
     return [StoredJudgement(row.left_id, row.right_id, row.judgement) for row in rows]
 
 
@@ -193,8 +185,8 @@ def _quarantine(session: Session, items: Sequence[ErQueueItem], *, stage: str, r
     Containment for a poison input at any resolution stage: the offending rows leave the
     ``pending`` set (so the bounded drain always terminates) and are recorded in
     ``ingest_dead_letter`` with their ``source_record`` — replayable, never silently lost —
-    mirroring the ingest land/map dead-letter pattern. A poison row/batch must never wedge a
-    tenant's queue by re-loading and re-failing forever.
+    mirroring the ingest land/map dead-letter pattern. A poison row/batch must never wedge the
+    queue by re-loading and re-failing forever.
     """
     summary = reason[:_ERROR_SUMMARY_MAX]
     for item in items:
@@ -202,7 +194,6 @@ def _quarantine(session: Session, items: Sequence[ErQueueItem], *, stage: str, r
         session.add(
             IngestDeadLetter(
                 id=str(uuid.uuid4()),
-                tenant_id=item.tenant_id,
                 connector_id=item.connector_id,
                 source_key=item.entity_id or item.source_record or item.id,
                 source_record=item.source_record,
@@ -237,7 +228,6 @@ def _record_skip(
         session.add(
             IngestDeadLetter(
                 id=str(uuid.uuid4()),
-                tenant_id=item.tenant_id,
                 connector_id=item.connector_id,
                 source_key=item.entity_id or item.source_record or item.id,
                 source_record=item.source_record,
@@ -260,7 +250,6 @@ def _resolve_batch(
     neo4j: Neo4jClient,
     items: list[ErQueueItem],
     *,
-    tenant_id: str,
     mode: str,
     merge_threshold: float,
     enrich: Callable[[FtmEntity], FtmEntity] | None,
@@ -274,7 +263,7 @@ def _resolve_batch(
     one FtM id move together — so a drained batch can never be re-loaded by the outer loop.
 
     **Every stage that can raise on bad input is isolated (audit B-2, ADR 0038)** so a single
-    poison input never aborts the batch and wedges the tenant's drain. A bad ROW is quarantined
+    poison input never aborts the batch and wedges the drain. A bad ROW is quarantined
     individually (construction); an unscoreable/unclusterable BATCH is quarantined as a set;
     an invalid merged entity is quarantined before the write. Quarantine = status ``invalid`` +
     a dead-letter (replayable). A genuine write/infra failure is left to propagate so the driver
@@ -349,9 +338,7 @@ def _resolve_batch(
 
         # mode="block": park the flagged cluster for human review; never write it.
         if flagged and mode == "block":
-            record_merge(
-                session, cluster, tenant_id=tenant_id, decision="pending_review", reason=reason
-            )
+            record_merge(session, cluster, decision="pending_review", reason=reason)
             _set_status(cluster.member_ids, "pending_review")
             review += 1
             continue
@@ -377,7 +364,7 @@ def _resolve_batch(
         # mode="alert": the guard still flagged it, but the build phase proceeds —
         # write the merge and record a durable, auditable merge_alerts row.
         if flagged:
-            record_merge_alert(session, cluster, tenant_id=tenant_id, reason=reason)
+            record_merge_alert(session, cluster, reason=reason)
             alerts += 1
             logger.warning(
                 "catastrophic-merge guard ALERT (MERGE_GUARD_MODE=alert): merged flagged "
@@ -387,7 +374,7 @@ def _resolve_batch(
                 alerts,
             )
 
-        record_merge(session, cluster, tenant_id=tenant_id, decision="merged", reason=reason)
+        record_merge(session, cluster, decision="merged", reason=reason)
         _set_status(cluster.member_ids, "resolved")
         promoted_entities.append(entity)
         promoted_clusters.append(cluster)
@@ -420,7 +407,7 @@ def _resolve_batch(
         referents = build_referent_map(promoted_clusters)
         for entity in promoted_entities:
             rewrite_referents(entity, referents)
-        write_entities(neo4j, promoted_entities, tenant_id=tenant_id)
+        write_entities(neo4j, promoted_entities)
 
     return ResolveStats(
         pending=len(items),

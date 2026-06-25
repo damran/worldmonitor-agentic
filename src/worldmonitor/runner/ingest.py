@@ -49,10 +49,10 @@ _UNSAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._-]")
 
 def _safe_segment(value: str) -> str:
     """Sanitize a connector/config-controlled path segment so it cannot escape its
-    landing-zone prefix (G4). ``record.key`` is derived from hostile parsed source
-    data; collapse path separators + other unsafe chars to ``_`` and strip leading
-    dots, so neither ``/`` nor ``..`` can redirect the S3 object key out of the
-    ``tenant_id/connector_id/...`` prefix."""
+    landing-zone prefix. ``record.key`` is derived from hostile parsed source data;
+    collapse path separators + other unsafe chars to ``_`` and strip leading dots, so
+    neither ``/`` nor ``..`` can redirect the S3 object key out of the
+    ``connector_id/...`` prefix."""
     cleaned = _UNSAFE_SEGMENT.sub("_", value).lstrip(".")
     return cleaned or "_"
 
@@ -75,7 +75,6 @@ class IngestStats:
 def _record_dead_letter(
     session: Session,
     *,
-    tenant_id: str,
     connector_id: str,
     source_key: str,
     source_record: str | None,
@@ -86,7 +85,6 @@ def _record_dead_letter(
     session.add(
         IngestDeadLetter(
             id=str(uuid.uuid4()),
-            tenant_id=tenant_id,
             connector_id=connector_id,
             source_key=source_key,
             source_record=source_record,
@@ -95,8 +93,7 @@ def _record_dead_letter(
         )
     )
     logger.warning(
-        "ingest dead-letter [%s/%s] stage=%s key=%s: %s",
-        tenant_id,
+        "ingest dead-letter [%s] stage=%s key=%s: %s",
         connector_id,
         stage,
         source_key,
@@ -108,7 +105,6 @@ def run_ingest(
     connector: Connector,
     config: Mapping[str, Any],
     *,
-    tenant_id: str,
     landing: LandingStore,
     session: Session,
     reliability: str = "B",
@@ -116,7 +112,7 @@ def run_ingest(
     timeout: float | None = None,
     max_records: int | None = None,
 ) -> IngestStats:
-    """Run ``connector`` for ``tenant_id``: land raw records and enqueue candidates.
+    """Run ``connector``: land raw records and enqueue candidates.
 
     Collection is bounded and windowed (ADR 0027). ``commit_every`` / ``timeout`` /
     ``max_records`` override the ``INGEST_*`` settings; ``timeout <= 0`` disables the
@@ -152,7 +148,6 @@ def run_ingest(
             filter(
                 None,
                 [
-                    tenant_id,
                     connector_id,
                     _safe_segment(dataset) if dataset else "",
                     f"{_safe_segment(record.key)}.json",
@@ -167,7 +162,6 @@ def run_ingest(
             # Hostile data / flaky storage: never let one record abort the run.
             _record_dead_letter(
                 session,
-                tenant_id=tenant_id,
                 connector_id=connector_id,
                 source_key=record.key,
                 source_record=None,
@@ -188,7 +182,6 @@ def run_ingest(
                 # The raw already landed (uri), so the dead-letter is replayable.
                 _record_dead_letter(
                     session,
-                    tenant_id=tenant_id,
                     connector_id=connector_id,
                     source_key=record.key,
                     source_record=uri,
@@ -208,7 +201,6 @@ def run_ingest(
                         pg_insert(ErQueueItem)
                         .values(
                             id=str(uuid.uuid4()),
-                            tenant_id=tenant_id,
                             connector_id=connector_id,
                             entity_id=entity.id,
                             raw_entity=entity.to_dict(),
@@ -233,8 +225,7 @@ def run_ingest(
     _commit_window()
     if stopped_reason != "exhausted":
         logger.warning(
-            "ingest stopped early [%s/%s]: %s after %d record(s)",
-            tenant_id,
+            "ingest stopped early [%s]: %s after %d record(s)",
             connector_id,
             stopped_reason,
             collected,

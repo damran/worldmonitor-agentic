@@ -1,1 +1,1 @@
-"""FastAPI REST/GraphQL surface (auth-gated, tenant-scoped)."""
+"""FastAPI REST/GraphQL surface (auth-gated)."""

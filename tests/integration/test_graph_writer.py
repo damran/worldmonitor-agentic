@@ -1,4 +1,4 @@
-"""Integration tests: constraints get created and the writer stamps tenant_id.
+"""Integration tests: constraints get created and the writer stamps provenance.
 
 Runs against an ephemeral Neo4j (testcontainers). Marked ``integration`` so it is
 excluded from the default quality run and gated by the dedicated CI job.
@@ -35,12 +35,16 @@ def test_constraints_created(neo4j_client: Neo4jClient) -> None:
     rows = neo4j_client.execute_read("SHOW CONSTRAINTS YIELD name RETURN collect(name) AS names")
     names = rows[0]["names"]
     for prop in CANONICAL_ID_PROPERTIES:
-        assert f"entity_tenant_{prop}" in names
+        assert f"entity_{prop}" in names
 
 
-def test_writer_stamps_tenant_id_on_nodes_and_edges(
-    clean_graph: Neo4jClient, tenant_id: str
-) -> None:
+def test_writer_writes_nodes_and_edges(clean_graph: Neo4jClient) -> None:
+    """The writer materialises every entity node and the relationship between them.
+
+    (Single-tenant, D1 / ADR 0042: ftmg's native ``{id}`` MERGE key is used directly,
+    so this no longer asserts a per-tenant stamp — the per-edge provenance that DID
+    survive the teardown is the subject of ``test_writer_stamps_provenance_on_every_edge``.)
+    """
     ensure_constraints(clean_graph)
     person = make_entity(
         {"id": "p-1", "schema": "Person", "properties": {"name": ["Alice"]}, "datasets": ["t"]}
@@ -57,26 +61,22 @@ def test_writer_stamps_tenant_id_on_nodes_and_edges(
         }
     )
 
-    write_entities(clean_graph, [person, company, ownership], tenant_id=tenant_id)
+    write_entities(clean_graph, [person, company, ownership])
 
-    node_rows = clean_graph.execute_read(
-        "MATCH (n:Entity) RETURN n.id AS id, n.tenant_id AS tenant ORDER BY id"
-    )
+    node_rows = clean_graph.execute_read("MATCH (n:Entity) RETURN n.id AS id ORDER BY id")
     assert {row["id"] for row in node_rows} >= {"c-1", "p-1"}
     assert node_rows, "expected entity nodes to be written"
-    assert all(row["tenant"] == tenant_id for row in node_rows)
 
-    edge_rows = clean_graph.execute_read("MATCH ()-[r]->() RETURN r.tenant_id AS tenant")
-    assert edge_rows, "expected the ownership relationship to be written"
-    assert all(row["tenant"] == tenant_id for row in edge_rows)
+    edge_rows = clean_graph.execute_read("MATCH ()-[r]->() RETURN count(r) AS n")
+    assert edge_rows and edge_rows[0]["n"], "expected the ownership relationship to be written"
 
 
-def test_writer_stamps_provenance_on_every_edge(clean_graph: Neo4jClient, tenant_id: str) -> None:
+def test_writer_stamps_provenance_on_every_edge(clean_graph: Neo4jClient) -> None:
     """Every relationship carries prov_* traceable to its asserting entity's s3 record.
 
     Proves the G1 fix (PR #17): an Ownership edge and a second edge type
     (Directorship) must both land with the provenance of the *assertion* that
-    created them, not just tenant_id.
+    created them.
     """
     ensure_constraints(clean_graph)
     person = _stamped(
@@ -106,7 +106,7 @@ def test_writer_stamps_provenance_on_every_edge(clean_graph: Neo4jClient, tenant
         "directorship",
     )
 
-    write_entities(clean_graph, [person, company, ownership, directorship], tenant_id=tenant_id)
+    write_entities(clean_graph, [person, company, ownership, directorship])
 
     rows = clean_graph.execute_read(
         "MATCH ()-[r]->() "
@@ -131,7 +131,7 @@ def test_writer_stamps_provenance_on_every_edge(clean_graph: Neo4jClient, tenant
 
 
 def test_edge_provenance_is_the_asserting_source_not_an_endpoint(
-    clean_graph: Neo4jClient, tenant_id: str
+    clean_graph: Neo4jClient,
 ) -> None:
     """An edge reflects the source that ASSERTED it, even when its endpoints differ.
 
@@ -159,7 +159,7 @@ def test_edge_provenance_is_the_asserting_source_not_an_endpoint(
         "registry-source",
     )
 
-    write_entities(clean_graph, [person, company, ownership], tenant_id=tenant_id)
+    write_entities(clean_graph, [person, company, ownership])
 
     edge = clean_graph.execute_read(
         "MATCH (:Person {id: $p})-[r:OWNS]->(:Company {id: $c}) "
@@ -180,13 +180,3 @@ def test_edge_provenance_is_the_asserting_source_not_an_endpoint(
     )
     node_sources = {row["id"]: row["source_id"] for row in nodes}
     assert node_sources == {"c-9": "src:company-source", "p-9": "src:person-source"}
-
-
-def test_writer_requires_tenant(clean_graph: Neo4jClient) -> None:
-    from worldmonitor.graph.writer import WriterError
-
-    person = make_entity(
-        {"id": "p-9", "schema": "Person", "properties": {"name": ["Bob"]}, "datasets": ["t"]}
-    )
-    with pytest.raises(WriterError):
-        write_entities(clean_graph, [person], tenant_id="")

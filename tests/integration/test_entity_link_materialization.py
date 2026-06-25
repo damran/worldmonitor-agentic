@@ -29,7 +29,7 @@ from worldmonitor.resolution.pipeline import resolve_pending
 pytestmark = pytest.mark.integration
 
 
-def _queue_item(tenant_id: str, data: dict[str, object], *, source: str) -> ErQueueItem:
+def _queue_item(data: dict[str, object], *, source: str) -> ErQueueItem:
     provenance = Provenance(
         source_id="opensanctions:test",
         retrieved_at="2026-06-22T00:00:00Z",
@@ -39,7 +39,6 @@ def _queue_item(tenant_id: str, data: dict[str, object], *, source: str) -> ErQu
     entity = stamp(make_entity(data), provenance)
     return ErQueueItem(
         id=str(uuid.uuid4()),
-        tenant_id=tenant_id,
         connector_id="opensanctions",
         raw_entity=entity.to_dict(),
         source_record=provenance.source_record,
@@ -50,7 +49,6 @@ def _queue_item(tenant_id: str, data: dict[str, object], *, source: str) -> ErQu
 def test_concrete_range_entity_link_materializes_abstract_range_stays_dropped(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
-    tenant_id = "h3-link-tenant"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
@@ -99,24 +97,19 @@ def test_concrete_range_entity_link_materializes_abstract_range_stays_dropped(
     ]
     with sessions() as session:
         for data, source in rows:
-            session.add(_queue_item(tenant_id, data, source=source))
+            session.add(_queue_item(data, source=source))
         session.commit()
     with sessions() as session:
-        resolve_pending(session=session, neo4j=clean_graph, tenant_id=tenant_id)
+        resolve_pending(session=session, neo4j=clean_graph)
 
     # All four entities are written as nodes (distinct singletons).
-    nodes = clean_graph.execute_read(
-        "MATCH (n:Entity {tenant_id: $t}) RETURN count(n) AS n", t=tenant_id
-    )[0]["n"]
+    nodes = clean_graph.execute_read("MATCH (n:Entity) RETURN count(n) AS n")[0]["n"]
     assert nodes == 4
 
     # H3 FIXED: the concrete-range entity link materializes Person -> Address. Before the
     # fix the link MATCHed an 'entity:'-prefixed id no node carried, so 0 was created.
     links = clean_graph.execute_read(
-        "MATCH (p:Person {tenant_id: $t, id: 'person-1'})"
-        "-[r]->(a:Address {tenant_id: $t, id: 'addr-1'}) "
-        "RETURN type(r) AS rel",
-        t=tenant_id,
+        "MATCH (p:Person {id: 'person-1'})-[r]->(a:Address {id: 'addr-1'}) RETURN type(r) AS rel",
     )
     assert len(links) == 1, "concrete-range entity link (addressEntity) must materialize (H3 fixed)"
 
@@ -124,7 +117,7 @@ def test_concrete_range_entity_link_materializes_abstract_range_stays_dropped(
     # link is skipped inside ftmg before any query exists, so the Sanction node has NO
     # outgoing relationship. The fix must not have touched this.
     sanction_edges = clean_graph.execute_read(
-        "MATCH (s:Entity {tenant_id: $t, id: 'san-1'})-[r]->() RETURN count(r) AS n", t=tenant_id
+        "MATCH (s:Entity {id: 'san-1'})-[r]->() RETURN count(r) AS n"
     )[0]["n"]
     assert sanction_edges == 0, "abstract-Thing-range link (Sanction.entity) stays dropped (G3)"
 

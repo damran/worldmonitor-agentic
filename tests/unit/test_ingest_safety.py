@@ -1,6 +1,6 @@
 """Unit tests: connector-input safety hardening (WS5; ARCHITECTURE_REVIEW H5/H6).
 
-H6 — the connector-controlled landing key must not escape its tenant prefix.
+H6 — the connector-controlled landing key must not escape its landing-zone prefix.
 H5 — config values interpolated into outbound URLs must be pattern-constrained.
 """
 

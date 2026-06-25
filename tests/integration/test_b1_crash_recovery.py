@@ -31,7 +31,7 @@ from worldmonitor.resolution.pipeline import resolve_pending
 pytestmark = pytest.mark.integration
 
 
-def _queue_item(tenant_id: str, data: dict[str, object], *, source: str) -> ErQueueItem:
+def _queue_item(data: dict[str, object], *, source: str) -> ErQueueItem:
     provenance = Provenance(
         source_id="opensanctions:test",
         retrieved_at="2026-06-23T00:00:00Z",
@@ -41,7 +41,6 @@ def _queue_item(tenant_id: str, data: dict[str, object], *, source: str) -> ErQu
     entity = stamp(make_entity(data), provenance)
     return ErQueueItem(
         id=str(uuid.uuid4()),
-        tenant_id=tenant_id,
         connector_id="opensanctions",
         raw_entity=entity.to_dict(),
         source_record=provenance.source_record,
@@ -68,19 +67,13 @@ def _ownership(edge_id: str, owner: str, asset: str) -> dict[str, object]:
     }
 
 
-def _companies(graph: Neo4jClient, tenant_id: str) -> list[str]:
-    return [
-        row["id"]
-        for row in graph.execute_read(
-            "MATCH (n:Company {tenant_id: $t}) RETURN n.id AS id", t=tenant_id
-        )
-    ]
+def _companies(graph: Neo4jClient) -> list[str]:
+    return [row["id"] for row in graph.execute_read("MATCH (n:Company) RETURN n.id AS id")]
 
 
 def test_crash_between_graph_write_and_postgres_commit_does_not_duplicate_canonical(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
-    tenant_id = "b1-crash-tenant"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
@@ -103,7 +96,7 @@ def test_crash_between_graph_write_and_postgres_commit_does_not_duplicate_canoni
     ]
     with sessions() as session:
         for data, source in rows:
-            session.add(_queue_item(tenant_id, data, source=source))
+            session.add(_queue_item(data, source=source))
         session.commit()
 
     # --- CRASH WINDOW: let write_entities commit the graph, then fail the FIRST Postgres
@@ -122,10 +115,10 @@ def test_crash_between_graph_write_and_postgres_commit_does_not_duplicate_canoni
 
         session.commit = crashing_commit  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="WM_CRASH_AFTER"):
-            resolve_pending(session=session, neo4j=clean_graph, tenant_id=tenant_id)
+            resolve_pending(session=session, neo4j=clean_graph)
 
     # The graph write DID land (Neo4j commits independently of Postgres): one canonical company.
-    after_crash = _companies(clean_graph, tenant_id)
+    after_crash = _companies(clean_graph)
     assert len(after_crash) == 1, "the canonical node was committed to the graph before the crash"
     canonical_id = after_crash[0]
     assert canonical_id not in {"petrov-a", "petrov-b"}, "canonical is a minted id, not a member"
@@ -133,46 +126,36 @@ def test_crash_between_graph_write_and_postgres_commit_does_not_duplicate_canoni
     # Postgres rolled back: the cross-store gap is real — rows still pending, no audit committed.
     with sessions() as session:
         pending = session.execute(
-            select(func.count())
-            .select_from(ErQueueItem)
-            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "pending")
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "pending")
         ).scalar_one()
-        audits = session.execute(
-            select(func.count()).select_from(MergeAudit).where(MergeAudit.tenant_id == tenant_id)
-        ).scalar_one()
+        audits = session.execute(select(func.count()).select_from(MergeAudit)).scalar_one()
     assert pending == len(rows), "Postgres rolled back: every row is still pending"
     assert audits == 0, "no merge audit was committed in the crashed run"
 
     # --- RESTART: re-resolve the still-pending rows. With a deterministic canonical id the
     #     retry re-derives the SAME id, so the graph MERGE converges instead of duplicating.
     with sessions() as session:
-        resolve_pending(session=session, neo4j=clean_graph, tenant_id=tenant_id)
+        resolve_pending(session=session, neo4j=clean_graph)
 
     # THE B-1 ASSERTION: still exactly ONE canonical company, and it is the SAME node — no
     # duplicate, no orphan. (Pre-fix, the random NK- mint would make this 2.)
-    final = _companies(clean_graph, tenant_id)
+    final = _companies(clean_graph)
     assert final == [canonical_id], (
         "the retry must converge on the same canonical node, not duplicate it"
     )
     for member in ("petrov-a", "petrov-b"):
-        orphan = clean_graph.execute_read(
-            "MATCH (n {tenant_id: $t, id: $id}) RETURN count(n) AS n", t=tenant_id, id=member
-        )[0]["n"]
+        orphan = clean_graph.execute_read("MATCH (n {id: $id}) RETURN count(n) AS n", id=member)[0][
+            "n"
+        ]
         assert orphan == 0, f"merged-away id {member} must not survive as a node"
 
     # Postgres is now consistent: the queue drained, the merge is audited exactly once.
     with sessions() as session:
         pending = session.execute(
-            select(func.count())
-            .select_from(ErQueueItem)
-            .where(ErQueueItem.tenant_id == tenant_id, ErQueueItem.status == "pending")
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "pending")
         ).scalar_one()
         merged = (
-            session.execute(
-                select(MergeAudit).where(
-                    MergeAudit.tenant_id == tenant_id, MergeAudit.decision == "merged"
-                )
-            )
+            session.execute(select(MergeAudit).where(MergeAudit.decision == "merged"))
             .scalars()
             .all()
         )
@@ -183,9 +166,7 @@ def test_crash_between_graph_write_and_postgres_commit_does_not_duplicate_canoni
 
     # Referent rewriting still correct: both ownership edges point at the SAME canonical node.
     owns = clean_graph.execute_read(
-        "MATCH (:Entity {tenant_id: $t, id: 'ivan'})-[r:OWNS]->(m:Entity {tenant_id: $t}) "
-        "RETURN m.id AS target",
-        t=tenant_id,
+        "MATCH (:Entity {id: 'ivan'})-[r:OWNS]->(m:Entity) RETURN m.id AS target",
     )
     assert {row["target"] for row in owns} == {canonical_id}, (
         "edges rewrite onto the canonical node"

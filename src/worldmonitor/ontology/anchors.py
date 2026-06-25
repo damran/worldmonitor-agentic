@@ -4,7 +4,7 @@ Anchors are the canonical identifiers entities resolve to (CLAUDE.md invariant:
 *resolve to canonical IDs*). They are stored as **flat scalar keys** in the FtM
 entity context (FtM's ``merge_context`` hashes context values, so nested dicts are
 unmergeable) — they survive serialization through the ER queue and are projected
-onto graph node properties by the writer, where the per-tenant uniqueness
+onto graph node properties by the writer, where the uniqueness
 constraints enforce them.
 
 Each ``CANONICAL_ID_FIELDS`` anchor is **single-valued and authoritative**: a real

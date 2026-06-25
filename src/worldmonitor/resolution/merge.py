@@ -35,12 +35,10 @@ DEFAULT_MERGE_THRESHOLD = 0.92
 # sorted member ids (B-1, ADR 0036). nomenklatura still computes the CLUSTERING (transitive
 # positive judgements); only the *final* id is derived here, instead of nomenklatura's random
 # ``NK-<shortuuid>``. This makes a crash+retry idempotent: re-resolving the same member set
-# re-derives the SAME id, so the tenant-scoped graph MERGE converges on one node rather than
-# minting a duplicate/orphan. The id is intentionally NOT globally unique — every node and row
-# is keyed by ``(tenant_id, id)`` (the writer's composite MERGE key), so an identical member
-# set in two tenants still yields two distinct nodes (G4 preserved). SHA-256 makes an accidental
-# collision between genuinely distinct member sets infeasible; a singleton keeps its own id so
-# its node id and inbound edges are unchanged.
+# re-derives the SAME id, so the graph MERGE (keyed by ftmg's native ``{id}``) converges on one
+# node rather than minting a duplicate/orphan. SHA-256 makes an accidental collision between
+# genuinely distinct member sets infeasible; a singleton keeps its own id so its node id and
+# inbound edges are unchanged.
 _CANONICAL_ID_PREFIX = "wmc-"
 
 
@@ -79,7 +77,7 @@ class ResolvedCluster:
 
 @dataclass(frozen=True, slots=True)
 class StoredJudgement:
-    """A persisted, tenant-scoped human sign-off judgement on a pair (ADR 0031)."""
+    """A persisted human sign-off judgement on a pair (ADR 0031)."""
 
     left_id: str
     right_id: str
@@ -90,14 +88,14 @@ def _ephemeral_resolver() -> nk.Resolver:
     """Return a private, in-memory nomenklatura resolver scoped to ONE batch.
 
     Batch-first resolution (ADR 0026) resolves each batch in isolation: it must not
-    read or write any cross-batch / cross-tenant state. ``Resolver.make_default()``
-    binds to a shared, persistent, **non-tenant-scoped** SQLite ledger
-    (``NOMENKLATURA_DB_URL``); judgements accumulate there across every batch, tenant
-    and run, so one tenant's merge can canonicalize another tenant's entities — a G4
-    isolation violation (proven: a record shared between two tenants fuses their
-    independent merges). A throwaway in-memory engine (one shared connection via
-    ``StaticPool``) makes the resolver a pure function of *this* batch's pairs.
-    Persistent, per-tenant resolution is the deferred incremental-ER work (ADR 0019b).
+    read or write any cross-batch state. ``Resolver.make_default()`` binds to a shared,
+    persistent SQLite ledger (``NOMENKLATURA_DB_URL``); judgements accumulate there
+    across every batch and run, so one batch's merge can canonicalize a later batch's
+    entities — a batch-purity violation (and, before single-tenancy, the ADR-0028
+    cross-batch leak). A throwaway in-memory engine (one shared connection via
+    ``StaticPool``) makes the resolver a pure function of *this* batch's pairs, which
+    is also the B-1 crash-recovery guarantee (a re-run re-derives the same clusters).
+    Persistent / incremental resolution is the deferred incremental-ER work (ADR 0019b).
     """
     engine = create_engine(
         "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
@@ -114,9 +112,9 @@ def cluster_and_merge(
 ) -> list[ResolvedCluster]:
     """Cluster ``entities`` by their high-confidence ``pairs`` and merge each cluster.
 
-    Persisted human sign-off ``judgements`` (ADR 0031, already filtered to this
-    tenant by the caller) are seeded into the ephemeral resolver FIRST and take
-    precedence over Splink: a Splink pair that a judgement already decided is skipped
+    Persisted human sign-off ``judgements`` (ADR 0031) are seeded into the ephemeral
+    resolver FIRST and take precedence over Splink: a Splink pair that a judgement
+    already decided is skipped
     (the human decision wins), so a rejected cluster never re-merges and an approved
     one always does — neither re-parks on a later batch.
 

@@ -70,14 +70,15 @@ def test_sensitive_merge_goes_to_review() -> None:
     assert "sensitive" in reason.lower()
 
 
-def test_resolver_is_isolated_per_batch_no_cross_tenant_leak() -> None:
-    """G4: one batch's merge must never influence another batch's resolution.
+def test_resolver_is_isolated_per_batch() -> None:
+    """ADR 0028: each batch resolves on a private, ephemeral in-memory ledger.
 
-    cluster_and_merge resolves each batch on a private in-memory ledger. If it
-    shared a persistent ledger, a source id common to two batches (e.g. two tenants
-    ingesting the same record) would fuse their independent merges — one tenant's
-    merge leaking into another's. Two batches sharing id "c1" must mint independent
-    canonical ids, and the second must contain only its own members.
+    cluster_and_merge builds a throwaway ``sqlite://`` + StaticPool resolver per call,
+    so one batch's merge must never influence another batch's resolution. If it shared a
+    persistent ledger (nomenklatura's default), a source id common to two batches would
+    fuse their independent merges — and a crash mid-run could not be replayed cleanly
+    (the B-1 / ADR-0026 batch-purity guarantee). Two batches sharing id "c1" must mint
+    independent canonical ids, and the second must contain only its own members.
     """
     first = [
         _company("c1", "Acme Corporation Ltd", "us"),
@@ -98,7 +99,7 @@ def test_resolver_is_isolated_per_batch_no_cross_tenant_leak() -> None:
     # so the id-inequality below follows from the differing membership — it corroborates, but
     # membership is what actually catches a leak.
     assert set(second_merge.member_ids) == {"c1", "c3"}, (
-        "second batch must contain only its own ids — a shared ledger would fuse in c2 (G4 leak)"
+        "second batch must contain only its own ids — a shared ledger would fuse in c2"
     )
     assert second_merge.canonical_id != first_canonical, (
         "distinct membership => distinct content-addressed id (corroborates isolation)"

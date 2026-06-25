@@ -42,7 +42,7 @@ def test_wikidata_live_lookup_anchors_known_org() -> None:
     assert qid == "Q47488"
 
 
-def test_writer_projects_anchor_onto_node(clean_graph: Neo4jClient, tenant_id: str) -> None:
+def test_writer_projects_anchor_onto_node(clean_graph: Neo4jClient) -> None:
     ensure_constraints(clean_graph)
     entity = make_entity(
         {
@@ -53,17 +53,13 @@ def test_writer_projects_anchor_onto_node(clean_graph: Neo4jClient, tenant_id: s
         }
     )
     set_anchor(entity, "wikidata_id", "Q12345")
-    write_entities(clean_graph, [entity], tenant_id=tenant_id)
+    write_entities(clean_graph, [entity])
 
-    rows = clean_graph.execute_read(
-        "MATCH (n:Entity {id: 'org-1'}) RETURN n.wikidata_id AS wd, n.tenant_id AS tenant"
-    )
+    rows = clean_graph.execute_read("MATCH (n:Entity {id: 'org-1'}) RETURN n.wikidata_id AS wd")
     assert rows[0]["wd"] == "Q12345"
-    assert rows[0]["tenant"] == tenant_id
 
 
 def test_geonames_ingest_via_fixture(minio: tuple[str, str, str], postgres_dsn: str) -> None:
-    tenant = "geonames-tenant"
     endpoint, access_key, secret_key = minio
     landing = LandingStore.connect(
         endpoint=endpoint, access_key=access_key, secret_key=secret_key, bucket="landing"
@@ -78,7 +74,6 @@ def test_geonames_ingest_via_fixture(minio: tuple[str, str, str], postgres_dsn: 
         stats = run_ingest(
             GeoNamesConnector(),
             {"country": "VA", "path": _FIXTURE},
-            tenant_id=tenant,
             landing=landing,
             session=session,
             reliability="A",
@@ -86,9 +81,7 @@ def test_geonames_ingest_via_fixture(minio: tuple[str, str, str], postgres_dsn: 
     assert stats.queued >= 100
 
     with sessions() as session:
-        rows = list(
-            session.execute(select(ErQueueItem).where(ErQueueItem.tenant_id == tenant)).scalars()
-        )
+        rows = list(session.execute(select(ErQueueItem)).scalars())
         by_id = {row.raw_entity["id"]: row for row in rows}
         assert "geonames-3164670" in by_id
         assert by_id["geonames-3164670"].raw_entity["wm_anchor_geonames_id"] == ["3164670"]
@@ -98,7 +91,6 @@ def test_geonames_ingest_via_fixture(minio: tuple[str, str, str], postgres_dsn: 
 
 def test_pipeline_anchors_resolved_entity(clean_graph: Neo4jClient, postgres_dsn: str) -> None:
     """End-to-end: a resolved entity carrying wikidataId is anchored on its node."""
-    tenant = "anchor-pipeline-tenant"
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
@@ -116,7 +108,6 @@ def test_pipeline_anchors_resolved_entity(clean_graph: Neo4jClient, postgres_dsn
         session.add(
             ErQueueItem(
                 id=str(uuid.uuid4()),
-                tenant_id=tenant,
                 connector_id="opensanctions",
                 raw_entity=raw,
                 source_record="s3://landing/org-q.json",
@@ -129,12 +120,9 @@ def test_pipeline_anchors_resolved_entity(clean_graph: Neo4jClient, postgres_dsn
         resolve_pending(
             session=session,
             neo4j=clean_graph,
-            tenant_id=tenant,
             enrich=WikidataEnricher(lookup=False).enrich,
         )
 
-    rows = clean_graph.execute_read(
-        "MATCH (n:Entity {tenant_id: $tenant}) RETURN n.wikidata_id AS wd", tenant=tenant
-    )
+    rows = clean_graph.execute_read("MATCH (n:Entity) RETURN n.wikidata_id AS wd")
     assert any(row["wd"] == "Q98765" for row in rows)
     engine.dispose()

@@ -21,20 +21,11 @@ import pytest
 
 from worldmonitor.graph.neo4j_client import Neo4jClient
 
-# Fixed tenant used across the pipeline tests; production derives it from Zitadel.
-TEST_TENANT = "test-tenant"
-
 NEO4J_IMAGE = "neo4j:2026.05.0-community"
 NEO4J_TEST_PASSWORD = "testpassword"  # pragma: allowlist secret
 # MinIO isn't a Docker Hub `library/` image, so it can't use the ECR mirror
 # prefix; override locally with a fully-qualified mirror (e.g. quay.io/minio/minio).
 MINIO_IMAGE = os.environ.get("WM_TEST_MINIO_IMAGE", "minio/minio:RELEASE.2025-09-07T16-13-09Z")
-
-
-@pytest.fixture(scope="session")
-def tenant_id() -> str:
-    """The fixed tenant id every pipeline/graph test writes under."""
-    return TEST_TENANT
 
 
 @pytest.fixture(scope="session")
