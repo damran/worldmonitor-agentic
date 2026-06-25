@@ -1,4 +1,4 @@
-"""Integration test: concrete-range entity links materialize; abstract-range stays dropped.
+"""Integration test: concrete-range AND abstract-range entity links both materialize.
 
 ftmg's ``generate_entity_links`` keys each endpoint by an ``entity:``-prefixed id
 (``registry.entity.node_id``), while nodes are written with the **raw** FtM id — so a
@@ -7,9 +7,12 @@ MATCH-missed and never materialized (review **H3**). The Ownership *fixture* hid
 because an edge-**schema** uses raw endpoint ids; a real entity-typed *property* does not.
 
 This pins the H3 fix through the REAL ``resolve_pending`` -> referent-rewrite -> write
-path with real-FtM-shaped entities (an entity-typed property, concrete range), and pins
-the **H3/G3 boundary**: the abstract-``Thing``-range case (``Sanction.entity``) must STILL
-be dropped (G3, deferred and unchanged) — fixing one must not silently alter the other.
+path with real-FtM-shaped entities (an entity-typed property, concrete range). Gate D
+then INVERTS the former G3 boundary: the abstract-``Thing``-range case (``Sanction.entity``,
+range = the abstract base ``Thing``) must now ALSO materialize a real
+``(:Sanction)-[:ENTITY]->(:Organization)`` edge — closing audit gap G3 (ADR 0046). The H3
+concrete-range assertion stays FROZEN; the two paths are pinned together so fixing one
+cannot silently alter the other.
 """
 
 from __future__ import annotations
@@ -74,8 +77,8 @@ def test_concrete_range_entity_link_materializes_abstract_range_stays_dropped(
             },
             "addr-1",
         ),
-        # G3 boundary: an ABSTRACT-Thing-range link (Sanction.entity -> Organization) must
-        # stay dropped (deferred, unchanged) even though both endpoints are written.
+        # G3 (now FIXED by Gate D / ADR 0046): an ABSTRACT-Thing-range link
+        # (Sanction.entity -> Organization) must now ALSO materialize.
         (
             {
                 "id": "san-1",
@@ -113,12 +116,16 @@ def test_concrete_range_entity_link_materializes_abstract_range_stays_dropped(
     )
     assert len(links) == 1, "concrete-range entity link (addressEntity) must materialize (H3 fixed)"
 
-    # G3 BOUNDARY (must stay deferred/unchanged): the abstract-Thing-range Sanction.entity
-    # link is skipped inside ftmg before any query exists, so the Sanction node has NO
-    # outgoing relationship. The fix must not have touched this.
+    # G3 INVERTED (Gate D / ADR 0046): the abstract-Thing-range Sanction.entity link must now
+    # materialize a real (:Sanction)-[:ENTITY]->(:Organization) edge. ftmg dropped it at the
+    # abstract-range lookup; the ftmg_fork override re-keys on prop.type == registry.entity
+    # with the ENTITY_LABEL fallback. FAILS pre-fix (the edge does not exist).
     sanction_edges = clean_graph.execute_read(
-        "MATCH (s:Entity {id: 'san-1'})-[r]->() RETURN count(r) AS n"
+        "MATCH (s:Sanction {id: 'san-1'})-[r:ENTITY]->(t:Organization {id: 'org-1'}) "
+        "RETURN count(r) AS n"
     )[0]["n"]
-    assert sanction_edges == 0, "abstract-Thing-range link (Sanction.entity) stays dropped (G3)"
+    assert sanction_edges >= 1, (
+        "abstract-Thing-range link (Sanction.entity) must now materialize (G3 closed / ADR 0046)"
+    )
 
     engine.dispose()

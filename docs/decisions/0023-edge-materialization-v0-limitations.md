@@ -19,6 +19,11 @@ Accept, for v0, the following limitations as **known debt** (not silent shortcut
    (`Sanction.entity`, `CourtCase.entity`, future `wm:` indicator/target) are dropped. Only concrete
    edges (e.g. `Ownership.owner`/`asset`) are proven (`graph/writer.py:136-138`,
    `tests/integration/test_phase1_acceptance.py:86-89`).
+   > **CLOSED-by-0046 (Gate D, 2026-06-25).** The thin `graph/ftmg_fork/` override re-keys both
+   > abstract-range drop sites (`generate_entity_links`, `generate_edge_entity`) onto
+   > `prop.type == registry.entity` with an `ENTITY_LABEL` fallback, so `Sanction.entity` /
+   > `UnknownLink.subject` now materialize; a never-ingested target is MERGEd + tagged `:Ghost`.
+   > See ADR 0046. (Audit gap G3 → CLOSED.)
 
 ## Status
 **OPEN.** Both are owed before they bite:

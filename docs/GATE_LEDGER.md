@@ -17,7 +17,7 @@ Status legend: **CLOSED** (built + proven) · **OPEN** (tracked debt, scheduled)
 |---|---|---|---|---|
 | **G1** | Provenance not written on **edges** (GDPR/audit invariant broken for relationships) | 0018 | **CLOSED** | `graph/writer.py` stamps `prov_*` on every relationship; `tests/integration/test_edge_provenance.py`, `test_graph_writer.py` |
 | **G2** | Edge **referent-rewriting** for merged-away ids not done (orphaned edges after a merge) | 0025 | **CLOSED** (batch) | `resolution/referents.py` rewrites entity-typed values to canonical before write; `tests/integration/test_referent_rewriting.py`, `tests/unit/test_referents.py` |
-| **G3** | Abstract `Thing`-range entity-links not materialised (`Sanction.entity` etc. dropped) | 0023 | **OPEN** (pre-phase-4) | Re-confirmed live in `ARCHITECTURE_REVIEW.md` **H3** (ftmg link MATCH uses `entity:`-prefixed id) |
+| **G3** | Abstract `Thing`-range entity-links not materialised (`Sanction.entity` etc. dropped) | 0023, **0046** | **CLOSED** (Gate D) | Thin `graph/ftmg_fork/` override re-keys both drop sites (`generate_entity_links`, `generate_edge_entity`) onto `prop.type == registry.entity` with an `ENTITY_LABEL` fallback; a never-ingested target is MERGEd + tagged `:Ghost`. `tests/test_abstract_edge.py` (7 cases incl. ghost/idempotency/G1/contraction), inverted `tests/integration/test_entity_link_materialization.py` |
 | **G4** | No two-tenant same-canonical-ID test; resolver leaked across tenants (the **D1** regression) | 0017, **0028**; **0042** | **SUPERSEDED** (D1 / ADR 0042) | Was CLOSED via ephemeral per-batch resolver + `test_tenant_isolation.py`. **D1: single-tenant** (ADR 0042 supersedes 0017) tore out `tenant_id` entirely — tenant isolation is no longer a property to prove, so the two-tenant test was removed with the teardown. The ephemeral resolver is KEPT (see §2) for its B-1 / ADR-0026 role |
 | **G5** | Size-threshold guard (`>10`) untested at the boundary | 0020 | **OPEN** (nice-to-have) | guard eval `resolution/review.py`; no 11-member boundary test yet |
 | **G6** | Sensitive-topic guard is a hardcoded **denylist** (fails open for unmodelled topics) | 0020 | **OPEN** (pre-phase-4) | Re-confirmed in `ARCHITECTURE_REVIEW.md` §5 caveat + MEDIUM list |
@@ -77,7 +77,8 @@ are gated on a named real-time consumer / explicit incremental-ER decision).
 - **Superseded (D1 / ADR 0042):** G4 and the G4-isolation runway row — built + proven, then
   deliberately torn out when **D1: single-tenant** removed `tenant_id` everywhere (ADR 0042
   supersedes 0017). The ephemeral per-batch resolver survives the teardown for its B-1 / ADR-0026 role.
-- **Open debt (scheduled):** G3, G6 (phase-4), G7, G10 (phase-3), G5, G11 (nice-to-have).
+- **Open debt (scheduled):** G6 (phase-4), G7 (promotion half), G10 (phase-3), G5, G11 (nice-to-have).
+  (G3 CLOSED by Gate D / ADR 0046; G1/G2/G8 + audit B-1/B-2/B-3/H-1/H-2/H-3 CLOSED; G4 superseded by single-tenancy.)
   Several are re-confirmed with fresh file:line evidence in `ARCHITECTURE_REVIEW.md` §7.
 - **Deferred (locked):** Gate B / Gate C / S4 / X1 — none built; each gated on
   an explicit decision. (X2 / X3 were single-tenant-conditioned forks, now moot under D1 — ADR 0042.)

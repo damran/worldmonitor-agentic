@@ -244,3 +244,34 @@ Dataset(data: dict)                                             # from_statement
 - **Value-set-invariance (the §9 fence, achievable):** `add_statement`'s per-prop `set` union yields a
   fused VALUE set identical to `ValueEntity.merge`'s union — so switching to StatementEntity adds lineage
   WITHOUT changing which values survive. The gate requires a test asserting byte-for-byte value-set parity.
+
+---
+
+# Gate D — followthemoney-graph (ftmg) edge materialization (abstract Thing-range)
+
+Verified 2026-06-25 against installed **followthemoney-graph 0.1.0** via `inspect.signature`. Imported
+only in `src/worldmonitor/graph/writer.py`. The fork (`graph/ftmg_fork/`) is a THIN OVERRIDE of two
+generators; everything else is imported from upstream ftmg.
+
+```python
+# verbatim from inspect.signature (installed 0.1.0); source ftmg/transform.py
+generate_entity_links(config: ftmg.config.Configuration, proxy: followthemoney.entity.ValueEntity) -> Generator[QueryBatch, None, None]   # transform.py:198 — PRIMARY override (Sanction.entity drop site, lines 227-229)
+generate_edge_entity(config: ftmg.config.Configuration, proxy: followthemoney.entity.ValueEntity)  -> Generator[QueryBatch, None, None]   # transform.py:291 — secondary override (UnknownLink drop site, lines 317-322)
+generate_node_entity(config, proxy)   -> Generator[QueryBatch, None, None]   # import unchanged
+generate_topic_labels(config, proxy)  -> Generator[QueryBatch, None, None]   # import unchanged
+QueryBatch          # NamedTuple, fields = ('query', 'params')
+ENTITY_LABEL = "Entity"   # the base node label every node carries — the fork's MATCH-label fallback when the range schema is abstract
+
+from followthemoney import registry
+registry.entity.name == "entity"   # the prop-type check: a prop points to another entity iff prop.type == registry.entity (or prop.type.name == "entity")
+```
+- **Upstream behaviour being overridden (the drop):** `generate_entity_links` already filters
+  `prop.type == registry.entity` (transform.py:220) but then keys the target lookup on the RANGE SCHEMA —
+  `config.nodes.schemata.get(prop.range.name)` (227) — which is `None` for the abstract `Thing` because
+  `ftmg/config.py:67-70` registers only `not schema.edge and not schema.abstract` (and `config.py:73`
+  *raises* if you try to register an abstract schema). So the fork CANNOT register `Thing`; it must fall
+  back to the `ENTITY_LABEL="Entity"` MATCH label when the range is abstract/absent. Same shape for
+  `generate_edge_entity` (317-322) for `UnknownLink`.
+- **Idempotent edge:** project via the `MERGE (s)-[:REL]->(t)` form keyed on (source durable id, target
+  durable id, rel-type) — re-projection is idempotent. Endpoints are the durable canonical ids (ADR 0044);
+  the new edge carries the asserting entity's `prov_*` (G1) and is realigned by `writer._align_entity_link_ids`.

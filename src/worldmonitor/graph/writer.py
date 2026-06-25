@@ -8,8 +8,18 @@ upholding the non-negotiable "provenance on every node and edge" invariant (G1).
 ftmg's native ``{id}`` MERGE/MATCH key is used directly (the platform is
 single-tenant, D1 / ADR 0042).
 
-ftmg ships no type stubs, so it is imported only here; the boundary's ``Unknown``
-types are relaxed for this module alone while the public API stays fully typed.
+ftmg ships no type stubs, so it is imported only here (+ the ``ftmg_fork`` thin
+override); the boundary's ``Unknown`` types are relaxed for this module alone while
+the public API stays fully typed.
+
+Gate D / ADR 0046 (audit gap G3 — now CLOSED): ftmg keys every entity-link's target
+lookup on the range SCHEMA, so an abstract-``Thing``-range link (``Sanction.entity``,
+``UnknownLink.subject/object``) was dropped at the range-schema lookup. The two
+generators that owned those two drop sites — ``generate_entity_links`` and
+``generate_edge_entity`` — are now imported from the ``ftmg_fork`` thin override, which
+re-keys the lookup onto ``prop.type == registry.entity`` with an ``ENTITY_LABEL``
+fallback (a never-ingested target is MERGEd + tagged ``:Ghost``). Everything else stays
+upstream.
 """
 
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
@@ -25,13 +35,21 @@ from ftmg.config import Configuration, DatabaseConfig
 from ftmg.transform import (
     QueryBatch,
     QueryBatcher,
-    generate_edge_entity,
-    generate_entity_links,
     generate_node_entity,
     generate_topic_labels,
 )
 from sqlalchemy.orm import Session
 
+# Gate D / ADR 0046: the two abstract-``Thing``-range drop sites are re-keyed off
+# ``prop.type == registry.entity`` (with an ``ENTITY_LABEL`` fallback) in the thin
+# ``ftmg_fork`` override, so a ``Sanction.entity → Thing`` / ``UnknownLink.subject → Thing``
+# link materializes instead of being dropped at the range-schema lookup. Everything else
+# (nodes, topic labels, QueryBatch/QueryBatcher) stays upstream — the ftmg boundary lives in
+# this module + ``ftmg_fork`` only.
+from worldmonitor.graph.ftmg_fork import (
+    generate_edge_entity,
+    generate_entity_links,
+)
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.ontology.anchors import get_anchors
 from worldmonitor.ontology.ftm import FtmEntity
@@ -97,9 +115,10 @@ def _align_entity_link_ids(batch: Any) -> Any:
     Realigns ``generate_entity_links``' ``entity:``-prefixed ``source_id`` / ``target_id``
     with the RAW ids the nodes are written under, so the link materializes instead of
     silently MATCH-missing. **Scoped to the entity-link path only:** edge-schema entities
-    and topic labels already key on raw ids (untouched), and abstract-``Thing``-range
-    links (G3) are skipped inside ftmg before any batch exists — so this never sees them.
-    H3 is fixed; G3 stays deferred and unchanged.
+    and topic labels already key on raw ids (untouched). The ``ftmg_fork`` override keeps the
+    same ``entity:``-prefixed endpoint ids upstream uses, so abstract-``Thing``-range links
+    (G3, now CLOSED — ``Sanction.entity`` etc.) flow through this SAME realignment as the
+    concrete-range entity links. H3 and G3 are both fixed.
     """
     params = dict(batch.params)
     for key in ("source_id", "target_id"):
