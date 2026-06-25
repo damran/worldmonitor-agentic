@@ -22,6 +22,7 @@ the pure unit path is unchanged, and Stage 2 is a no-op until slice-2 wires it.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from followthemoney.types import registry
@@ -29,6 +30,7 @@ from followthemoney.types import registry
 from worldmonitor.ontology.anchors import anchor_conflicts_across
 from worldmonitor.ontology.ftm import FtmEntity
 from worldmonitor.resolution.merge import ResolvedCluster
+from worldmonitor.settings import get_settings
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import; avoids a runtime graph dependency
     from worldmonitor.graph.neo4j_client import Neo4jClient
@@ -36,6 +38,31 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only import; avoids a runtime gra
 # Maximum number of source entities a cluster may collapse without human review (ADR 0020 size half,
 # G5 — NOT inverted by this gate; conservative-by-default).
 MAX_AUTO_MERGE_SIZE = 10
+
+# Reason markers for the NEWLY-DETECTED sensitivity signals (Gate E slice-2) that NO prior approval
+# could have considered: the Stage-2 k-hop graph proximity flag and the Stage-3 Chow abstain band.
+# Both are non-legacy-visible (the legacy guard had no graph/score awareness), so — like a
+# newly-broadened topic sensitivity (``is_newly_broadened_sensitive``) — they MUST NOT be silently
+# un-flagged by a stale approved-group exemption (spec §5 / ADR 0047 Decision 5;
+# :func:`is_nonexemptible_reason`). They are baked into the Stage-2/Stage-3 reason strings so the
+# pipeline can classify the flag from its returned reason without re-running the guard.
+_KHOP_REASON_MARKER = "graph hop(s) of a risk-labelled node"
+_ABSTAIN_REASON_MARKER = "marginal-confidence abstain band"
+
+
+def is_nonexemptible_reason(reason: str) -> bool:
+    """True iff ``reason`` is a Stage-2 (k-hop) or Stage-3 (Chow) newly-detected sensitivity flag.
+
+    The approved-group exemption (``pipeline.py``) un-flags a cluster ⊆ an approved group, but a
+    NEWLY-DETECTED sensitivity a prior approval could not have considered MUST NOT be un-flagged
+    (spec §5 / ADR 0047 Decision 5). Stage-1 newly-broadened topic sensitivity is handled by
+    :func:`is_newly_broadened_sensitive` (it inspects the members); Stage-2/Stage-3 flags are not
+    member-topic-derived, so they are classified here off the guard's own reason string. The size
+    flag and the anchor-conflict flag (ADR 0040) and a legacy-visible topic flag are exemptible and
+    do NOT match here.
+    """
+    return _KHOP_REASON_MARKER in reason or _ABSTAIN_REASON_MARKER in reason
+
 
 # The LEGACY ADR-0020 denylist (review.py:22, now deleted as a sensitivity source of truth). It is
 # retained here ONLY to model "what an approving human could already have understood as sensitive"
@@ -102,6 +129,72 @@ def is_sensitive(entity: FtmEntity) -> bool:
     return any(code not in registry.topic.names for code in topic_codes)
 
 
+@lru_cache(maxsize=1)
+def _risk_labels() -> tuple[str, ...]:
+    """The Neo4j node labels ftmg assigns to FtM ``registry.topic.RISKS`` codes (Config-derived).
+
+    ftmg encodes a topic code as a PascalCase node label via ``generate_topic_labels`` /
+    ``config.nodes.topics[code].label`` (e.g. ``sanction → Sanction``, ``crime.war → CrimeWar``,
+    ``export.control.linked → ExportControlLinked``); ``gds.py:27`` keys ``is_sanctioned`` off the
+    ``"Sanction"`` label. We build the SAME ftmg ``Configuration`` the writer builds
+    (``graph/writer.py`` :func:`write_entities`) and read each RISKS code's label off it, so the
+    Stage-2 k-hop disjunction TRACKS the FtM/ftmg pin automatically and never hardcodes the casing
+    (VERIFIED_API.md "Gate E" k-hop label record). Imported lazily so a pure Stage-1 unit run never
+    pulls in the graph/ftmg dependency; cached because the label set is immutable for the process.
+    """
+    from pathlib import Path
+
+    from ftmg.config import Configuration, DatabaseConfig  # type: ignore[import-untyped]
+
+    # The Configuration's db creds drive only label/transform logic; no connection is opened here
+    # (we read the static topic-label map, never the driver). Built identically to graph/writer.py's
+    # ``_ftmg_config`` so the Stage-2 risk labels match exactly what the writer projects onto nodes.
+    settings = get_settings()
+    config = Configuration(
+        path=Path("."),  # unused: we read config.nodes.topics, never load_entities()
+        db=DatabaseConfig(
+            url=settings.neo4j_uri, username=settings.neo4j_user, password=settings.neo4j_password
+        ),
+    )
+    return tuple(sorted({config.nodes.topics[code].label for code in registry.topic.RISKS}))
+
+
+def _risk_within_khop(neo4j: Neo4jClient, member_id: str, depth: int) -> bool:
+    """True iff a non-ghost risk-labelled node lies within ``depth`` hops of ``member_id``.
+
+    Stage 2 (Gate E / ADR 0047 Decision 3.2). ``depth`` is the int-validated in-code config
+    constant ``settings.sensitivity_khop_depth`` — it is **f-string-INLINED** into the ``[*1..K]``
+    variable-length bound (Neo4j forbids a ``$param`` there; inlining a validated ``int`` keeps
+    ``execute_read``'s ``LiteralString`` cast sound). The matched durable ``member_id`` is passed as
+    a ``$param`` (it is data, never interpolated — DENY E-CYPHER).
+
+    ``:Ghost`` exclusion (HARD INV, ADR 0046 / spec §3.3): a ghost neither flags NOR bridges. The
+    path predicate ``NONE(g IN nodes(p) WHERE g:Ghost)`` excludes a ghost on EVERY node along the
+    path, so a ghost is never a sensitivity signal AND no path traverses THROUGH one (terminate-at,
+    never through). A ``member_id`` not present in the graph ⇒ the MATCH binds nothing ⇒
+    ``count == 0`` ⇒ clean no-flag, never an error (k-hop runs before ``write_entities`` — see
+    the VERIFIED_API.md ordering note, T5d).
+    """
+    # Validate it is a plain int BEFORE inlining into the [*1..K] bound (config, never external
+    # input). ``type(depth) is not int`` rejects a bool (an int subclass — ``[*1..True]`` would be
+    # nonsense) and any non-int slipping past typing, keeping execute_read's LiteralString sound.
+    if type(depth) is not int:
+        raise TypeError(
+            "sensitivity_khop_depth must be an int (it is inlined into the Cypher bound)"
+        )
+    if depth <= 0:  # Stage-2 kill-switch (k == 0): member node only — Stage 1 already read it.
+        return False
+    risk_label_pred = " OR ".join(f"r:{label}" for label in _risk_labels())
+    # ``depth`` is the validated in-code int inlined into the var-length bound; ``$id`` is data.
+    query = (
+        f"MATCH p = (n {{id: $id}})-[*1..{depth}]-(r) "
+        f"WHERE NONE(g IN nodes(p) WHERE g:Ghost) AND ({risk_label_pred}) "
+        "RETURN count(r) > 0 AS flagged"
+    )
+    rows = neo4j.execute_read(query, id=member_id)
+    return bool(rows[0]["flagged"]) if rows else False
+
+
 def needs_review(
     cluster: ResolvedCluster,
     by_id: Mapping[str, FtmEntity],
@@ -115,9 +208,13 @@ def needs_review(
     single-valued canonical anchors (Gate B-5 / ADR 0040, fork (C) HYBRID). Singletons are never
     flagged (nothing is being merged).
 
-    ``neo4j`` is a keyword-only handle for slice-2's Stage-2 k-hop graph sensitivity; in slice-1 it
-    is accepted but unused (Stage 2 is a no-op), so the pure Stage-1 path is unchanged whether or
-    not a graph client is threaded in.
+    Stage 1 (topics — pure) runs FIRST and unconditionally. When a ``neo4j`` handle is threaded in
+    AND ``settings.sensitivity_khop_depth > 0``, Stage 2 (k-hop graph sensitivity) flags a member
+    structurally adjacent to a non-ghost risk node (ADR 0047 Decision 3.2). Stage 3 (the Chow 1970
+    abstain band over ``ResolvedCluster.score``) parks a marginal-confidence cluster that survives
+    Stages 1-2 when its score falls in the configured ``[abstain_low, abstain_high)`` band — a
+    DISTINCT park-vs-auto-merge axis on an already-formed cluster, NEVER the merge threshold. The
+    pure ``neo4j=None`` path is byte-identical to slice-1 plus the (default-OFF) band check.
     """
     if not cluster.is_merge:
         return False, ""
@@ -126,6 +223,7 @@ def needs_review(
             True,
             f"cluster of {len(cluster.member_ids)} exceeds auto-merge limit {MAX_AUTO_MERGE_SIZE}",
         )
+    # Stage 1 — topics-first (pure, no graph), runs unconditionally before the graph stage.
     for member_id in cluster.member_ids:
         member = by_id.get(member_id)
         if member is not None and is_sensitive(member):
@@ -142,4 +240,33 @@ def needs_review(
             f"{field}: {', '.join(values)}" for field, values in sorted(conflicts.items())
         )
         return True, f"members carry conflicting canonical anchors -> {detail}"
+
+    settings = get_settings()
+
+    # Stage 2 — k-hop graph sensitivity (Neo4j). Skipped when no graph handle is threaded in (the
+    # pure unit path) or when the kill-switch is set (k == 0). Closes the edge-less / structural
+    # fail-open: a topic-clean member within k hops of a non-ghost risk node is flagged. Reason is
+    # DISTINCT from the Stage-1 topic reason (VERIFIED_API.md) so the exemption fence treats it as a
+    # non-legacy-visible (NOT stale-exemptible) sensitivity.
+    if neo4j is not None and settings.sensitivity_khop_depth > 0:
+        for member_id in cluster.member_ids:
+            if _risk_within_khop(neo4j, member_id, settings.sensitivity_khop_depth):
+                return (
+                    True,
+                    f"member {member_id} is within {settings.sensitivity_khop_depth} "
+                    f"{_KHOP_REASON_MARKER}",
+                )
+
+    # Stage 3 — Chow (1970) reject-option abstain band over the cluster's ALREADY-COMPUTED score.
+    # A merged, non-oversized, anchor-clean, not-otherwise-flagged cluster whose weakest-link match
+    # probability is MARGINAL parks for review. Half-open ``[low, high)``: inclusive low, exclusive
+    # high. The default ``low == high == 0.92`` is an empty interval (band OFF) — no NEW park. This
+    # is a DISTINCT axis from the merge threshold (spec §3.4 / DENY E-THRESHOLD): it reads, never
+    # shifts, ``DEFAULT_MERGE_THRESHOLD`` (it does not read it at all).
+    if settings.sensitivity_abstain_low <= cluster.score < settings.sensitivity_abstain_high:
+        return (
+            True,
+            f"cluster score {cluster.score:.3f} is in the {_ABSTAIN_REASON_MARKER} "
+            f"[{settings.sensitivity_abstain_low}, {settings.sensitivity_abstain_high})",
+        )
     return False, ""

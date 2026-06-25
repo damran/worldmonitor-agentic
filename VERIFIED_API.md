@@ -305,5 +305,23 @@ registry.topic.names   # -> dict[code, label], the full topic vocabulary (member
   code. `gds.py:27` keys `is_sanctioned` off the `"Sanction"` label. The k-hop Cypher must match the actual
   `tconfig.label` strings for the RISKS codes (resolve from the same ftmg `Configuration`), and MUST exclude
   `:Ghost` (`AND NOT r:Ghost`). Hop depth `k` is an int-validated in-code config constant inlined into the
-  `[*1..k]` bound (NOT a `$param`); the entity id is a `$param`. Pin the exact label set in this file before
-  writing the query.
+  `[*1..k]` bound (NOT a `$param`); the entity id is a `$param`.
+- **PINNED risk-topic node labels (slice-2, verified 2026-06-25 — built the writer's ftmg `Configuration`
+  via `graph/writer.py` and dumped `config.nodes.topics[code].label` for every `registry.topic.RISKS` code):**
+  all 28 RISKS codes HAVE a topic config entry (none missing, none `ignore`), label = PascalCase of the
+  dot-split code (`"".join(p.capitalize() for p in code.split("."))`, 0 mismatches incl. 3-part
+  `export.control.linked → ExportControlLinked`). The 28 label strings the k-hop Cypher must MATCH:
+  ```
+  CorpDisqual Crime CrimeBoss CrimeFin CrimeFraud CrimeTerror CrimeTheft CrimeTraffick CrimeWar
+  Debarment ExportControl ExportControlLinked ExportRisk InvestBan InvestRisk MareDetained MareShadow
+  Poi RegAction RegWarn RoleOligarch RolePep RoleRca Sanction SanctionControl SanctionCounter
+  SanctionLinked Wanted
+  ```
+  `gds.py:27`'s `"Sanction"` == `config.nodes.topics["sanction"].label` (a topic label, consistent). Build
+  the disjunction in-code from the `Configuration` (`config.nodes.topics[c].label for c in registry.topic.RISKS`)
+  so it tracks the ftmg pin — do NOT hardcode the casing.
+- **k-hop ordering (verified):** `needs_review` runs at `pipeline.py:357`, BEFORE `write_entities` (`pipeline.py:466`),
+  so the k-hop queries the graph from PRIOR batches (proximity to already-resolved risk nodes). A cluster member
+  id not yet a node → `count == 0` → clean no-flag (NOT an error). Stage-2 reason must be DISTINCT from the
+  topic reason and treated as a non-legacy-visible sensitivity (so it is NOT stale-exemptible). Chow band reads
+  `ResolvedCluster.score` (`merge.py:77`); defaults `low==high==0.92` (band OFF); k-hop depth default 1, `0`=off.

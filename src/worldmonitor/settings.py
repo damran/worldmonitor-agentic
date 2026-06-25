@@ -9,7 +9,7 @@ fully provisioned. See ``.env.example``.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -81,10 +81,41 @@ class Settings(BaseSettings):
     # so the history table does not grow without bound (ADR 0029 follow-up). 0 disables.
     task_run_retention_days: int = Field(default=30, ge=0)
 
+    # --- Fail-closed sensitivity guard (Gate E / ADR 0047) ---
+    # The guard's sensitive-topic SET is loaded programmatically from FtM's own
+    # ``registry.topic.RISKS`` (never configured — deny-by-default cannot be opened);
+    # these knobs tune only the Stage-2 k-hop traversal and the Stage-3 Chow abstain band.
+    #   sensitivity_khop_depth   — Stage-2 graph traversal depth, f-string-inlined into the
+    #                              ``[*1..k]`` variable-length bound (int-validated, never a
+    #                              $param). ``0`` disables Stage 2 (the kill-switch).
+    #   sensitivity_abstain_low  — Stage-3 Chow band lower bound (INCLUSIVE).
+    #   sensitivity_abstain_high — Stage-3 Chow band upper bound (EXCLUSIVE). ``low == high``
+    #                              ⇒ an empty half-open interval ⇒ the band is OFF (the default).
+    # The band defaults to ``[0.92, 0.92)`` (empty) so slice-2 over-parks NOTHING until a human
+    # tunes it; ``low > high`` is rejected by the validator below (an inverted, nonsensical band).
+    sensitivity_khop_depth: int = Field(default=1, ge=0)
+    sensitivity_abstain_low: float = Field(default=0.92, ge=0.0, le=1.0)
+    sensitivity_abstain_high: float = Field(default=0.92, ge=0.0, le=1.0)
+
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in
     # any environment that persists connector configs; empty default fails fast.
     config_encryption_key: str = ""
+
+    @model_validator(mode="after")
+    def _validate_abstain_band(self) -> "Settings":
+        """Reject an inverted Chow abstain band (``low > high``) — spec §6 / ADR 0047 Decision 6.
+
+        ``low == high`` is allowed (the OFF / empty-band configuration); only a strictly inverted
+        band is nonsensical. The band never touches ``DEFAULT_MERGE_THRESHOLD`` — it is a distinct
+        park-vs-promote axis on an already-formed cluster (spec §3.4).
+        """
+        if self.sensitivity_abstain_low > self.sensitivity_abstain_high:
+            raise ValueError(
+                "sensitivity_abstain_low must be <= sensitivity_abstain_high "
+                f"(got low={self.sensitivity_abstain_low}, high={self.sensitivity_abstain_high})"
+            )
+        return self
 
     @property
     def sqlalchemy_dsn(self) -> str:

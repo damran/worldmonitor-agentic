@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from worldmonitor.db.models import ErQueueItem, IngestDeadLetter, ResolverJudgement
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
+from worldmonitor.guard.sensitivity import is_nonexemptible_reason
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
 from worldmonitor.ontology.validation import validate_or_raise
 from worldmonitor.resolution.audit import record_merge, record_merge_alert
@@ -354,7 +355,7 @@ def _resolve_batch(
             durable_id = resolve_durable_id(session, cluster_members, fallback_id=prior_id)
             cluster = rekey_cluster(cluster, durable_id)
 
-        flagged, reason = needs_review(cluster, by_id)
+        flagged, reason = needs_review(cluster, by_id, neo4j=neo4j)
         members = set(cluster.member_ids)
         # The approved-group-exemption fence (Gate E / ADR 0047 Decision 5). This implements the
         # user's decision "re-review a newly-detected sensitivity ONCE": deny-by-default now flags a
@@ -370,13 +371,18 @@ def _resolve_batch(
         # non-sensitive AND legacy-caught approve->promote paths are preserved unchanged. KNOWN
         # PROPERTY (intended, conservative): a newly-broadened-sensitive cluster re-parks on every
         # RE-INGEST/re-resolution (the fence keys on legacy-visibility, not "was ever approved") —
-        # the deliberate fail-closed posture, not a bug.
+        # the deliberate fail-closed posture, not a bug. The SAME fence covers slice-2's
+        # newly-detected signals (Stage-2 k-hop graph proximity, Stage-3 Chow abstain band): each is
+        # non-legacy-visible (the legacy guard had no graph/score awareness), so a prior approval
+        # could not have considered them either — they are recognised off the guard's reason string
+        # via ``is_nonexemptible_reason`` and likewise NOT un-flagged by a stale exemption.
         newly_broadened = any(
             (member := by_id.get(mid)) is not None and is_newly_broadened_sensitive(member)
             for mid in cluster.member_ids
         )
-        if flagged and not newly_broadened and any(members <= group for group in approved_groups):
-            flagged = False  # an already-approved, not-newly-broadened merge — promote
+        nonexemptible = newly_broadened or is_nonexemptible_reason(reason)
+        if flagged and not nonexemptible and any(members <= group for group in approved_groups):
+            flagged = False  # an already-approved, exemptible merge — promote
 
         # mode="block": park the flagged cluster for human review; never write it.
         if flagged and mode == "block":

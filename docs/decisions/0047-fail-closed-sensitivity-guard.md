@@ -1,6 +1,6 @@
 # ADR 0047 — Fail-closed sensitivity guard (deny-by-default; topics → graph → Chow abstain)
 
-> Status: **PROPOSED** · 2026-06-25 · Closes audit gap **G6** · Inverts the denylist half of **ADR 0020**
+> Status: **ACCEPTED** · 2026-06-25 · Closes audit gap **G6** · Inverts the denylist half of **ADR 0020**
 > Gate: [Gate E — Fail-Closed Sensitivity Guard](../reviews/GATE_E_SENSITIVITY_GUARD_SPEC.md)
 > Person-affecting: **NO (fail-closed)** — the change can only move MORE clusters to human review;
 > it auto-promotes nothing and needs no sign-off (CLAUDE.md self-improvement rule).
