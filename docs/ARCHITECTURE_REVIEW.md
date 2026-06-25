@@ -31,10 +31,12 @@ A new source or method is a **new plugin against that contract** — no layer ab
 
 The pipeline is built in **gated milestones** (the "runway"). What is implemented today:
 single-node, batch-on-a-timer ingest and within-batch entity resolution, with a catastrophic-merge
-guard, durable human sign-off, and tenant isolation (G4) enforced in application code. Cross-batch
-ER (Gate B), persisted cross-run graph mutation (Gate C), canonical-canonical routing (S4), and
-streaming / HA / single-writer concerns (X1/X2/X3) are explicitly **deferred** with their seams left
-visible in the code (Section 6).
+guard and durable human sign-off. (Per **D1 / ADR 0042** the system is **single-tenant**; the former
+tenant-isolation invariant G4 is retired — `tenant_id` has been removed from code and schema, so the
+G4 enforcement points described below are historical.) Cross-batch ER (Gate B), persisted cross-run
+graph mutation (Gate C), and canonical-canonical routing (S4) are explicitly **deferred** with their
+seams left visible in the code (Section 6). The streaming cursor (X1) is likewise deferred; the former
+HA-lease / single-writer-per-tenant forks (X2/X3) are **moot under single-tenancy** (ADR 0042).
 
 ---
 
@@ -61,8 +63,8 @@ calls `_ingest_instance` sequentially per id. `_ingest_instance` (`driver.py:135
 separate transactions**:
 
 1. **Claim** (`driver.py:138-158`): re-fetch the instance, guard `status == "enabled"` (silent
-   return otherwise — TOCTOU seam, X3), flip to `running`, INSERT a `running` `TaskRun`, snapshot
-   `(tenant_id, connector_id, config_encrypted)`, commit.
+   return otherwise — TOCTOU seam, formerly X3; moot under single-tenancy per ADR 0042), flip to
+   `running`, INSERT a `running` `TaskRun`, snapshot `(connector_id, config_encrypted)`, commit.
 2. **Work** (`driver.py:160-178`): `ConfigCipher.decrypt(config_token)` → `json.loads` →
    `registry.get(connector_id)`; if `manifest.capability is Capability.ACTIVE`, raise
    `ActiveConnectorRefused` (`driver.py:165`); else `run_ingest(...)` in its own `work` session.
@@ -73,7 +75,8 @@ separate transactions**:
 `run_ingest` (`runner/ingest.py:94`) is the call-once primitive. For each `RawRecord` yielded by
 `connector.collect(config)` (`ingest.py:135`):
 
-3. Build the landing key: `tenant_id/connector_id/dataset/{record.key}.json` (`ingest.py:138`).
+3. Build the landing key: `connector_id/dataset/{record.key}.json` (`ingest.py:138`; the former
+   `tenant_id/` prefix is removed under single-tenancy, ADR 0042).
 4. `landing.put(key, record.data, ...)` → returns an `s3://` URI (`ingest.py:141`,
    `storage/landing.py:put`). On failure: dead-letter `stage="land"` (no provenance ever built) and
    continue (`ingest.py:143-154`).
@@ -91,15 +94,17 @@ separate transactions**:
 
 ### 2.3 Resolve: score → cluster → guard → referent-rewrite → graph write
 
-`run_resolution` (`driver.py:189`) acquires a non-blocking `threading.Lock` (skip-tick if held),
-selects DISTINCT tenant_ids with pending queue rows, and calls `_resolve_tenant` per tenant, which
-opens a `resolve` `TaskRun` and calls `resolve_pending`.
+`run_resolution` (`driver.py:189`) acquires a non-blocking `threading.Lock` (skip-tick if held), then
+opens a `resolve` `TaskRun` and calls `resolve_pending`. (Under single-tenancy, ADR 0042, the former
+per-tenant routing — a DISTINCT-tenant select feeding `_resolve_tenant` per tenant — is removed; there
+is a single resolution pass.)
 
-`resolve_pending` (`resolution/pipeline.py:67`) loads this tenant's durable `ResolverJudgement`s once
-(`_load_judgements`, `pipeline.py:143`, tenant-scoped), then drains the queue in **bounded batches**:
+`resolve_pending` (`resolution/pipeline.py:67`) loads the durable `ResolverJudgement`s once
+(`_load_judgements`, `pipeline.py:143`), then drains the queue in **bounded batches**:
 
-9. SELECT `ErQueueItem WHERE tenant_id == t AND status == 'pending' ORDER BY created_at, id LIMIT size`
-   (`pipeline.py:102-112`); break when empty.
+9. SELECT `ErQueueItem WHERE status == 'pending' ORDER BY created_at, id LIMIT size`
+   (`pipeline.py:102-112`); break when empty. (The former `tenant_id == t` predicate is removed under
+   single-tenancy, ADR 0042.)
 10. `_resolve_batch` (`pipeline.py:180`):
     - `make_entity` per row; `score_pairs(entities)` (Splink/DuckDB, `splink_model.py:125`).
     - `cluster_and_merge(...)` (`merge.py:74`): a **fresh ephemeral in-memory nomenklatura resolver**
@@ -120,15 +125,16 @@ opens a `resolve` `TaskRun` and calls `resolve_pending`.
     - **Safety sweep** (`pipeline.py:264-276`): any FtM id not in any cluster (dropped / id-less) →
       rows `invalid` + WARNING, so the bounded-drain loop always terminates.
     - If anything promoted: `build_referent_map(promoted_clusters)` (PROMOTED only, `pipeline.py:284`)
-      → `rewrite_referents` per entity (`pipeline.py:285-286`) → `write_entities(neo4j, …, tenant_id)`
-      (`pipeline.py:287`).
+      → `rewrite_referents` per entity (`pipeline.py:285-286`) → `write_entities(neo4j, …)`
+      (`pipeline.py:287`; the former `tenant_id` argument is removed under single-tenancy, ADR 0042).
 11. Back in `resolve_pending`: `session.commit()` **per batch** (`pipeline.py:125`).
 
 `write_entities` (`graph/writer.py:117`) runs ftmg's two passes, each in its own session: Pass 1
-nodes (`writer.py:141-148`), Pass 2 edges + entity-links + topic-labels (`writer.py:157-171`). Every
-node MERGE key and every relationship MATCH key is tenant-scoped via `_KEY_REWRITES` /
-`_tenantize_query` (`writer.py:44-59`); provenance (`prov_*`) and anchors are projected onto every
-node (`writer.py:133-138,147`) and every edge (`writer.py:160,170`).
+nodes (`writer.py:141-148`), Pass 2 edges + entity-links + topic-labels (`writer.py:157-171`). Under
+single-tenancy (ADR 0042) every node MERGE key and relationship MATCH key is ftmg's native `{id}`; the
+former tenant-scoping machinery (`_KEY_REWRITES` / `_tenantize_query`, `writer.py:44-59`) is removed.
+Provenance (`prov_*`) and anchors are projected onto every node (`writer.py:133-138,147`) and every
+edge (`writer.py:160,170`).
 
 ### 2.4 Sign-off side path
 
@@ -190,16 +196,19 @@ before the Postgres commit** (same cross-store ordering gap as the pipeline — 
   write of canonical/members + outbound edges.
 
 ### Graph write + read (`graph/`)
-- `writer.py` — ftmg adapter: two-pass `write_entities`, tenant-scoping + provenance/anchor
-  projection.
+- `writer.py` — ftmg adapter: two-pass `write_entities` (ftmg-native `{id}` node key) + provenance/
+  anchor projection. (The former tenant-scoping machinery is removed under single-tenancy, ADR 0042.)
 - `neo4j_client.py` — frozen dataclass wrapping the neo4j Driver; `execute_write`/`execute_read` +
   raw `session()`.
-- `constraints.py` — `ensure_constraints`: composite `(tenant_id, anchor)` uniqueness on the 4
-  canonical-id fields + a `tenant_id` index.
-- `queries.py` — tenant-scoped reads `get_entity`/`get_neighbors`/`get_provenance`.
+- `constraints.py` — `ensure_constraints`: single-column uniqueness on each of the 4 canonical-id
+  anchor fields. (Formerly composite `(tenant_id, anchor)` + a `tenant_id` index; reduced under
+  single-tenancy, ADR 0042.)
+- `queries.py` — reads `get_entity`/`get_neighbors`/`get_provenance`. (The former `tenant_id`
+  predicate is removed under single-tenancy, ADR 0042.)
 
 ### Schema, settings, crypto (`db/`, `settings.py`)
-- `db/models.py` — the 8 ORM tables (all `tenant_id`-scoped).
+- `db/models.py` — the 8 ORM tables (formerly all `tenant_id`-scoped; the column is removed under
+  single-tenancy, ADR 0042 / migration `0004_drop_tenant_id`).
 - `db/engine.py` — engine/session factory + `migrate_to_head` adoption logic.
 - `db/migrate.py` / `db/migrations/` — Alembic CLI + baseline/runway/sign-off revisions.
 - `db/crypto.py` — `ConfigCipher` (Fernet) for `config_encrypted` at rest.
@@ -216,24 +225,28 @@ before the Postgres commit** (same cross-store ordering gap as the pipeline — 
 
 ### 4.1 Postgres (8 tables, `db/models.py`)
 
-All PKs are app-generated `String(64)` (uuid4 hex, no DB sequence). Every table carries a
-`tenant_id String(128)` index. Isolation is **application-enforced only** — no RLS, no tenant FK, no
-composite PK including tenant_id.
+All PKs are app-generated `String(64)` (uuid4 hex, no DB sequence). Under single-tenancy (D1 / ADR
+0042), the former `tenant_id String(128)` index on every table is **removed** (migration
+`0004_drop_tenant_id`) and the two composite uniques are redefined without their leading `tenant_id`
+column; the "Tenant scoping" column below is retained for historical context and now reads as
+*formerly* `tenant_id`. No RLS, no tenant FK, no composite PK including tenant_id.
 
-| Table | Purpose | Tenant scoping | Key indexes / uniques |
+| Table | Purpose | Tenant scoping (historical — column dropped, ADR 0042) | Key indexes / uniques |
 |---|---|---|---|
-| `connector_instance` (`:23`) | configured tenant-scoped connector plugin; config Fernet-encrypted at rest | `tenant_id` (idx) | `connector_id` idx; `config_encrypted` TEXT |
-| `er_queue_item` (`:39`) | mapped FtM candidate awaiting resolution; `raw_entity` JSONB carries provenance | `tenant_id` (idx) | **`uq_er_queue_dedup (tenant_id, source_record, entity_id)`** (`:48`); `entity_id` idx (nullable); `status` idx |
-| `merge_audit` (`:64`) | every resolution decision (`merged`/`pending_review`/`rejected`); rollback record | `tenant_id` (idx) | `canonical_id` idx; `decision` idx; `source_ids` JSONB; no unique (append-only) |
-| `ingest_dead_letter` (`:83`) | land/map failures (the dead-letter trail) | `tenant_id` (idx) | `stage` idx; `source_record` nullable (null for `land`) |
-| `merge_alerts` (`:108`) | flagged-but-merged clusters under `alert` mode | `tenant_id` (idx) | `canonical_id` idx; `source_ids` JSONB |
-| `task_run` (`:130`) | run-history/observability per ingest/resolve pass | `tenant_id` (idx) | `connector_instance_id` idx (NULL for resolve); `kind`/`status` idx; `stats` JSONB |
-| `resolver_judgement` (`:155`) | durable sign-off judgements (`positive`/`negative`) | `tenant_id` (idx) | **`uq_resolver_judgement_pair (tenant_id, left_id, right_id)`** (`:171`); `left_id <= right_id` **caller-enforced, no DB CHECK** |
-| `sign_off` (`:183`) | human approve/reject record (audit trail) | `tenant_id` (idx) | `canonical_id` idx; `decision` idx |
+| `connector_instance` (`:23`) | configured connector plugin; config Fernet-encrypted at rest | *(formerly `tenant_id` idx)* | `connector_id` idx; `config_encrypted` TEXT |
+| `er_queue_item` (`:39`) | mapped FtM candidate awaiting resolution; `raw_entity` JSONB carries provenance | *(formerly `tenant_id` idx)* | **`uq_er_queue_dedup (source_record, entity_id)`** (`:48`; formerly led by `tenant_id`, ADR 0042); `entity_id` idx (nullable); `status` idx |
+| `merge_audit` (`:64`) | every resolution decision (`merged`/`pending_review`/`rejected`); rollback record | *(formerly `tenant_id` idx)* | `canonical_id` idx; `decision` idx; `source_ids` JSONB; no unique (append-only) |
+| `ingest_dead_letter` (`:83`) | land/map failures (the dead-letter trail) | *(formerly `tenant_id` idx)* | `stage` idx; `source_record` nullable (null for `land`) |
+| `merge_alerts` (`:108`) | flagged-but-merged clusters under `alert` mode | *(formerly `tenant_id` idx)* | `canonical_id` idx; `source_ids` JSONB |
+| `task_run` (`:130`) | run-history/observability per ingest/resolve pass | *(formerly `tenant_id` idx)* | `connector_instance_id` idx (NULL for resolve); `kind`/`status` idx; `stats` JSONB |
+| `resolver_judgement` (`:155`) | durable sign-off judgements (`positive`/`negative`) | *(formerly `tenant_id` idx)* | **`uq_resolver_judgement_pair (left_id, right_id)`** (`:171`; formerly led by `tenant_id`, ADR 0042); `left_id <= right_id` **caller-enforced, no DB CHECK** |
+| `sign_off` (`:183`) | human approve/reject record (audit trail) | *(formerly `tenant_id` idx)* | `canonical_id` idx; `decision` idx |
 
 Migrations: `0001_baseline` (pre-runway: connector_instance, er_queue_item without entity_id,
 merge_audit, merge_alerts) → `0002_runway` (entity_id + uq_er_queue_dedup, ingest_dead_letter,
-task_run) → `0003_signoff_judgements` (resolver_judgement, sign_off). `migrate_to_head`
+task_run) → `0003_signoff_judgements` (resolver_judgement, sign_off) → `0004_drop_tenant_id` (drops
+the `tenant_id` column + its 8 indexes and redefines the two composite uniques without it, under
+single-tenancy / ADR 0042; 0001–0003 are left unedited, the delta layers in 0004). `migrate_to_head`
 (`engine.py:53-76`) branches on column-existence heuristics; `create_all == alembic head` is asserted
 by `tests/integration/test_migrations.py` + an `alembic check` drift guard.
 
@@ -241,17 +254,19 @@ by `tests/integration/test_migrations.py` + an `alembic check` drift guard.
 
 `write_entities` drives ftmg's FtM → property-graph transform (`graph/writer.py`):
 
-- **Nodes.** One node per non-edge FtM entity, keyed `{id, tenant_id}` (tenant-scoped MERGE,
-  `writer.py:45`). `SET n = props` (full replacement) where props = `id / caption / datasets /
-  schema props / anchors (wm_anchor_*) / prov_* / tenant_id`. ftmg stamps the base label `:Entity`
-  plus FtM-schema labels.
+- **Nodes.** One node per non-edge FtM entity, keyed `{id}` (ftmg's native MERGE key, `writer.py:45`).
+  `SET n = props` (full replacement) where props = `id / caption / datasets / schema props / anchors
+  (wm_anchor_*) / prov_*`. ftmg stamps the base label `:Entity` plus FtM-schema labels. (Formerly
+  keyed `{id, tenant_id}` via tenant-scoped MERGE; reduced under single-tenancy, ADR 0042.)
 - **Edges.** FtM edge schemata (Ownership, Directorship, Sanction…) become typed relationships via
-  `generate_edge_entity`, endpoints MATCHed on the raw `{id, tenant_id}` key; `SET r = item.props`
-  including `tenant_id` + the **asserting entity's** `prov_*`. Entity-reference properties on
-  non-edge schemata route through `generate_entity_links` (see HIGH issue in §7 — these MATCH on the
-  `entity:`-prefixed node_id and silently drop).
-- **Constraints** (`graph/constraints.py`): composite `(tenant_id, <anchor>)` uniqueness on each
-  `CANONICAL_ID_FIELDS` property + a `tenant_id` index, all `IF NOT EXISTS`.
+  `generate_edge_entity`, endpoints MATCHed on the raw `{id}` key; `SET r = item.props` including the
+  **asserting entity's** `prov_*`. Entity-reference properties on non-edge schemata route through
+  `generate_entity_links` (see HIGH issue in §7 — these MATCH on the `entity:`-prefixed node_id and
+  silently drop). (Formerly the endpoint key and `r` props also carried `tenant_id`; removed under
+  single-tenancy, ADR 0042.)
+- **Constraints** (`graph/constraints.py`): single-column uniqueness on each `CANONICAL_ID_FIELDS`
+  property, `IF NOT EXISTS`. (Formerly composite `(tenant_id, <anchor>)` uniqueness + a `tenant_id`
+  index; reduced under single-tenancy, ADR 0042.)
 - **Provenance** is the GDPR/audit log: `prov_source_id / prov_retrieved_at / prov_reliability /
   prov_source_record` on every node and every edge, projected from the entity's flat `wm_prov_*`
   context by `provenance_node_properties` (`provenance/model.py:70`).
@@ -263,9 +278,9 @@ by `tests/integration/test_migrations.py` + an `alembic check` drift guard.
 | Invariant | Enforcement point | How |
 |---|---|---|
 | **G1 — provenance on every node** | `provenance/model.py:49-54` (stamp); `graph/writer.py:133-138,147` (project) | Connector `map()` ends in `stamp`; `run_ingest` builds `Provenance` only after a successful land (`ingest.py:156`); writer projects `prov_*` onto node props. *Caveat: writer projects only if stamped — `provenance_node_properties` returns `{}` when unstamped (`model.py:73-75`); the write boundary does not reject a provenance-less entity.* |
-| **G1 — provenance on every edge** | `graph/writer.py:160,170` | `edge_prov = provenance_node_properties(asserting entity)` merged into `params.props` via `_inject_tenant` (`writer.py:85-86`); proven by `tests/integration/test_graph_writer.py`. |
-| **G4 — tenant isolation (resolution)** | `pipeline.py:106` (pending SELECT), `:146` (_load_judgements), `:234/:243/:253/:287`; `merge.py:55-71` | Every queue/judgement read filters `tenant_id`; the **ephemeral per-batch nomenklatura resolver** (ADR 0028) prevents cross-tenant judgement bleed; proven `tests/unit/test_resolution.py:73`, `tests/integration/test_signoff.py:103`. |
-| **G4 — tenant isolation (graph)** | `graph/writer.py:44-58` + `:129-130`; `graph/constraints.py:29-31` | `_KEY_REWRITES` rewrites every MERGE/MATCH key to `{id, tenant_id}`; `_tenantize_query` raises `WriterError` if `tenant_id` absent; `write_entities` raises on falsy `tenant_id`; composite `(tenant_id, anchor)` uniqueness constraint. |
+| **G1 — provenance on every edge** | `graph/writer.py:160,170` | `edge_prov = provenance_node_properties(asserting entity)` merged into `params.props` (`writer.py:85-86`); proven by `tests/integration/test_graph_writer.py`. (Formerly this merge step also stamped `tenant_id`; that stamp is removed under single-tenancy, ADR 0042.) |
+| **G4 — tenant isolation (resolution)** — *RETIRED under D1 / ADR 0042 (single-tenant)* | *(historical)* `pipeline.py` pending SELECT / `_load_judgements`; `merge.py:55-71` | **Retired:** with one tenant there is nothing to isolate, so the `tenant_id` predicates on the queue/judgement reads are removed. The **ephemeral per-batch nomenklatura resolver** (ADR 0028) is **kept** — its G4 motivation is now historical but it is still required for B-1 crash recovery / batch purity (proven `tests/unit/test_resolution.py:73`, which already passes zero `tenant_id`). |
+| **G4 — tenant isolation (graph)** — *RETIRED under D1 / ADR 0042 (single-tenant)* | *(historical)* `graph/writer.py`; `graph/constraints.py` | **Retired:** the node/edge key returns to ftmg's native `{id}`; the `_KEY_REWRITES` / `_tenantize_query` machinery and the `write_entities` `tenant_id` guard are removed, and the graph constraint reverts to single-column anchor uniqueness. (A future managed-cloud multi-tenant tier would reintroduce isolation as its own gate — RLS / Neo4j Enterprise multi-db — per ADR 0042.) |
 | **Append-only / no un-merge** | `signoff.py:167,193-197,202`; `graph/writer.py` (MERGE only) | Audit `decision` is flipped, never deleted; reject writes members as **new separate** nodes rather than splitting a written canonical; the writer only MERGEs/CREATEs — no delete/split path exists. |
 | **Canonical-canonical via guard** | `pipeline.py:209-229` + `_approved_groups` (`:151`) | Guard exemption fires **only** when all cluster members ⊆ a *single* approved connected component; a new member accreting or two approved groups fusing re-parks (proven `test_signoff.py:348`). Routes canonical-canonical fusion *through* the guard, not around it. |
 | **Resolve to canonical IDs (edges, G2)** | `resolution/referents.py:47-67`; `pipeline.py:284-287`; `signoff.py:158-161` | `rewrite_referents` redirects entity-typed property values to the canonical id before write, so no edge MATCHes a merged-away, never-materialised id; map built from **promoted clusters only** (`referents.py:33`) so parked merges never rewrite (proven `test_referent_rewriting.py:237`). |
@@ -287,8 +302,8 @@ Each deferred milestone has its seam left intentionally visible in the code, own
 | **Gate C** — persisted cross-run referent rewriting / graph mutation | **Inbound** cross-references (edges pointing *at* an approved/merged entity from a prior run) are not restored; no graph-side sweep re-points existing edges or removes orphan nodes | `signoff.py:13-15` (named deferred); `referents.py` only rewrites within the current write set; `SET n = props` full-replace (`ftmg.transform`) is where a cross-run re-canonicalization would clobber state | ADR 0025 |
 | **S4** — canonical-canonical routing | No first-class canonical-canonical merge path; every run re-mints a fresh `NK-` id; fusion is routed back *through* the guard rather than around it | `pipeline.py:209-229` (`_approved_groups` exemption); `merge_audit/merge_alerts/sign_off` key on a single `canonical_id` (no canonical→canonical route table); `test_signoff.py:329-344` asserts a re-ingest mints a NEW id | ADR 0031 |
 | **X1** — stream cursor | `Mode.STREAM` is modelled but no STREAM connector exists; `collect()` is a one-shot cursorless iterator; `run_ingest` re-drains from the start, relying on `uq_er_queue_dedup` | `plugins/base.py:44` (`Mode.STREAM`); `ingest.py:16-18,135`; `connector_instance` has `last_run`/`next_run` but no per-source offset column | (runway — X1) |
-| **X2** — driver lease / HA | Single-node best-effort: `recover_stale` resets all `running` rows at startup; no lease/heartbeat/owner column | `driver.py:86-113` (recover_stale); `db/models.py:130-139` (TaskRun docstring names the single-node assumption); the in-process `_resolve_lock` (`driver.py:195`) | (runway — X2) |
-| **X3** — single-writer-per-tenant | Nothing serializes two `run_ingest` or a concurrent `resolve` + `sign-off` for one tenant; relies on the single-node lock + dedup constraint | `driver.py:139-141` (TOCTOU claim, silent loser); `pipeline.py:101-112` (no `FOR UPDATE`/`SKIP LOCKED`); `landing.py` (last-writer-wins S3 key race) | (runway — X3) |
+| **X2** — driver lease / HA — *fork moot under single-tenancy (ADR 0042)* | Single-node best-effort: `recover_stale` resets all `running` rows at startup; no lease/heartbeat/owner column. The HA-lease fork is moot under single-tenancy, though single-node concurrency hardening (a real lease) remains valid future work | `driver.py:86-113` (recover_stale); `db/models.py:130-139` (TaskRun docstring names the single-node assumption); the in-process `_resolve_lock` (`driver.py:195`) | (runway — X2; ADR 0042) |
+| **X3** — single-writer — *fork moot under single-tenancy (ADR 0042)* | The former "single-writer-**per-tenant**" fork is moot under single-tenancy. Single-node concurrency is still unguarded: nothing serializes two `run_ingest` or a concurrent `resolve` + `sign-off`; relies on the single-node lock + dedup constraint | `driver.py:139-141` (TOCTOU claim, silent loser); `pipeline.py:101-112` (no `FOR UPDATE`/`SKIP LOCKED`); `landing.py` (last-writer-wins S3 key race) | (runway — X3; ADR 0042) |
 | **Active-connector scope tokens** | The authorized-scope-token gate for active plugins is unbuilt; refusal is the placeholder | `driver.py:54-60,165-169` (`ActiveConnectorRefused`) | (plugin framework) |
 | **`wm:Place` ontology extension** | GeoNames maps places to FtM `Address` as a load-bearing stand-in | `plugins/connectors/geonames/connector.py:6` (docstring), `:91` | (ontology) |
 
@@ -300,12 +315,12 @@ Each deferred milestone has its seam left intentionally visible in the code, own
 
 **B1 — `_finalize` outside the try/except crashes the whole driver loop.**
 `_ingest_instance` calls `_finalize` **outside** the surrounding try/except (`driver.py:184` vs the
-except ending at `:181`), and `run_forever` has **no outer try/except** around the per-instance /
-per-tenant passes (`driver.py:263-269`). If the finalize commit raises (a transient DB error) — or
+except ending at `:181`), and `run_forever` has **no outer try/except** around the per-instance
+ingest / resolution passes (`driver.py:263-269`). If the finalize commit raises (a transient DB error) — or
 any pass throws — the exception propagates through `asyncio.to_thread` → `run_forever` and **kills the
 entire driver loop**. The instance + task are stranded `running` (recover_stale only runs at startup),
-the just-completed ingest work is lost from the trail, and **all tenants stop** with only a stack
-trace and no supervisor/restart. *Direction:* wrap each pass body in `run_forever` in a try/except
+the just-completed ingest work is lost from the trail, and **the whole pipeline stops** with only a
+stack trace and no supervisor/restart. *Direction:* wrap each pass body in `run_forever` in a try/except
 that logs and continues; move `_finalize` inside (or give it its own guard) so a finalize failure can
 never escape a single instance.
 
@@ -356,20 +371,23 @@ use `follow_redirects=True`. This violates "treat all external data as hostile" 
 boundary. *Direction:* add a strict ISO-3166 / dataset-slug regex to each `config.schema.json` and
 disable cross-host redirects.
 
-**H6 — Unsanitized connector-controlled landing key (tenant-prefix escape).**
+**H6 — Unsanitized connector-controlled landing key (prefix escape).**
 `record.key` (derived from hostile parsed source data; for OpenSanctions, from the untrusted entity
 id at `connector.py:71-77`) is interpolated directly into the S3 object key at `ingest.py:138` with no
 normalization, then passed straight to `put_object` (`landing.py`). A `record.key` containing `../`
-or a leading `/` escapes the `tenant_id/connector_id/dataset` prefix and enables cross-tenant
-landing-zone collision/overwrite — undermining G4 at the storage layer. *Direction:* slugify/quote
-the key and reject path separators before building the S3 key.
+or a leading `/` escapes the `connector_id/dataset` prefix and enables landing-zone collision/overwrite
+across connectors/datasets. (Under single-tenancy, ADR 0042, the former cross-*tenant* G4 framing no
+longer applies — the key no longer carries a `tenant_id/` prefix — but the path-traversal/overwrite
+risk itself is unchanged.) *Direction:* slugify/quote the key and reject path separators before
+building the S3 key.
 
-**H7 — Concurrent `resolve_pending` for one tenant double-processes.**
+**H7 — Concurrent `resolve_pending` double-processes.**
 The pending SELECT has no row lock / `SKIP LOCKED` / `processing` transition before the batch commits
 (`pipeline.py:101-112`). Two workers (or a retried driver task) load the same rows, both
 score+cluster+`write_entities`, producing duplicate canonical nodes with different `NK-` ids and
-duplicate audit rows. Mitigated today only by the deferred X3 single-writer assumption. *Direction:*
-`SELECT … FOR UPDATE SKIP LOCKED` (or a `processing` status) when X3 is built.
+duplicate audit rows. Mitigated today only by the deferred X3 single-writer assumption (the
+*per-tenant* qualifier is moot under single-tenancy, ADR 0042, but single-node single-writer is still
+unbuilt). *Direction:* `SELECT … FOR UPDATE SKIP LOCKED` (or a `processing` status) when X3 is built.
 
 ### MEDIUM
 
@@ -449,9 +467,13 @@ treat a 404 as "missing".
 `ingest.py:190`), so a crash/restart double-enqueues them — the idempotent-enqueue invariant silently
 does not hold for that case.
 
-**L2 — G4 has no database-level enforcement.** No RLS, no tenant in any PK/FK; isolation rests
-entirely on every caller's `.where(tenant_id == ...)` (`models.py:29` et al). A single missed filter
-silently crosses tenants — a structural gap for a "tenant-scoped from day one" product.
+**L2 — G4 (tenant isolation) is RETIRED under single-tenancy (D1 / ADR 0042).** This risk is now
+moot: with one tenant there is nothing to isolate, and `tenant_id` has been removed from code and
+schema. *(Historical: G4 had no database-level enforcement — no RLS, no tenant in any PK/FK; isolation
+rested entirely on every caller's `.where(tenant_id == ...)`, so a single missed filter could silently
+cross tenants. If a future managed-cloud tier reintroduces multi-tenancy as its own gate, it should
+prefer DB-level enforcement — RLS / Neo4j Enterprise multi-db — over the app-layer scoping ADR 0017
+settled for.)*
 
 **L3 — `resolver_judgement` has no `left_id <= right_id` CHECK.** The canonical ordering is
 caller-only (`models.py:170-177`); a mis-ordered insert `(B,A)` when `(A,B)` exists creates a second

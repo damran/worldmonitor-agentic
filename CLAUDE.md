@@ -19,7 +19,7 @@ agent layer (Hermes)**. CTI is just one plugin domain. Read `docs/00_VISION_AND_
 - **API + MCP surface** (FastAPI REST/GraphQL + FastMCP) is the only way to read the graph/scores.
 - **Adopt Hermes Agent** as the agent layer (don't build a runtime). It connects to our MCP.
 - **LLM pluggable:** Hermes agent-side; **LiteLLM** for service-side LLM use (Ollama/OpenRouter/Anthropic).
-- **API: Python 3.12+ / FastAPI**, stateless. **Auth: Zitadel (OIDC), tenant-scoped from day one** (`tenant_id` everywhere).
+- **API: Python 3.12+ / FastAPI**, stateless. **Auth: Zitadel (OIDC); single-tenant** (D1, ADR 0042 — no tenant scoping).
 - **Containerized + 12-factor + S3-compatible.** Dev on WSL2; always-on stack on a persistent host.
 - **Tasks: `asyncio` + task table** now; Temporal/Celery deferred. OpenCTI is NOT the spine.
 

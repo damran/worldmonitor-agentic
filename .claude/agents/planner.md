@@ -10,7 +10,7 @@ You convert ONE backlog item into a gate the fleet can build. You write specs an
 Read the audit finding / roadmap item and the relevant existing ADRs first, then produce:
 1. A **gate spec**: scope (exact files/areas), explicit acceptance criteria, the named tests that
    will prove it, and the locked invariants it must hold (G1 provenance on every node AND edge,
-   G4 tenant isolation, append-only, canonical-canonical only via the guard).
+   append-only, canonical-canonical only via the guard).
 2. A **draft ADR** in `docs/decisions/` (next number, status PROPOSED) with the decision and its
    alternatives. If the choice is a genuine product/architecture fork, mark it OPEN and STOP for
    the human — do not pick it yourself.

@@ -69,3 +69,15 @@ would be forgotten and the cluster would re-park on every later batch.
   manual, infrequent operation; a JSONB index / edge projection is a later optimisation.
 - Judgements are recorded for all member pairs (`O(n²)` per cluster) — fine for the
   small sensitive clusters this targets.
+
+## Note (2026-06-25, ADR [0042](0042-single-tenancy-teardown.md))
+
+The system is now **single-tenant** (locked decision D1; ADR 0042 supersedes
+[0017](0017-app-layer-tenant-isolation.md)), and `tenant_id` has been removed from all
+code. The durable `resolver_judgement` and `sign_off` rows are therefore **no longer
+tenant-scoped**: judgements are keyed by `(left_id, right_id)` and `resolve_pending`
+loads them all (no per-tenant filter) before seeding each batch's fresh ephemeral
+resolver. The G4 ephemeral-per-batch isolation still holds via the per-batch resolver
+itself; cross-tenant leakage is simply moot now that there is one tenant. The
+return-to-block approve/reject state machine — guard evaluation, single-approved-group
+bypass, promote/reject/`sign_off` recording — is **unchanged**.

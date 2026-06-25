@@ -1,6 +1,11 @@
 # ADR 0017 — Tenant isolation: app-layer composite keys, not per-tenant DB
 
-> Status: **LOCKED** · June 2026 · Implements the `tenant_id`-everywhere invariant (CLAUDE.md, decision #14).
+> Status: **SUPERSEDED by ADR 0042 (2026-06-25)** · originally LOCKED June 2026.
+
+> **Superseding note (2026-06-25):** Decision D1 locked WorldMonitor as **single-tenant**, so app-layer
+> tenant isolation was removed — `tenant_id` no longer exists in code (the writer rewrites, composite
+> constraints, and scoped read predicates described below are gone). ADR 0042 (single-tenancy teardown)
+> supersedes this ADR. The historical decision is retained below for the record.
 
 ## Context
 Every node and edge must be tenant-scoped, and two tenants holding the same real-world entity
@@ -21,8 +26,10 @@ Enforce tenant isolation **at the application layer in a single shared graph**:
 Neo4j Enterprise per-tenant/multi-DB isolation is **deferred** to cloud deployment.
 
 ## Status
-**LOCKED** for the single-node Community deployment. Re-evaluate (supersede) when moving to a managed
-cloud tier where Enterprise RBAC / multi-DB becomes available.
+**SUPERSEDED by ADR 0042 (2026-06-25).** Was LOCKED for the single-node Community deployment. The
+expected re-evaluation trigger (a move to a managed cloud tier with Enterprise RBAC / multi-DB) was
+overtaken by decision D1, which locked WorldMonitor single-tenant and removed app-layer tenant isolation
+entirely. None of the mechanisms below remain in the code.
 
 ## Consequences
 - ✅ Correct by construction: tenant_id in the MERGE key + composite constraint prevents cross-tenant

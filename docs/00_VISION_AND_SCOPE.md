@@ -67,8 +67,10 @@ blue-team tool; CTI is just one plugin domain among many.
 
 - **Built** by **Claude Code operating autonomously** (branch → PR → CI → merge via the authenticated
   git/gh clients), doing web research and using any tool, pausing only for genuine questions.
-- **Run** solo now on a 64 GB Ubuntu-on-WSL2 machine, **designed for multi-tenant SaaS from day one**
-  (Zitadel auth/tenancy), containerized and cloud-portable so the move to cloud is a deploy change.
+- **Run** solo now on a 64 GB Ubuntu-on-WSL2 machine as a **single-tenant** system (locked decision
+  D1; ADR 0042 supersedes 0017 — `tenant_id` removed from the code), with **Zitadel auth** (OIDC),
+  containerized and cloud-portable so the move to cloud is a deploy change. Re-introducing
+  multi-tenancy later would be a fresh gate (RLS / Neo4j-Enterprise multi-db), not a revert.
 
 ## Out of scope / non-goals (for now)
 

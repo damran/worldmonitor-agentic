@@ -7,7 +7,9 @@
 
 ## 1. Principles
 - **The graph and scores are read through this layer, never by reaching into Neo4j/Postgres directly.**
-- **Everything is auth'd and tenant-scoped** (Zitadel OIDC; every call carries a tenant + role).
+- **Everything is auth-gated but single-tenant** (Zitadel OIDC; every call carries a role) — the
+  deployment is single-tenant, so there is no tenant scoping (locked decision **D1**; **ADR 0042**
+  supersedes **ADR 0017**).
 - **Capability gating applies** — read/run-passive are open to scoped callers; **run-active** requires
   the human-in-the-loop gate (`10` §6).
 - **MCP tools are themselves plugins** (kind `Tool`, see `30`) — adding a tool is adding a plugin.
@@ -36,7 +38,8 @@ tool invokes — **not** in the caller's context.
   a graph product and a graph explorer UI.
 - **REST** for actions and admin (connector instances, rules, alerts, exports, health).
 - **Webhooks** for push (rule fired, run complete) — so external systems react without polling.
-- Same auth, tenancy, gating, and provenance-in-responses as the MCP surface.
+- Same auth (single-tenant; no tenant scoping — D1, ADR 0042), gating, and provenance-in-responses as
+  the MCP surface.
 
 ## 4. Who uses it
 - **Hermes** (the agent layer) — connects to the MCP server; its briefings/investigations run on these tools.
@@ -48,7 +51,8 @@ tool invokes — **not** in the caller's context.
 - **Read queries are sandboxed** — a query DSL or guarded Cypher (no writes, bounded cost/timeout) for
   untrusted callers; raw Cypher only for trusted/admin roles.
 - **Inputs validated before execution** (injection mitigation) — especially for agent-supplied args.
-- **Rate-limited & audited** — every call logged with caller, tenant, args (ties into the audit ledger).
+- **Rate-limited & audited** — every call logged with caller, args (single-tenant; no tenant on the
+  log line — D1, ADR 0042) (ties into the audit ledger).
 
 ## 6. Open decisions (need the user — see `decisions/`)
 GraphQL vs REST-first emphasis · exact tool set for v1 of the MCP server · query DSL vs guarded-Cypher

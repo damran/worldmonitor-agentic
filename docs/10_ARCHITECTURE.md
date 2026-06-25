@@ -3,8 +3,14 @@
 > `v0.4` · June 2026 · Tech choices verified current as of June 2026 (re-verify versions at build time).
 
 The master architecture: the **layers**, the **data-flow contract**, the **stack**, the **local→cloud**
-story, and **security/tenancy**. Domain method-detail lives in the Algorithms Design Doc (Sec 1–9);
+story, and **security/auth**. Domain method-detail lives in the Algorithms Design Doc (Sec 1–9);
 the ontology, plugin, agent, and API specs are siblings (`20`/`30`/`50`/`60`).
+
+> **Tenancy (D1 / ADR 0042, supersedes ADR 0017):** WorldMonitor is **single-tenant** — one deployment,
+> one tenant, no `tenant_id` on any row/node/edge. The multi-tenant claims below are **superseded**;
+> they survive as historical context with the single-tenant reconciliation noted in place. A future
+> managed-cloud tier may reintroduce per-tenant isolation (RLS / Neo4j Enterprise multi-db) as its own
+> gate — that **door is left open**, but it is a deferred decision, not a current property.
 
 ---
 
@@ -39,7 +45,7 @@ the ontology, plugin, agent, and API specs are siblings (`20`/`30`/`50`/`60`).
 │ L0  Substrate                   Docker Compose (cloud-portable) · 12-factor · vault │
 │                                 · CI/CD · dev (WSL2) vs always-on host              │
 └──────────────────────────────────────────────────────────────────────────────────┘
-  Cross-cutting (every layer): Provenance & audit · Auth/Tenancy (Zitadel) · Security
+  Cross-cutting (every layer): Provenance & audit · Auth (Zitadel; single-tenant, D1/ADR 0042) · Security
   (passive/active gating, hostile-input, OPSEC, GDPR) · Observability · LLM gateways
   (Hermes for agents, LiteLLM for services) · Self-improvement loop (gated)
 ```
@@ -86,7 +92,7 @@ Confirmed: **graph-native with a custom ontology on a property graph.**
 ### Core spine
 | Concern | Choice | Why / notes | Alternative |
 |---|---|---|---|
-| Graph store (SoR) | **Neo4j 2026.x Community + GDS** | Property-graph SoR; GDS Community includes the algorithms; Cypher; `graphdatascience` client. Multi-tenant RBAC/multi-db is Enterprise (cloud phase). | Memgraph; ArangoDB |
+| Graph store (SoR) | **Neo4j 2026.x Community + GDS** | Property-graph SoR; GDS Community includes the algorithms; Cypher; `graphdatascience` client. Single-tenant (D1/ADR 0042) — one graph, no per-tenant scoping; Enterprise RBAC/multi-db stays available *if* a future cloud-tier reintroduces multi-tenancy. | Memgraph; ArangoDB |
 | Ontology / model | **FollowTheMoney 4.x** + **STIX 2.1** (CTI) | Maintained, MIT, ecosystem (nomenklatura/yente/ftmq/rigour). | Custom schema (rejected) |
 | FtM↔graph | **followthemoney-graph** | Purpose-built FtM→Neo4j. | hand-rolled |
 | Entity resolution | **Splink** (DuckDB) + **nomenklatura** | Unsupervised Fellegi–Sunter, ~1M rec/min on a laptop, scales to Spark; FtM-native merge. | Dedupe, recordlinkage |
@@ -110,7 +116,7 @@ Confirmed: **graph-native with a custom ontology on a property graph.**
 | Concern | Choice | Why / notes |
 |---|---|---|
 | Packaging | **Docker Compose** (core + optional profiles) | Cloud-portable; profiles toggle heavy services. |
-| Auth / identity | **Zitadel** (self-hosted) | Multi-tenant by design (Instance→Org→Project→App); Docker-deployable. *Caveats:* AGPLv3; back up DB before major upgrades. (Alt: Keycloak.) |
+| Auth / identity | **Zitadel** (self-hosted) | OIDC for the single tenant (D1/ADR 0042); its Instance→Org→Project→App model can later carry multi-tenancy *if* a cloud-tier reintroduces it, but that is unused now. Docker-deployable. *Caveats:* AGPLv3; back up DB before major upgrades. (Alt: Keycloak.) |
 | Secrets | **`.env` (gitignored)** now → **SOPS+age** when config enters repo | Real store, never plaintext-committed. |
 | Deps · lint · types · tests · CI | **uv · Ruff · Pyright · pytest · GitHub Actions** (`quality` + `security`: Trivy, CodeQL; OIDC) | The whole baseline; everything else deferred. |
 | Observability | **Structured logs** now → OTel + Prometheus + Loki later | Don't build the full stack around nothing. |
@@ -130,17 +136,23 @@ a persistent Linux host (NUC/VPS) — and code against it. For an MVP you *can* 
 machine (WSL2 + systemd, sleep off, Docker autostart), but treat that as temporary.
 
 **Cloud (later).** Containers + 12-factor + S3 + OIDC + LiteLLM means the move is a **deploy-target
-change**: Compose → managed containers/K8s; MinIO → S3; **Neo4j Community → Enterprise/Aura** (for
-multi-tenant RBAC + multi-db); pgvector → Qdrant; GPU fine-tuning → a GPU service. No app rewrite.
+change**: Compose → managed containers/K8s; MinIO → S3; pgvector → Qdrant; GPU fine-tuning → a GPU
+service. No app rewrite. **Neo4j Community → Enterprise/Aura** stays available as a scaling option, and
+is the path a future **multi-tenant cloud-tier** would take for per-tenant RBAC + multi-db — but
+multi-tenancy is a deferred decision (D1/ADR 0042 keeps the system single-tenant; that door is left open,
+not walked through).
 
 ---
 
-## 6. Security, auth, tenancy & self-improvement guardrails
+## 6. Security, auth & self-improvement guardrails
 
-- **Auth from commit zero** — all app/API/MCP access behind **Zitadel** (OIDC). Tenant = Zitadel Org;
-  scope every row/node/edge by `tenant_id`. Roles: read / run-passive / run-active / admin.
-- **Graph isolation:** Neo4j Community lacks per-tenant RBAC → enforce in the app layer now
-  (tenant-scoped queries + `tenant_id` property); plan Enterprise/Aura for cloud.
+- **Auth from commit zero** — all app/API/MCP access behind **Zitadel** (OIDC). The system is
+  **single-tenant** (D1/ADR 0042, supersedes ADR 0017): one tenant, no `tenant_id` on any
+  row/node/edge. Roles: read / run-passive / run-active / admin.
+- **Graph isolation (deferred, not current):** under single-tenancy there is one graph and no
+  per-tenant scoping to enforce. A future managed-cloud tier that reintroduces multi-tenancy would
+  enforce isolation via Neo4j Enterprise/Aura (per-tenant RBAC / multi-db) as its own gate — the door
+  is left open, but app-layer `tenant_id` scoping (the ADR 0017 approach) was torn out by ADR 0042.
 - **Passive vs active gating** — every plugin declares `capability: passive | active`. Active modules
   require an **authorized-scope token per run**, separate logging, and are **never agent-auto-run**
   without a human in the loop.

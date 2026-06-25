@@ -17,8 +17,8 @@ INVESTIGATE (do not skim):
   invariant was weakened to pass — verify the latter with
   `git diff origin/master...HEAD -- '*test_*.py' 'tests/'` (removed asserts, added skip/xfail, or
   loosened tolerances all FAIL).
-- Hold the locked invariants: G1 provenance on every node AND edge, G4 tenant isolation,
-  append-only, canonical-canonical only via the guard.
+- Hold the locked invariants: G1 provenance on every node AND edge, append-only,
+  canonical-canonical only via the guard.
 - Before you APPROVE, run `scripts/dev/local_ci.sh` — a local mirror of the required `quality` +
   `security` CI gates. It is a fast pre-flight; GitHub's checks remain the authoritative gate.
 

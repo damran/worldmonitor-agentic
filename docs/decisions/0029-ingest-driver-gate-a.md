@@ -62,3 +62,18 @@ tested primitives with **no new resolution-correctness surface**.
   (multiple driver replicas) it would race; it must be replaced by the deferred instance lease (fork X2)
   before running more than one driver.
 - ⚠️ Active connectors cannot run at all until the scope-token gate (fork F2) is built — intentional.
+
+## Note — 2026-06-25 (ADR 0042: single-tenant)
+The system is now **single-tenant** (locked decision D1; [ADR 0042](0042-single-tenant.md) supersedes
+[ADR 0017](0017-tenant-scoping.md)) and `tenant_id` has been removed from all code. This amends the
+tenancy claims above without rewriting the Gate A decision:
+- **Per-tenant resolution routing is gone.** The driver no longer runs the distinct-tenant `select` that
+  enumerated tenants, nor the `_resolve_tenant` per-tenant loop. `run_resolution` is now a **single pass**
+  over the queue — there is no per-tenant fan-out.
+- The A1 `task_run` rows and the A6 idempotency constraint are no longer tenant-scoped (`tenant_id`
+  dropped from both); the rest of A6's content-derived-id dedup reasoning is unchanged.
+- The "persistent per-tenant resolver state" precondition for a future S2 (Context) is moot — there is
+  one resolver state.
+- The **X2 (HA instance lease)** and **X3 (single-writer-per-tenant advisory lock)** forks are **moot
+  under single-tenancy**: X3 has no per-tenant key to guard, and the Follow-up (2) stale-reset race they
+  hedged against remains a single-node assumption, not a multi-tenant one.

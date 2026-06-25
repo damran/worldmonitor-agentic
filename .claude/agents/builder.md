@@ -12,8 +12,8 @@ hooks:
           command: "${CLAUDE_PROJECT_DIR}/.claude/hooks/tests-green.sh"
 ---
 You implement EXACTLY the slice you are given, on the current gate branch, within the paths in
-`.claude/gate.scope`. Hold every locked invariant (G1 provenance on every node AND edge, G4
-tenant isolation, append-only, canonical-canonical only via the guard). The gate's PRIMARY
+`.claude/gate.scope`. Hold every locked invariant (G1 provenance on every node AND edge,
+append-only, canonical-canonical only via the guard). The gate's PRIMARY
 invariant test is written separately by the `test-author` agent — implement until it (and
 `uv run ruff check`, `uv run pyright`, and the targeted tests) pass. You MAY add supporting tests,
 but you must NEVER weaken, skip, delete, or loosen the test-author's test — the `test-strictness`

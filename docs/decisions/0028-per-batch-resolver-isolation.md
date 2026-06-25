@@ -3,6 +3,18 @@
 > Status: **LOCKED** · June 2026 · Fixes a live **G4** (tenant-isolation) regression in resolution.
 > Format: Context → Decision → Status → Consequences.
 
+> **Note (2026-06-25, ADR 0042 — single-tenancy):** Under locked decision **D1: WorldMonitor is
+> single-tenant** (ADR 0042 supersedes ADR 0017, removing `tenant_id` everywhere), the **G4
+> cross-tenant-leak motivation below is moot** — with one tenant there is no "another tenant" whose
+> judgements could leak through the shared ledger. The cross-tenant framing throughout this ADR (and
+> the deferred per-tenant ledger in *Scope*) should be read as historical. **The decision itself does
+> NOT change: the per-batch ephemeral in-memory resolver is KEPT verbatim.** Its independent,
+> still-live justification is the **B-1 crash-recovery / ADR-0026 batch-purity guarantee** — the
+> resolver must remain a pure function of the current batch's pairs (a throwaway `sqlite://` +
+> `StaticPool` per `cluster_and_merge` call), reading/writing no cross-batch or cross-run state, so a
+> mid-run crash leaves no partial ledger and within-batch dedup stays deterministic. ADR 0042 added
+> this note; it did not supersede this ADR.
+
 ## Context
 `cluster_and_merge` (`resolution/merge.py`) built its nomenklatura clustering resolver with
 `nk.Resolver.make_default()`. That binds to nomenklatura's **shared, persistent, non-tenant-scoped**
