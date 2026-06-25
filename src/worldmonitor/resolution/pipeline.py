@@ -49,7 +49,7 @@ from worldmonitor.resolution.merge import (
     rekey_cluster,
 )
 from worldmonitor.resolution.referents import build_referent_map, rewrite_referents
-from worldmonitor.resolution.review import needs_review
+from worldmonitor.resolution.review import is_newly_broadened_sensitive, needs_review
 from worldmonitor.resolution.splink_model import score_pairs
 from worldmonitor.settings import get_settings
 
@@ -356,8 +356,27 @@ def _resolve_batch(
 
         flagged, reason = needs_review(cluster, by_id)
         members = set(cluster.member_ids)
-        if flagged and any(members <= group for group in approved_groups):
-            flagged = False  # exactly an already-approved merge — promote, never re-park
+        # The approved-group-exemption fence (Gate E / ADR 0047 Decision 5). This implements the
+        # user's decision "re-review a newly-detected sensitivity ONCE": deny-by-default now flags a
+        # cluster the legacy denylist MISSED (e.g. a role.rca / crime.war / off-ontology member), so
+        # a cluster whose members are a subset of an approval recorded BEFORE that topic was
+        # understood sensitive must NOT be silently un-flagged -> auto-merged — a sign-off approving
+        # "these records are the same entity" could not have considered a risk it never saw, so the
+        # cluster re-parks for a fresh human look. The override is mechanically SCOPED TO
+        # legacy-visibility (is_newly_broadened_sensitive): a sensitivity the legacy guard ALREADY
+        # caught (e.g. `sanction`) was visible at approval time, so it stays exemptible — as do the
+        # SIZE flag and the anchor-conflict flag (ADR 0040). That scoping is why it is "once," not
+        # forever-churn: an already-reviewable sensitivity is not re-parked, and the existing
+        # non-sensitive AND legacy-caught approve->promote paths are preserved unchanged. KNOWN
+        # PROPERTY (intended, conservative): a newly-broadened-sensitive cluster re-parks on every
+        # RE-INGEST/re-resolution (the fence keys on legacy-visibility, not "was ever approved") —
+        # the deliberate fail-closed posture, not a bug.
+        newly_broadened = any(
+            (member := by_id.get(mid)) is not None and is_newly_broadened_sensitive(member)
+            for mid in cluster.member_ids
+        )
+        if flagged and not newly_broadened and any(members <= group for group in approved_groups):
+            flagged = False  # an already-approved, not-newly-broadened merge — promote
 
         # mode="block": park the flagged cluster for human review; never write it.
         if flagged and mode == "block":

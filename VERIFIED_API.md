@@ -275,3 +275,35 @@ registry.entity.name == "entity"   # the prop-type check: a prop points to anoth
 - **Idempotent edge:** project via the `MERGE (s)-[:REL]->(t)` form keyed on (source durable id, target
   durable id, rel-type) — re-projection is idempotent. Endpoints are the durable canonical ids (ADR 0044);
   the new edge carries the asserting entity's `prov_*` (G1) and is realigned by `writer._align_entity_link_ids`.
+
+---
+
+# Gate E — FollowTheMoney risk-topic set (fail-closed sensitivity guard)
+
+Verified 2026-06-25 against installed **followthemoney 4.9.2** (`.venv`). Replaces the hand-maintained
+`SENSITIVE_TOPICS` denylist (`resolution/review.py:22`, 7 codes, missed 18/28) with FtM's own risk tag.
+
+```python
+from followthemoney.types import registry
+registry.topic.RISKS   # -> set[str], FtM's own "counterparty-risk" tag
+registry.topic.names   # -> dict[code, label], the full topic vocabulary (membership test for "off-ontology")
+```
+- **`registry.topic.RISKS` (28 codes, FtM 4.9.2 — the gate's pinned snapshot):**
+  `corp.disqual, crime, crime.boss, crime.fin, crime.fraud, crime.terror, crime.theft, crime.traffick,
+  crime.war, debarment, export.control, export.control.linked, export.risk, invest.ban, invest.risk,
+  mare.detained, mare.shadow, poi, reg.action, reg.warn, role.oligarch, role.pep, role.rca, sanction,
+  sanction.control, sanction.counter, sanction.linked, wanted`.
+- **Deny-by-default / unknown ⇒ sensitive:** sensitive iff `topic_codes & registry.topic.RISKS` is non-empty
+  **OR** a topic code is NOT in `registry.topic.names` at all (off-ontology / enricher vocab → treat as
+  sensitive). Confirmed: `"totally.madeup" in registry.topic.names == False`. Loaded programmatically — the
+  guard auto-tracks FtM upgrades; no hand-maintained list.
+- **Read topics off an entity:** `entity.get("topics", quiet=True)` (FtM `ValueEntity`) — `quiet=True` so a
+  schema with no `topics` prop returns `[]` (no raise). (This is the existing `review.py:30` call.)
+- **k-hop label casing (slice-2, E-VERIFY — builder must pin at build time):** ftmg encodes topics as Neo4j
+  node labels via `generate_topic_labels` → `tconfig = config.nodes.topics.get(topic); SET n:\`{tconfig.label}\``
+  (`ftmg/transform.py`). So a risk node carries label `config.nodes.topics[<risk code>].label`, NOT the raw
+  code. `gds.py:27` keys `is_sanctioned` off the `"Sanction"` label. The k-hop Cypher must match the actual
+  `tconfig.label` strings for the RISKS codes (resolve from the same ftmg `Configuration`), and MUST exclude
+  `:Ghost` (`AND NOT r:Ghost`). Hop depth `k` is an int-validated in-code config constant inlined into the
+  `[*1..k]` bound (NOT a `$param`); the entity id is a `$param`. Pin the exact label set in this file before
+  writing the query.

@@ -24,9 +24,13 @@ Three over-merge holes this gate closes (all reproduced against HEAD ``0ffc1a6``
   id.
 
 Sensitivity is OFF (no ``topics`` / ``sanction``) on every fixture: that is LOAD-BEARING. The
-catastrophic-merge guard fires today only on sensitivity or cluster size > 10, so a non-sensitive
-anchor-conflict pair is auto-merged with NO review — the exact hole B-5 exposes. A sensitive fixture
-would mask the auto-merge behind the existing guard and make these tests vacuous (B-3 spec §note).
+catastrophic-merge guard parks on sensitivity (Gate E / ADR 0047 broadened this axis to FtM's
+full ``registry.topic.RISKS`` set + any off-ontology topic code — deny-by-default), cluster size
+> 10, or the anchor conflict itself; since these fixtures carry NO ``topics`` at all they stay
+non-sensitive even after Gate E, so a non-sensitive anchor-conflict pair is auto-merged with NO
+review absent this park — the exact hole B-5 exposes, and the anchor-conflict flag remains the
+load-bearing one here. A sensitive fixture would mask the auto-merge behind the sensitivity guard
+and make these tests vacuous (B-3 spec §note).
 
 Anchor representation (ADR §Context, spec §6): canonical anchors live in
 ``entity.context["wm_anchor_<field>"]`` (set via :func:`set_anchor`), NOT in FtM properties. The
