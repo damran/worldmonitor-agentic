@@ -71,20 +71,37 @@ def _ownership(edge_id: str, owner: str, asset: str) -> dict[str, object]:
     }
 
 
-def _seed_parked(sessions: sessionmaker[Session], clean_graph: Neo4jClient) -> str:
-    """Seed two sanctioned duplicates + an edge, resolve in block mode, return the parked id."""
+def _seed_parked(
+    sessions: sessionmaker[Session], clean_graph: Neo4jClient, suffix: str = ""
+) -> str:
+    """Seed two sanctioned duplicates + an edge, resolve in block mode, return the parked id.
+
+    ``suffix`` makes the seeded entities (and so the content-addressed canonical id)
+    distinct, so a single test can stage two INDEPENDENT parked clusters. Pre-teardown
+    that independence came from two ``tenant_id``s keying two distinct nodes; under
+    single-tenancy (D1, ADR 0042) identical content is ONE node, so distinct content is
+    what keeps the clusters apart. The new parked id is found by set-difference against
+    the pre-existing ``pending_review`` audits (``MergeAudit`` is append-only).
+    """
+    p1, p2, acme_id, own = f"p1{suffix}", f"p2{suffix}", f"acme{suffix}", f"own-p1{suffix}"
     acme: dict[str, object] = {
-        "id": "acme",
+        "id": acme_id,
         "schema": "Company",
-        "properties": {"name": ["Acme Holdings"], "jurisdiction": ["cy"]},
+        "properties": {"name": [f"Acme Holdings{suffix}"], "jurisdiction": ["cy"]},
         "datasets": ["t"],
     }
     rows = [
-        (_sanctioned("p1", topics=["sanction"]), "p1"),
-        (_sanctioned("p2"), "p2"),
-        (acme, "acme"),
-        (_ownership("own-p1", "p1", "acme"), "own-p1"),
+        (_sanctioned(p1, topics=["sanction"]), p1),
+        (_sanctioned(p2), p2),
+        (acme, acme_id),
+        (_ownership(own, p1, acme_id), own),
     ]
+    with sessions() as session:
+        before = set(
+            session.execute(
+                select(MergeAudit.canonical_id).where(MergeAudit.decision == "pending_review")
+            ).scalars()
+        )
     with sessions() as session:
         for data, source in rows:
             session.add(_queue_item(data, source=source))
@@ -93,13 +110,18 @@ def _seed_parked(sessions: sessionmaker[Session], clean_graph: Neo4jClient) -> s
         stats = resolve_pending(session=session, neo4j=clean_graph, guard_mode="block")
     assert stats.review == 1, "the sanctioned duplicate pair must park under block mode"
     with sessions() as session:
-        canonical_id = session.execute(
-            select(MergeAudit.canonical_id).where(MergeAudit.decision == "pending_review")
-        ).scalar_one()
+        parked = set(
+            session.execute(
+                select(MergeAudit.canonical_id).where(MergeAudit.decision == "pending_review")
+            ).scalars()
+        )
+    new = parked - before
+    assert len(new) == 1, "exactly one new cluster parks per seed"
+    canonical_id = next(iter(new))
     # A parked cluster is never written during resolution.
     present = clean_graph.execute_read(
         "MATCH (n) WHERE n.id IN $ids RETURN count(n) AS n",
-        ids=[canonical_id, "p1", "p2"],
+        ids=[canonical_id, p1, p2],
     )[0]["n"]
     assert present == 0, "block mode must not write the parked cluster"
     return canonical_id
@@ -266,7 +288,7 @@ def test_cross_op_after_crash_is_refused_no_orphan(
     ensure_constraints(clean_graph)
 
     # Crashed APPROVE (canonical node written) → reject must refuse, not orphan the canonical.
-    canonical_1 = _seed_parked(sessions, clean_graph)
+    canonical_1 = _seed_parked(sessions, clean_graph, suffix="-a")
     with sessions() as session:
         _crash_first_commit(session)
         with pytest.raises(RuntimeError, match="WM_CRASH_AFTER"):
@@ -275,7 +297,7 @@ def test_cross_op_after_crash_is_refused_no_orphan(
         signoff.reject(session, clean_graph, canonical_id=canonical_1, approver="bob")
 
     # Crashed REJECT (member nodes written) → approve must refuse, not orphan the members.
-    canonical_2 = _seed_parked(sessions, clean_graph)
+    canonical_2 = _seed_parked(sessions, clean_graph, suffix="-b")
     with sessions() as session:
         _crash_first_commit(session)
         with pytest.raises(RuntimeError, match="WM_CRASH_AFTER"):
