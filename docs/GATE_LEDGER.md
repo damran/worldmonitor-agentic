@@ -48,6 +48,7 @@ integration with independent adversarial review.
 | **Return-to-block + sign-off** | `block` default; durable judgements; approve/reject CLI | 0031; **0042** | **CLOSED** | `test_signoff.py` (consumption + approve/reject + accretion re-park), `test_settings.py`. (Judgement tenant-scoping dropped under D1 — ADR 0042 §"Notes on adjacent ADRs"; the approve/reject state machine is unchanged.) |
 | **Smoke-run harness** | Driver launcher + read-only metrics + runbook (operator-run) | 0029 | **CLOSED** (build) | `test_driver_wiring.py`; `docs/runbooks/smoke-run.md` |
 | **Gate B-front — stable canonical ids** | Anchor-preferred durable id (QID>LEI>regNo>taxNo) + append-only `canonical_id_ledger` (alias) + adopt/merge survivor; `wmc-` demoted to an idempotency fingerprint (durable id derives from it in no path) | **0044**; extends 0036/0039, depends 0037 | **CLOSED** (slice-1) | `test_stable_id.py`, `test_stable_id_graph.py`, `test_canonical.py`; ledger migration `0006`. Cross-batch singleton graph re-key + sensitive-canonical split-via-sign-off are slice-2 / ADR-0019-deferred. |
+| **Gate C — value-level provenance** | `StatementEntity` per-claim fusion (3-source merge keeps 3 lineages, not `source[0]`) + two-tier witness model (Tier-1 `prop_sources` map always; Tier-2 reified `(:Statement)-[:FROM_SOURCE]->(:Source)` allowlist-only) + source-scoped `delete_source` | **0045**; deepens 0018 | **IN PROGRESS** (slice-1) | `test_provenance_merge.py` + witness/reification/delete-source suites. Value-set-invariance fence (lineage added, values unchanged); `delete_source` value-*retraction* is sign-off-gated, not shipped. |
 
 ---
 
@@ -60,7 +61,7 @@ are gated on a named real-time consumer / explicit incremental-ER decision).
 | Surface | What is deferred | ADR | Why now |
 |---|---|---|---|
 | **Gate B** (back half) | Incremental / cross-batch ER (cross-batch dedup). The **stable-canonical-ids front half is BUILT** (ADR 0044 / Gate B-front, §2). | 0019, **0044** | F0: no real-time consumer; batch cadence covers downstream |
-| **Gate C** | Persisted cross-run referent rewriting / graph-mutation surface; inbound-edge restore on sign-off | 0023, 0025 | append-only locked; reconstructable from retained landing + queue |
+| **Gate C-rewrite / cross-run referent surface** | Persisted cross-run referent rewriting / graph-mutation surface; inbound-edge restore on sign-off. (Renamed from "Gate C" to avoid collision with the §2 "Gate C — value-level provenance" / ADR 0045 — unrelated gate.) | 0023, 0025 | append-only locked; reconstructable from retained landing + queue |
 | **S4** | First-class canonical-canonical merge routing | 0031 | routed *through* the guard for now (never auto-fuse two canonicals) |
 | **X1** | STREAM cursor / checkpoint | (runway) | no STREAM connector in scope |
 | **X2** | Driver lease / HA (replace single-node startup stale-reset) | 0029; **0042** | **MOOT under D1** (ADR 0042): a single-tenant single-node driver needs no HA lease; revisit only if a managed-cloud tier reintroduces concurrency |

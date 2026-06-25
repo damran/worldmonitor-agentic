@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.ontology.anchors import get_anchors
 from worldmonitor.ontology.ftm import FtmEntity
-from worldmonitor.provenance.model import provenance_node_properties
+from worldmonitor.provenance.model import provenance_node_properties, witness_node_properties
 from worldmonitor.resolution.canonical import resolve_durable
 
 
@@ -130,11 +130,20 @@ def write_entities(client: Neo4jClient, entities: Iterable[FtmEntity]) -> None:
     """
     materialized = list(entities)
     config = _ftmg_config(client)
+    # Tier-1 (Gate C / ADR 0045): the per-property witness map (``prov_witnesses``, a JSON string)
+    # is projected ALONGSIDE the anchors + single-source ``prov_*`` — additive, so G1's per-node
+    # ``prov_*`` is preserved (never replaced) and the uniqueness constraints are unaffected.
     node_props_by_id = {
         entity.id: extra
         for entity in materialized
         if entity.id is not None
-        and (extra := {**get_anchors(entity), **provenance_node_properties(entity)})
+        and (
+            extra := {
+                **get_anchors(entity),
+                **provenance_node_properties(entity),
+                **witness_node_properties(entity),
+            }
+        )
     }
 
     # Pass 1 — entity nodes (skip edge schemata; they become relationships).

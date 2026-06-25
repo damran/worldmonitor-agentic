@@ -19,17 +19,29 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import nomenklatura as nk
+from followthemoney import Dataset, Statement, StatementEntity
 from followthemoney.exc import InvalidData
 from nomenklatura import Judgement
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
+from worldmonitor.provenance.model import get_provenance, stamp_witness_map
 from worldmonitor.resolution.splink_model import ScoredPair
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MERGE_THRESHOLD = 0.92
+
+# Gate C (ADR 0045): the entity-construction Dataset ``StatementEntity.from_statements`` requires.
+# This is the FtM ``Dataset`` whose slug-safe ``name`` stamps the ``id`` pseudo-statement — it is
+# DISTINCT from the per-``Statement`` ``dataset`` field, which carries each member's actual
+# ``Provenance.source_id`` (the real source lineage the witness map is derived from). The two MUST
+# NOT be conflated (VERIFIED_API.md / spec §2 Dataset-name collision note): the per-statement
+# ``dataset`` is a free-form string (hyphens allowed, e.g. ``src-A``), while this construction
+# Dataset's ``name`` must satisfy FtM's slug rule, so a fixed slug is used and excluded from every
+# witness map via the ``id`` pseudo-property carve-out (provenance.model).
+_FUSION_DATASET = Dataset({"name": "worldmonitor", "title": "WorldMonitor"})
 
 # A MERGED cluster's canonical id is content-addressed: a deterministic function of its
 # sorted member ids (B-1, ADR 0036). nomenklatura still computes the CLUSTERING (transitive
@@ -266,6 +278,88 @@ def rekey_cluster(cluster: ResolvedCluster, durable_id: str) -> ResolvedCluster:
     )
 
 
+def _member_statements(canonical_id: str, member: FtmEntity, source_id: str) -> list[Statement]:
+    """Build the per-``(prop, value)`` :class:`Statement`s for one cluster member (Gate C).
+
+    Each statement carries that member's lineage: ``dataset`` = the member's
+    ``Provenance.source_id`` (the real source — VERIFIED_API.md / spec §2), ``canonical_id`` = the
+    survivor id so every member's statements aggregate under one node, and ``origin``/``first_seen``
+    = the raw-record pointer / retrieval timestamp from the same single-source ``Provenance``. A
+    member with no stamped provenance falls back to its own id as the dataset so it is never
+    witness-less.
+    """
+    schema_name = member.schema.name
+    provenance = get_provenance(member)
+    origin = provenance.source_record if provenance is not None else None
+    first_seen = provenance.retrieved_at if provenance is not None else None
+    statements: list[Statement] = []
+    for prop in member.properties:
+        for value in member.get(prop):
+            statements.append(
+                Statement(
+                    entity_id=member.id or canonical_id,
+                    prop=prop,
+                    schema=schema_name,
+                    value=value,
+                    dataset=source_id,
+                    canonical_id=canonical_id,
+                    origin=origin,
+                    first_seen=first_seen,
+                )
+            )
+    return statements
+
+
+def _fuse_statement_entity(
+    canonical_id: str, kept_ids: list[str], by_id: dict[str, FtmEntity]
+) -> StatementEntity | None:
+    """Fuse the KEPT cluster members into one :class:`StatementEntity` under ``canonical_id``.
+
+    Gate C (ADR 0045): feeds ``StatementEntity.merge`` a ``StatementEntity`` (NOT a
+    ``ValueEntity``), so it re-canonicalizes each member's per-``(prop, value, dataset)`` statements
+    to the survivor id and ``add_statement``s them — all sources' lineage aggregates under one node
+    (VERIFIED_API.md). ``add_statement``'s per-prop SET union makes the fused VALUE set identical to
+    ``ValueEntity.merge`` (the §9 fence is derived independently from the kept ``ValueEntity``
+    merge; this entity exists only to derive the witness map). Returns ``None`` if nothing to fuse.
+    """
+    if not kept_ids:
+        return None
+    base = by_id[kept_ids[0]]
+    fused = StatementEntity.from_statements(
+        _FUSION_DATASET, _member_statements(canonical_id, base, _member_source(base))
+    )
+    for member_id in kept_ids:
+        member = by_id[member_id]
+        member_entity = StatementEntity.from_statements(
+            _FUSION_DATASET, _member_statements(canonical_id, member, _member_source(member))
+        )
+        fused.merge(member_entity)
+    return fused
+
+
+def _member_source(member: FtmEntity) -> str:
+    """The dataset id (= ``Provenance.source_id``) a member's statements are witnessed by.
+
+    A source entity legitimately has exactly one source, so its single-source ``get_provenance`` is
+    the correct per-MEMBER read. Falls back to the member's own id when unstamped, so a value is
+    never assigned an empty dataset (which would make its witness set un-prunable later).
+    """
+    provenance = get_provenance(member)
+    if provenance is not None and provenance.source_id:
+        return provenance.source_id
+    return member.id or ""
+
+
+def _witness_map_from_statements(fused: StatementEntity) -> dict[str, set[str]]:
+    """Derive the Tier-1 per-property witness map from a fused ``StatementEntity`` (spec §4/§5)."""
+    witnesses: dict[str, set[str]] = defaultdict(set)
+    for statement in fused.statements:
+        if statement.prop == "id":
+            continue  # the id pseudo-statement carries the construction Dataset, not a source
+        witnesses[statement.prop].add(statement.dataset)
+    return dict(witnesses)
+
+
 def _merge_entities(
     canonical_id: str, member_ids: tuple[str, ...], by_id: dict[str, FtmEntity]
 ) -> tuple[FtmEntity, tuple[str, ...]]:
@@ -277,10 +371,21 @@ def _merge_entities(
     Surfacing the dropped set (instead of only logging it) lets ``cluster_and_merge`` re-emit
     each dropped member as its own correct-schema singleton, so a cross-schema member never
     enters a merged node and is never silently swallowed into the wrong-schema canonical.
+
+    Gate C (ADR 0045): the canonical VALUE set + FtM context (anchors, single-source ``prov_*``)
+    are produced by the established ``ValueEntity.merge`` path — UNCHANGED, so the value set is
+    byte-for-byte identical to the legacy fusion (the §9 value-set-invariance fence) and the
+    ``(merged, dropped)`` H-2 contract is preserved exactly. The SAME kept members are then fused
+    a second time as a ``StatementEntity`` purely to derive the multi-source Tier-1 witness map
+    (each member's statements carry its ``Provenance.source_id`` as the per-statement ``dataset``),
+    which is stamped onto the returned entity's context (``wm_prov_witnesses``). ``StatementEntity``
+    has no FtM ``context``, so the value entity — not the statement entity — is what carries the
+    anchors/provenance the writer projects; the statement entity contributes lineage only.
     """
     base = by_id[member_ids[0]]
     merged = make_entity({**base.to_dict(), "id": canonical_id})
     dropped: list[str] = []
+    kept: list[str] = []
     for member_id in member_ids:
         try:
             merged.merge(by_id[member_id])
@@ -298,6 +403,14 @@ def _merge_entities(
                 merged.schema.name,
             )
             dropped.append(member_id)
+        else:
+            kept.append(member_id)
+    # Gate C: derive + stamp the Tier-1 witness map from the SAME kept members (a no-op for an
+    # entity with no values). The fused StatementEntity is lineage-only; the value set above is
+    # authoritative and the fence proves the two agree.
+    fused = _fuse_statement_entity(canonical_id, kept, by_id)
+    if fused is not None:
+        stamp_witness_map(merged, _witness_map_from_statements(fused))
     return merged, tuple(dropped)
 
 

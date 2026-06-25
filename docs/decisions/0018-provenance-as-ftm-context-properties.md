@@ -1,6 +1,12 @@
 # ADR 0018 — Provenance stored as flat FtM-context keys, projected to node properties
 
 > Status: **LOCKED** · June 2026 · Implements the provenance-everywhere invariant (CLAUDE.md).
+> **Deepened by [ADR 0045](0045-value-level-provenance.md) (Gate C, 2026-06-25):** this ADR's
+> single-source `prov_*` projection (which collapses a multi-source merge to `source[0]`, per its own
+> §Consequences) is deepened to **value-level provenance** — `StatementEntity` per-claim fusion keeps
+> every source's lineage, surfaced as a tier-1 `prov_witnesses` map (always) + tier-2 reified
+> `(:Statement)-[:FROM_SOURCE]->(:Source)` for an audited allowlist. The single-source `prov_*` /
+> G1 projection here is PRESERVED (additive), not replaced.
 
 ## Context
 Provenance (`source_id`, `retrieved_at`, `reliability`, raw-record pointer) must travel with every entity

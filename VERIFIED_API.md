@@ -209,3 +209,38 @@ is_qid("5493001KJTIIGC8Y1R12") -> False   # an LEI is not a QID
 - `pick_anchor`'s QID tier validates with `is_qid` (same check nomenklatura's `Identifier` uses for
   its weight=3). FtM props `wikidataId` / `leiCode` / `registrationNumber` / `taxNumber` are all FtM
   type `identifier`; regNo/taxNo are normalised via the FtM `identifier` type per ADR 0039.
+
+---
+
+# Gate C — followthemoney StatementEntity (value-level provenance)
+
+Verified 2026-06-25 against installed **followthemoney 4.9.2** via `inspect.signature`. `StatementProxy`
+does **NOT** exist (binding it is a DENY). `StatementEntity`/`Statement`/`Dataset` import top-level.
+
+```python
+from followthemoney import StatementEntity, Statement, Dataset
+# StatementEntity -> followthemoney.statement.entity.StatementEntity
+# Statement       -> followthemoney.statement.statement.Statement
+
+Statement.__init__(self, entity_id: str, prop: str, schema: str, value: str, dataset: str,
+    lang: Optional[str] = None, original_value: Optional[str] = None, first_seen: Optional[str] = None,
+    external: bool = False, id: Optional[str] = None, canonical_id: Optional[str] = None,
+    last_seen: Optional[str] = None, origin: Optional[str] = None)
+#   dataset = the source  (= Provenance.source_id)
+#   origin  = raw pointer (= Provenance.source_record)
+#   first_seen = timestamp (= Provenance.retrieved_at); canonical_id defaults to entity_id
+
+StatementEntity.merge(self, other: EntityProxy) -> StatementEntity
+#   other is a StatementEntity -> re-canonicalizes each statement to self.id + add_statement
+#     (per-prop SET union) -> ALL sources' (prop,value,dataset) statements aggregate under self.id;
+#     lineage INTACT. other is a plain ValueEntity -> unsafe_add, lineage-LOSING.
+#     >>> Gate C MUST feed it StatementEntity built with per-statement dataset/origin/first_seen. <<<
+StatementEntity.from_statements(dataset: Dataset, statements: Iterable[Statement]) -> StatementEntity
+StatementEntity.add_statement(self, stmt: Statement) -> None   # per-prop set union
+StatementEntity.get_statements(self, prop, quiet: bool = False) -> List[Statement]
+StatementEntity.statements                                      # property -> all statements
+Dataset(data: dict)                                             # from_statements needs a Dataset
+```
+- **Value-set-invariance (the §9 fence, achievable):** `add_statement`'s per-prop `set` union yields a
+  fused VALUE set identical to `ValueEntity.merge`'s union — so switching to StatementEntity adds lineage
+  WITHOUT changing which values survive. The gate requires a test asserting byte-for-byte value-set parity.
