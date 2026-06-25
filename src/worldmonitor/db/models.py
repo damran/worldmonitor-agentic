@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, String, UniqueConstraint, func
+from sqlalchemy import DateTime, Float, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -192,4 +192,33 @@ class SignOff(Base):
     decision: Mapped[str] = mapped_column(String(16), index=True)  # "approved" | "rejected"
     approver: Mapped[str] = mapped_column(String(255))
     reason: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ErGoldPair(Base):
+    """A labelled gold record-pair for the ER measurement harness (ADR 0043 / Gate A).
+
+    A small, seeded, reproducible set of ``match`` / ``non_match`` record pairs that the
+    evaluation harness (:mod:`worldmonitor.resolution.eval`) scores the resolver against. It
+    is the regression instrument every later ER gate measures over — it never mutates the
+    graph (the harness READS, never writes, per the gate's locked invariants); these rows are
+    id references plus a clerical label, not graph entities. Built by stratified uncertainty
+    sampling over the 0.5-0.95 Splink-score band plus a seeded OS-Pairs-style hard-case set
+    (:mod:`worldmonitor.resolution.gold`).
+
+    The pair is stored **canonically ordered** (``left_id <= right_id``) and is unique on
+    ``(left_id, right_id)`` — the same idiom as :class:`ResolverJudgement`'s
+    ``uq_resolver_judgement_pair``. ``clerical_score`` maps to Splink's ``clerical_match_score``
+    in the labels table; it is nullable (a deterministic hard case may carry no Splink score).
+    """
+
+    __tablename__ = "er_gold_pair"
+    __table_args__ = (UniqueConstraint("left_id", "right_id", name="uq_er_gold_pair"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    left_id: Mapped[str] = mapped_column(String(255))
+    right_id: Mapped[str] = mapped_column(String(255))
+    label: Mapped[str] = mapped_column(String(16))  # "match" | "non_match"
+    source: Mapped[str] = mapped_column(String(32))  # e.g. "uncertainty" | "os_pairs"
+    clerical_score: Mapped[float | None] = mapped_column(Float, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -392,6 +392,72 @@ def _schema_compatible(left: FtmEntity, right: FtmEntity) -> bool:
     return True
 
 
+def _candidate_settings(prior: float) -> SettingsCreator:
+    """The candidate model's settings — the SAME comparison + blocking surface ``score_pairs``
+    uses (reusing the shared ``_name_comparison`` / ``_exact_comparison`` / ``_distinguishing_id_
+    comparison`` / ``_anchor_clash_comparison`` builders and the same blocking rules). The EM
+    candidate differs from the live path ONLY in how its m/u weights are derived (estimated, not
+    expert-set) — its structure is identical so a measured candidate is comparable like-for-like.
+    """
+    return SettingsCreator(
+        link_type="dedupe_only",
+        comparisons=[
+            _name_comparison(),
+            _exact_comparison("country", m=0.85, u=0.15),
+            _exact_comparison("birth_date", m=0.9, u=0.02),
+            _exact_comparison("wikidata_id", m=0.999, u=0.02),
+            _distinguishing_id_comparison(),
+            _anchor_clash_comparison(),
+        ],
+        blocking_rules_to_generate_predictions=[
+            block_on("country"),
+            block_on("substr(name_fp, 1, 4)"),
+            block_on("wikidata_id"),
+        ],
+        probability_two_random_records_match=prior,
+    )
+
+
+def train_candidate_model(
+    entities: Sequence[FtmEntity],
+    *,
+    prior: float = DEFAULT_PRIOR,
+    seed: int = 42,
+    max_pairs: float = 1_000_000.0,
+    em_blocking_rule: str = "country",
+) -> dict[str, Any]:
+    """Train a MEASURED CANDIDATE Splink model via EM and return a loadable settings artefact.
+
+    This is the ADR-0043 / Gate-A candidate-model path. It is a **measured candidate ONLY** — it
+    is evaluated against the gold set by :mod:`worldmonitor.resolution.eval`, and it is **NOT**
+    promoted into the live :func:`score_pairs` path. The expert-set v0 weights and blocking of
+    :func:`score_pairs` are FROZEN in slice-1 (gate spec §8); promoting the EM weights is the
+    separate, human-gated slice-2.
+
+    Training order is fixed by the Splink API (``VERIFIED_API.md``): because
+    ``estimate_parameters_using_expectation_maximisation`` defaults ``fix_u_probabilities=True``
+    (EM updates only ``m``), ``u`` MUST be estimated FIRST. So:
+
+    1. ``linker.training.estimate_u_using_random_sampling(max_pairs=..., seed=...)`` — seeded for
+       reproducible ``u`` (the gold harness requires determinism).
+    2. ``linker.training.estimate_parameters_using_expectation_maximisation(block_on(...))`` — EM
+       refines ``m`` over the pairs the EM blocking rule generates.
+
+    Returns the trained settings as a JSON-serialisable ``dict`` (``save_model_to_json()``), which
+    is a loadable artefact: a fresh ``Linker(frame, settings_dict, db_api=...)`` reconstitutes the
+    candidate so :mod:`worldmonitor.resolution.eval` can score it against the gold set (A2).
+    """
+    frame = pd.DataFrame([_flatten(entity) for entity in entities])
+    settings = _candidate_settings(prior)
+    # Splink accepts a DataFrame at runtime; its type hint only admits table names.
+    linker = Linker(frame, settings, db_api=DuckDBAPI())  # pyright: ignore[reportArgumentType]
+    # u FIRST (fix_u_probabilities defaults True so EM updates only m) — VERIFIED_API.md.
+    linker.training.estimate_u_using_random_sampling(max_pairs=max_pairs, seed=seed)
+    linker.training.estimate_parameters_using_expectation_maximisation(block_on(em_blocking_rule))
+    # The trained m/u live on the linker's settings; export a loadable/evaluable artefact.
+    return linker.misc.save_model_to_json()
+
+
 def score_pairs(
     entities: Sequence[FtmEntity],
     *,

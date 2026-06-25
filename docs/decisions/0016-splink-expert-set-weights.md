@@ -1,6 +1,10 @@
 # ADR 0016 — Splink ER model: expert-set weights (v0), EM-trained later
 
 > Status: **LOCKED** (v0) · June 2026 · Supersedes nothing. Refines decision #4 (ER = Splink + nomenklatura).
+> **Extended by [ADR 0043](0043-er-measurement-harness-em-weights.md) (2026-06-25):** Gate A adds the
+> measurement harness (gold set + B³/CEAFe + over_merge_rate) and an EM-trained *candidate* model. The
+> v0 expert-set weights and the 0.92 threshold this ADR locked remain the LIVE path; promoting the EM
+> weights / a calibrated threshold is the person-affecting, human-sign-off slice-2 of Gate A.
 
 ## Context
 Entity resolution v0 (PR #12) needs a pairwise scoring model. Splink/Fellegi-Sunter requires `m` and `u`
