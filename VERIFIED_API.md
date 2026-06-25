@@ -1,10 +1,10 @@
-# VERIFIED_API.md — Gate A (ER Measurement Harness + EM Weights)
+# VERIFIED_API.md — verified external-API bindings (cumulative)
 
-> **Verify-before-code artefact (BLOCKING).** Every Splink / scipy call the harness binds is
-> recorded here **verbatim**, confirmed against BOTH (a) the installed package via
-> `inspect.signature` (the authoritative runtime — exactly what executes) and (b) the PRIMARY
-> Splink 4.x docs. No implementation may bind a Splink/scipy symbol absent from this file, or
-> bound to the wrong namespace. (Gate spec §2; judge DENY D4.)
+> **Verify-before-code artefact (BLOCKING).** Every external library call the resolver/harness binds
+> is recorded here **verbatim**, confirmed against the installed package via `inspect.signature`
+> (the authoritative runtime — exactly what executes) and, where available, the primary docs. No
+> implementation may bind a symbol absent from this file, or bound to the wrong module/namespace.
+> Sections are added per gate (Gate A: Splink/scipy · Gate B-front: nomenklatura/rigour).
 
 ## Environment (verified 2026-06-25)
 
@@ -138,3 +138,74 @@ linear_sum_assignment(cost_matrix, maximize=False)  # -> (row_ind, col_ind)
 ```
 - CEAFe maximises total φ4 similarity → call with `maximize=True` on the φ4 matrix, OR negate and
   use the default. Returns aligned `(row_ind, col_ind)` index arrays.
+
+---
+
+# Gate B-front — nomenklatura / rigour (anchor-preferred stable IDs)
+
+Verified 2026-06-25 against the installed **nomenklatura 4.10.0** + **rigour 2.1.2** via
+`inspect.signature` (authoritative runtime). The API is namespaced under `nomenklatura/resolver/`
+— `Identifier` is NOT a top-level export. `merge.py` imports `import nomenklatura as nk` and
+`from nomenklatura import Judgement`.
+
+## nomenklatura — `Resolver` (`nomenklatura/resolver/resolver.py`)
+
+```python
+# verbatim from inspect.signature (installed 4.10.0)
+Resolver.make_default(engine: Optional[sqlalchemy.engine.base.Engine] = None) -> "Resolver[SE]"   # classmethod
+Resolver.decide(self, left_id: Union[str, Identifier], right_id: Union[str, Identifier], judgement: Judgement, user: Optional[str] = None, score: Optional[float] = None) -> Identifier
+Resolver.get_canonical(self, entity_id: str) -> str
+Resolver.get_referents(self, canonical_id: str, canonicals: bool = True) -> Set[str]
+Resolver.get_judgement(self, entity_id: Union[str, Identifier], other_id: Union[str, Identifier]) -> Judgement
+Resolver.connected(self, node: Identifier) -> Set[Identifier]
+Resolver.remove(self, node_id: Union[str, Identifier]) -> None
+Resolver.explode(self, node_id: Union[str, Identifier]) -> Set[str]
+Resolver.begin(self, load_edges: bool = True) -> None
+Resolver.commit(self) -> None
+Resolver.rollback(self) -> None
+```
+- `get_canonical` returns `max(connected(node)).id` **iff that max is canonical**, else the node's own
+  id. The "max" is by `Identifier.__lt__` = `(weight, id)` → a connected **QID wins** (weight 3).
+- `get_referents(canonical_id)` = the set of ids that resolve to `canonical_id` (the superseded-id
+  traceability primitive — the gate's `canonical_alias` ledger mirrors this durably).
+- `decide(..., Judgement.POSITIVE, ...)` canonicalises (mints an `Identifier` only if no connected node
+  is already canonical); this is the membership step the ADR-0037 resolve uses (already bound today at
+  `merge.py:147,178`). `remove`/`explode` are the split primitives (slice-2).
+- **`get_canonical`/`Identifier` weighting is QID-ONLY** — LEI/regNo/taxNo are weight-1 raw ids the
+  resolver never deterministically prefers. → the richer durable precedence (QID>LEI>regNo>taxNo) is
+  derived OUTSIDE the resolver in `resolution/canonical.py` (spec §3). The resolver decides membership;
+  `canonical.py` decides the durable id.
+
+## nomenklatura — `Identifier` (`nomenklatura/resolver/identifier.py`)
+
+```python
+Identifier.PREFIX = "NK-"
+Identifier.make(value: Optional[str] = None) -> "Identifier"     # classmethod -> f"{PREFIX}{value or shortuuid.uuid()}"
+# __init__: weight=1; weight=2 if id.startswith("NK-"); weight=3 if is_qid(id); canonical = weight > 1
+# __lt__: orders by (weight, id)
+```
+- The nomenklatura canonical-id prefix is **`NK-`** (distinct from our `wmc-` fingerprint and our new
+  `wm-mint-`/`qid:`/`lei:`/`regno:`/`taxno:` durable forms). We do NOT reuse `NK-`.
+
+## nomenklatura — `Judgement` (`nomenklatura/judgement.py`)
+
+```python
+class Judgement(Enum):
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+    UNSURE = "unsure"
+    NO_JUDGEMENT = "no_judgement"
+```
+- British spelling `Judgement`; member `NO_JUDGEMENT`. Positive-before-negative ordering in
+  `get_judgement` is the ADR-0037 transitive primitive.
+
+## rigour — QID validation (`rigour.ids.wikidata`)
+
+```python
+from rigour.ids.wikidata import is_qid
+is_qid("Q42") -> True          # a Wikidata QID
+is_qid("5493001KJTIIGC8Y1R12") -> False   # an LEI is not a QID
+```
+- `pick_anchor`'s QID tier validates with `is_qid` (same check nomenklatura's `Identifier` uses for
+  its weight=3). FtM props `wikidataId` / `leiCode` / `registrationNumber` / `taxNumber` are all FtM
+  type `identifier`; regNo/taxNo are normalised via the FtM `identifier` type per ADR 0039.

@@ -37,11 +37,16 @@ from worldmonitor.graph.writer import write_entities
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
 from worldmonitor.ontology.validation import validate_or_raise
 from worldmonitor.resolution.audit import record_merge, record_merge_alert
+from worldmonitor.resolution.canonical import (
+    record_durable_id,
+    resolve_durable_id,
+)
 from worldmonitor.resolution.merge import (
     DEFAULT_MERGE_THRESHOLD,
     ResolvedCluster,
     StoredJudgement,
     cluster_and_merge,
+    rekey_cluster,
 )
 from worldmonitor.resolution.referents import build_referent_map, rewrite_referents
 from worldmonitor.resolution.review import needs_review
@@ -331,6 +336,24 @@ def _resolve_batch(
                 reason="schema-incompatible member dropped from transitive cluster (H-2)",
             )
 
+        # Anchor-preferred DURABLE id (Gate B-front / ADR 0044): for a MERGE, re-key the cluster
+        # under the durable id derived from its members' anchors BEFORE the guard/audit/write, so
+        # every downstream reference (audit canonical_id, the graph MERGE key, the referent map)
+        # uses the stable id (``qid:``/``lei:``/…), not the ``wmc-`` idempotency fingerprint. This
+        # is the read-only, adopt-preferring resolution; the ledger WRITE is deferred to the promote
+        # point so a parked cluster never pollutes the ledger. ``wmc-`` survives ONLY as the
+        # unanchored-merge fallback (DENY D1). Scoped to ``is_merge`` (slice-1): a SINGLETON keeps
+        # its own id (the established "singleton keeps its own node id" contract), and graph-level
+        # re-key stability for an un-merged anchored entity is entangled with cross-batch /
+        # streaming dedup, which is DEFERRED (ADR 0019). The merge survivor derivation (spec §7) is
+        # what slice-1 wires; the durable adopt/derive API itself (canonical.py) is
+        # singleton-agnostic.
+        prior_id = cluster.canonical_id
+        if cluster.is_merge:
+            cluster_members = [by_id[m] for m in cluster.member_ids if m in by_id]
+            durable_id = resolve_durable_id(session, cluster_members, fallback_id=prior_id)
+            cluster = rekey_cluster(cluster, durable_id)
+
         flagged, reason = needs_review(cluster, by_id)
         members = set(cluster.member_ids)
         if flagged and any(members <= group for group in approved_groups):
@@ -372,6 +395,20 @@ def _resolve_batch(
                 cluster.canonical_id,
                 reason,
                 alerts,
+            )
+
+        # Record the PROMOTED MERGE's durable id + collapsed-member aliases in the ledger
+        # (ADR 0044, spec §6/§7): every member id (and the prior ``wmc-`` fingerprint, when the
+        # durable id differs) resolves to the surviving durable id — append-only, idempotent, so a
+        # re-ingest re-adopts the stable id and a graph lookup by a superseded id resolves to the
+        # surviving node. Only PROMOTED merges write here (a parked cluster never rewrites/keys; a
+        # singleton keeps its own id and has no collapsed members to alias).
+        if cluster.is_merge:
+            record_durable_id(
+                session,
+                cluster.canonical_id,
+                member_ids=cluster.member_ids,
+                prior_id=prior_id,
             )
 
         record_merge(session, cluster, decision="merged", reason=reason)

@@ -30,11 +30,13 @@ from ftmg.transform import (
     generate_node_entity,
     generate_topic_labels,
 )
+from sqlalchemy.orm import Session
 
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.ontology.anchors import get_anchors
 from worldmonitor.ontology.ftm import FtmEntity
 from worldmonitor.provenance.model import provenance_node_properties
+from worldmonitor.resolution.canonical import resolve_durable
 
 
 def _inject_props(
@@ -168,3 +170,34 @@ def write_entities(client: Neo4jClient, entities: Iterable[FtmEntity]) -> None:
                 for batch in generate_topic_labels(config, entity):
                     batcher.add(_with_props(batch, edge_props=edge_prov))
         batcher.flush()
+
+
+def resolve_node_id(ledger: Session, entity_id: str) -> str:
+    """Resolve a (possibly superseded) ``entity_id`` to the surviving DURABLE node id.
+
+    Gate B-front / ADR 0044 alias-on-read: a node is written under its durable canonical id (the
+    native ``{id}`` MERGE key, single-tenant, ADR 0042), and the ``canonical_id_ledger`` records
+    every superseded/prior id (a collapsed merge member, a prior ``wmc-`` fingerprint, or a
+    split-ejected id) as a traceable alias. A lookup by such a superseded id must land on the
+    surviving node, not miss — this maps an alias to its survivor via the ledger. An id with no
+    alias row (its own durable id, or an unknown id) resolves to itself, so the call is always safe.
+    """
+    return resolve_durable(ledger, entity_id) or entity_id
+
+
+def get_entity_by_alias(
+    client: Neo4jClient, ledger: Session, *, entity_id: str
+) -> dict[str, Any] | None:
+    """Read a node by ``entity_id``, honoring ``canonical_alias`` on read (ADR 0044).
+
+    Resolves ``entity_id`` through the ledger (:func:`resolve_node_id`) to the surviving durable
+    id, then reads that node's properties — so a lookup by a superseded id (a merged-away member,
+    a stale ``wmc-`` fingerprint, a split-ejected id) returns the SURVIVING node rather than a
+    dangling miss. Returns ``None`` if no node exists for the resolved id.
+    """
+    durable_id = resolve_node_id(ledger, entity_id)
+    rows = client.execute_read(
+        "MATCH (n:Entity {id: $entity_id}) RETURN properties(n) AS props",
+        entity_id=durable_id,
+    )
+    return rows[0]["props"] if rows else None

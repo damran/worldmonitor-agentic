@@ -243,6 +243,29 @@ def cluster_and_merge(
     return clusters
 
 
+def rekey_cluster(cluster: ResolvedCluster, durable_id: str) -> ResolvedCluster:
+    """Return a copy of ``cluster`` re-keyed under ``durable_id`` (the anchor-preferred id).
+
+    Gate B-front (ADR 0044): a merged cluster's ``canonical_id`` is the DURABLE id derived from its
+    anchor (``resolution/canonical.resolve_durable_id``), not the ``wmc-`` idempotency fingerprint.
+    This re-keys the cluster's merged FtM node so it is written under the durable id (the graph
+    MERGE key, still native ``{id}``, ADR 0042) and ``build_referent_map`` maps members onto the
+    durable id. A no-op when ``durable_id`` already equals the cluster's id (the unanchored
+    fallback, where ``wmc-``/singleton id IS the durable id). Pure: the node's properties,
+    provenance/context and every other field are untouched — only its ``id`` changes.
+    """
+    if durable_id == cluster.canonical_id:
+        return cluster
+    entity = make_entity({**cluster.entity.to_dict(), "id": durable_id})
+    return ResolvedCluster(
+        canonical_id=durable_id,
+        member_ids=cluster.member_ids,
+        entity=entity,
+        score=cluster.score,
+        merge_incompatible=cluster.merge_incompatible,
+    )
+
+
 def _merge_entities(
     canonical_id: str, member_ids: tuple[str, ...], by_id: dict[str, FtmEntity]
 ) -> tuple[FtmEntity, tuple[str, ...]]:

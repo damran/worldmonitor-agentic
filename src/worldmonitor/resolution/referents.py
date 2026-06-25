@@ -36,6 +36,12 @@ def build_referent_map(clusters: Iterable[ResolvedCluster]) -> dict[str, str]:
     Pass only **promoted** clusters (those written to the graph): a parked
     cluster must not redirect anything. Singletons map to themselves (a no-op);
     a real merge maps each collapsed source id to the surviving canonical id.
+
+    The pipeline re-keys each promoted cluster under its anchor-preferred DURABLE id
+    (Gate B-front / ADR 0044) before building this map, so an edge endpoint naming a
+    merged-away source id is redirected onto the stable durable id (``qid:``/``lei:``/…
+    /``wm-mint-``), not the ``wmc-`` idempotency fingerprint — references stay valid
+    across re-ingest.
     """
     referents: dict[str, str] = {}
     for cluster in clusters:

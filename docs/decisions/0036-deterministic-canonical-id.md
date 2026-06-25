@@ -2,6 +2,10 @@
 
 - **Status:** Part 1 **accepted** (implemented); Part 2 **accepted — Option A** (implemented 2026-06-23)
 - **Date:** 2026-06-23
+- **Extended by [ADR 0044](0044-anchor-preferred-stable-ids.md) (Gate B-front, 2026-06-25):** the
+  `wmc-<sha256(sorted member_ids)>` id defined here is **demoted to a crash-retry idempotency
+  fingerprint**; durable identity becomes anchor-preferred (QID>LEI>regNo>taxNo) + a `canonical_id_ledger`
+  alias, re-ingest-stable. `wmc-` survives only as the unanchored-merge fallback.
 - **Addresses:** `docs/reviews/PRODUCTION_READINESS_AUDIT_2026-06-23.md` finding **B-1**
 - **Touches:** `resolution/merge.py` (canonical-id minting, Part 1); `resolution/signoff.py` + `review.py` (idempotent/recoverable sign-off, Part 2). Builds on [0026](0026-batch-first-resolution.md) (batch-first), [0028](0028-per-batch-resolver-isolation.md) (ephemeral resolver / G4), [0031](0031-return-to-block-signoff.md) (sign-off).
 - **Relates to (does NOT build):** the deferred H1/H2 cross-store dual-write surface.

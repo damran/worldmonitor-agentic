@@ -195,6 +195,49 @@ class SignOff(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class CanonicalIdLedger(Base):
+    """Durable canonical-id ledger — the anchor-preferred stable-id mapping (ADR 0044).
+
+    Separates the two id concepts ADR 0036 conflated: ``wmc-<hash>`` stays *strictly* a
+    crash-retry idempotency fingerprint (the fallback id of an *unanchored* merge), while
+    DURABLE identity lives here, anchor-preferred (``qid:``/``lei:``/``regno:``/``taxno:``) or
+    minted (``wm-mint-<uuid>``) and stable across re-ingest. A connector mints fresh per-collect
+    member ids on every re-ingest (the very thing that churns the ``wmc-`` fingerprint); the
+    durable id derived from the entity's anchor survives that churn.
+
+    Two row kinds share the table (a self-row vs an alias row, distinguished by whether
+    ``canonical_alias == canonical_id``):
+
+    * a **canonical** row records a durable id with its anchor kind/value (``record_canonical``);
+      it stores ``canonical_alias = canonical_id`` (the durable id is its own alias) — idempotent.
+    * an **alias** row maps a superseded/prior id (a collapsed merge member, the prior ``wmc-``
+      fingerprint, or a split-ejected id) to the surviving durable ``canonical_id`` — APPEND-ONLY:
+      a split ADDS an alias row, never deletes (the no-un-merge invariant).
+
+    ``(canonical_id, canonical_alias)`` is unique so ``record_alias`` and the canonical self-row
+    are both idempotent (a duplicate (canonical, alias) is a no-op). The platform is single-tenant
+    (D1, ADR 0042). This migration head and the ``0006_canonical_ledger`` migration MUST agree
+    byte-for-byte (``tests/integration/test_migrations.py`` drift guard, ADR 0030).
+    """
+
+    __tablename__ = "canonical_id_ledger"
+    __table_args__ = (
+        UniqueConstraint("canonical_id", "canonical_alias", name="uq_canonical_id_ledger_alias"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # The durable (anchor-preferred or minted) canonical id; indexed for the adopt/resolve reads.
+    canonical_id: Mapped[str] = mapped_column(String(255), index=True)
+    # A superseded/prior id that resolves to ``canonical_id`` (one append-only row per alias);
+    # equals ``canonical_id`` for the canonical self-row. Indexed for ``resolve_durable``.
+    canonical_alias: Mapped[str] = mapped_column(String(255), index=True)
+    # The anchor kind that produced the durable id ("qid" | "lei" | "regno" | "taxno" | "mint").
+    anchor_kind: Mapped[str] = mapped_column(String(16), default="")
+    # The bare anchor value (e.g. the QID/LEI), or "" for a mint / an alias row.
+    anchor_value: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ErGoldPair(Base):
     """A labelled gold record-pair for the ER measurement harness (ADR 0043 / Gate A).
 

@@ -3,6 +3,9 @@
 - **Status:** accepted
 - **Date:** 2026-06-23
 - **Gate:** B-3 (`docs/reviews/GATE_B3_SPEC.md`)
+- **Extended by [ADR 0044](0044-anchor-preferred-stable-ids.md) (Gate B-front, 2026-06-25):** the same
+  `registrationNumber`/`taxNumber` `identifier`-typed props this ADR uses as distinguishing evidence also
+  feed the anchor-preferred durable-id precedence (regNo/taxNo tiers).
 - **Touches:** `resolution/splink_model.py` ONLY (`_name_fingerprint`, `_flatten`, the `comparisons`
   list in `score_pairs`). Tests in `tests/unit/`.
 - **Extends:** ADR 0035 (multi-script name canonicalization). **Does NOT relitigate** the name-fingerprint
