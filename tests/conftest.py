@@ -54,6 +54,34 @@ def clean_graph(neo4j_client: Neo4jClient) -> Neo4jClient:
     return neo4j_client
 
 
+@pytest.fixture(autouse=True)
+def _isolate_postgres(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Truncate all relational tables before each Postgres-using test.
+
+    The Postgres container is session-scoped, so rows would otherwise bleed across
+    tests. ``tenant_id`` used to namespace each test's rows (a unique tenant per test
+    + ``WHERE tenant_id`` filters); under single-tenancy (D1, ADR 0042) that isolation
+    is gone, so we wipe the tables here — the relational analogue of ``clean_graph``
+    for Neo4j. Tests that don't request ``postgres_dsn`` (the default unit run) skip
+    this entirely, so no container is started.
+    """
+    if "postgres_dsn" not in request.fixturenames:
+        yield
+        return
+    from sqlalchemy import text
+
+    from worldmonitor.db.engine import create_all, make_engine
+    from worldmonitor.db.models import Base
+
+    engine = make_engine(request.getfixturevalue("postgres_dsn"))
+    create_all(engine)  # idempotent — ensures the tables exist before TRUNCATE
+    tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
+    with engine.begin() as conn:
+        conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+    engine.dispose()
+    yield
+
+
 @pytest.fixture(scope="session")
 def neo4j_gds_client() -> Iterator[Neo4jClient]:
     """A connected client against an ephemeral Neo4j WITH the Graph Data Science plugin."""
