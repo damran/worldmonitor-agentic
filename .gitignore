@@ -40,6 +40,24 @@ data/
 # ---- Claude Code local-only settings ----
 .claude/settings.local.json
 
+# ---- Fleet / agentic build harness: runtime & ephemeral state (never commit) ----
+# The committed governance layer is .claude/agents/, .claude/hooks/, settings.json.
+# Everything below is per-run working state or local operational tooling.
+.claude/gate.scope
+.claude/continue
+.claude/*.log
+.claude/fleet.status.json
+.claude/fleet.budget.json
+# Operational tooling kept local (not product code; not held to product lint/type gates)
+orchestrator/
+scripts/council/
+scripts/smoke/
+scripts/dev/fleet_status.sh
+scripts/dev/fleet_watch.sh
+scripts/dev/spawn_worker.sh
+scripts/dev/orient.sh
+scripts/dev/local_ci.sh
+
 # ---- OS / editor cruft ----
 *:Zone.Identifier
 .DS_Store
