@@ -104,15 +104,33 @@ def is_sensitive(entity: FtmEntity) -> bool:
 
     Deny-by-default (ADR 0047). ``registry.topic.RISKS`` is FtM's own counterparty-risk tag (28
     codes in FtM 4.9.2), loaded programmatically so a pin bump tracks automatically; a code not in
-    ``registry.topic.names`` at all is treated as sensitive (unknown ⇒ sensitive). This subsumes and
-    replaces the legacy ``SENSITIVE_TOPICS`` denylist + the ``role.pep*``/``sanction*`` prefix rule
-    (every code they matched is in ``RISKS``).
+    ``registry.topic.names`` at all is treated as sensitive (unknown ⇒ sensitive).
+
+    A topic ``code`` is sensitive iff (a) ``code ∈ registry.topic.RISKS``, OR (b) a **DOT-ANCESTOR**
+    of ``code`` is a RISKS code (a sub-classification inherits its parent's risk, e.g.
+    ``role.pep.natl`` → ``role.pep`` ∈ RISKS), OR (c) ``code ∉ registry.topic.names``. Clause (b) is
+    the PEP/sub-code fix (ADR 0047 Post-merge fix, 2026-06-26): exact ``& RISKS`` membership
+    silently dropped the RISKS-parented sub-codes (``role.pep.natl/intl/frmr``, ``crime.cyber``,
+    ``crime.env``, ``crime.traffick.drug/human``), which live in ``registry.topic.names`` but not in
+    ``RISKS`` — so the unknown-hinge missed them too. This corrects Decision 1's false *"every code
+    they matched is in RISKS"* claim (the legacy ``role.pep*`` PREFIX matched those sub-codes; they
+    are NOT in ``RISKS``). The risk source stays programmatic, so a future RISKS-parented sub-code
+    is covered with no code change.
     """
     # quiet=True: schemata without a `topics` property (e.g. Sanction) -> no topics, no raise.
     topic_codes = set(entity.get("topics", quiet=True))
     if not topic_codes:
         return False
     if topic_codes & registry.topic.RISKS:
+        return True
+    # A sub-classification of a risk topic inherits its parent's risk: a code whose dot-ANCESTOR is
+    # a RISKS code (e.g. role.pep.natl -> role.pep) is sensitive, even though FtM lists it in names
+    # but not in `RISKS`. Restores the legacy role.pep*/sanction* prefix coverage the exact-set
+    # check dropped (cross-line audit vs Workflow A; corrects ADR 0047's "every code in RISKS"
+    # claim). The trailing-dot `r + "."` makes it a TRUE ancestor ('role.pepXYZ' would NOT match).
+    if any(
+        code == r or code.startswith(r + ".") for code in topic_codes for r in registry.topic.RISKS
+    ):
         return True
     # Off-ontology: any code FtM has never seen is sensitive (the inversion hinge).
     return any(code not in registry.topic.names for code in topic_codes)

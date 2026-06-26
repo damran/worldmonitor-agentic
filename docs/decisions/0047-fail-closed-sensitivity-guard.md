@@ -1,6 +1,6 @@
 # ADR 0047 — Fail-closed sensitivity guard (deny-by-default; topics → graph → Chow abstain)
 
-> Status: **ACCEPTED** · 2026-06-25 (slice-3 refinement 2026-06-26) · Closes audit gap **G6** · Inverts the denylist half of **ADR 0020**
+> Status: **ACCEPTED** · 2026-06-25 (slice-3 refinement 2026-06-26; PEP/sub-code fix 2026-06-26) · Closes audit gap **G6** · Inverts the denylist half of **ADR 0020**
 > Gate: [Gate E — Fail-Closed Sensitivity Guard](../reviews/GATE_E_SENSITIVITY_GUARD_SPEC.md)
 > Person-affecting: **NO (fail-closed)** — the change can only move MORE clusters to human review;
 > it auto-promotes nothing and needs no sign-off (CLAUDE.md self-improvement rule).
@@ -44,8 +44,12 @@ into which `resolution/review.py` (`needs_review`, `is_sensitive`) **delegates**
 The sensitive topic set is loaded at runtime from `from followthemoney.types import registry;
 registry.topic.RISKS` — a `set[str]` of 28 codes (FtM 4.9.2, `followthemoney/types/topic.py`),
 **FtM's own risk classification**, never copied into code/config as a literal. The legacy
-`SENSITIVE_TOPICS` constant and the `role.pep*`/`sanction*` prefix rule are **deleted** (every code
-they matched is in `RISKS`). Verified verbatim in `VERIFIED_API.md` before code (gate spec §2).
+`SENSITIVE_TOPICS` constant and the `role.pep*`/`sanction*` prefix rule are **deleted**.
+**CORRECTION (2026-06-26 — see [Post-merge fix](#post-merge-fix-pepsub-code-coverage--2026-06-26) below):**
+the original parenthetical *"every code they matched is in `RISKS`"* was **WRONG** — the `role.pep*`
+PREFIX also matched the sub-codes `role.pep.natl` / `role.pep.intl` / `role.pep.frmr`, which are
+**NOT** in `RISKS`. Exact `& RISKS` membership therefore dropped sub-code coverage; the fix restores
+it via a dot-ancestor rule. Verified verbatim in `VERIFIED_API.md` before code (gate spec §2).
 
 ### 2. Unknown ⇒ sensitive (the inversion hinge)
 
@@ -56,9 +60,11 @@ the inversion: the guard no longer needs to *recognise* a risk to hold it.
 
 ### 3. Stage ordering — topics-first → graph(k-hop) → Chow abstain
 
-1. **Topics-first (pure, no graph).** A member is sensitive iff
-   `topic_codes & registry.topic.RISKS` is non-empty OR any code is off-ontology (Decision 2). Closes
-   the headline G6 (the 18 missed codes) with zero graph dependency.
+1. **Topics-first (pure, no graph).** A member is sensitive iff `topic_codes & registry.topic.RISKS`
+   is non-empty, **OR a DOT-ANCESTOR of a code is in `RISKS`** (the 2026-06-26 PEP/sub-code fix — see
+   [Post-merge fix](#post-merge-fix-pepsub-code-coverage--2026-06-26); a sub-classification inherits
+   its parent's risk, e.g. `role.pep.natl` → `role.pep` ∈ RISKS), OR any code is off-ontology
+   (Decision 2). Closes the headline G6 (the 18 missed codes) with zero graph dependency.
 2. **k-hop graph sensitivity (Neo4j).** A member with no risk topic of its own is sensitive if a
    **risk-labelled node lies within `k` hops** (ftmg encodes topics as node labels —
    `graph/gds.py`/`generate_topic_labels`). Closes the edge-less / structural fail-open. The
@@ -208,6 +214,10 @@ Stage 2), `sensitivity_abstain_low`/`sensitivity_abstain_high` (`float [0,1]`, d
 - ✅ Strengthens the catastrophic-merge net; auto-promotes nothing; person-NEUTRAL, no sign-off.
 - ✅ Tracks FtM's risk vocabulary automatically — a topic added upstream is covered without a code
   change (the adversarial target).
+- ✅ (PEP/sub-code fix, 2026-06-26) RISKS-parented **sub-codes** (`role.pep.natl/intl/frmr`,
+  `crime.cyber`, `crime.env`, `crime.traffick.drug/human`) — which exact `& RISKS` membership
+  silently dropped — now hold for review via the dot-ancestor rule, with zero over-flag of any other
+  known code. See the Post-merge fix section.
 - ✅ (slice-3) The exemption fence is **masking-proof**: non-exemptibility is computed structurally
   (`has_nonexemptible_sensitivity`), independent of `needs_review`'s first-flag short-circuit, so an
   exemptible-first flag can no longer hide a co-occurring k-hop/Chow/newly-broadened signal.
@@ -223,6 +233,49 @@ Stage 2), `sensitivity_abstain_low`/`sensitivity_abstain_high` (`float [0,1]`, d
   KNOWN PROPERTY: a newly-broadened-sensitive cluster re-parks on every re-ingest (the fence keys on
   legacy-visibility / structural signal, not "was ever approved") — intended fail-closed conservatism,
   not a bug.
+
+## Post-merge fix (PEP/sub-code coverage) — 2026-06-26
+
+> Status unchanged (**ACCEPTED**). Gate: [Gate PEP-subcode](../reviews/GATE_PEP_SUBCODE_SPEC.md). This
+> note CORRECTS a false claim in Decision 1 / Decision 3.1 above and records the dot-ancestor rule.
+
+A cross-line audit against Workflow A found a fail-open this ADR's slice-1 introduced. Decision 1 and
+Decision 3.1 specified topic sensitivity as **exact set membership** `topic_codes &
+registry.topic.RISKS` (plus the unknown-hinge). `registry.topic.RISKS` (28 codes, FtM 4.9.2) holds the
+**parent** risk codes but **NOT their sub-classifications**, which live in `registry.topic.names` (so
+the unknown-hinge misses them too). Decision 1's parenthetical *"every code they matched is in `RISKS`"*
+is **false**: the deleted `role.pep*` PREFIX rule (which Workflow A retained) matched sub-codes by
+prefix, but `role.pep.natl/intl/frmr` are **not** in `RISKS`. So inverting to exact membership
+**silently dropped** coverage of the RISKS-parented sub-codes — a granular sub-code became the sole
+risk signal and the cluster **auto-merged UNFLAGGED**, violating *"never auto-merge a sensitive
+entity."* Reproduced on the slice-1 tree: `is_sensitive(Person topics=['role.pep.natl']) == False`.
+
+Enumerated against the installed FtM, the **7** missed codes (each `∈ names`, `∉ RISKS`, with a RISKS
+dot-ancestor) are: `role.pep.natl`, `role.pep.intl`, `role.pep.frmr` (parent `role.pep`);
+`crime.cyber`, `crime.env` (parent `crime`); `crime.traffick.drug`, `crime.traffick.human` (parent
+`crime.traffick`).
+
+**Corrected rule.** A topic `code` is sensitive iff **(a)** `code ∈ registry.topic.RISKS` (unchanged),
+**OR (b)** a **dot-ancestor** of `code` ∈ `RISKS` — `any(code == r or code.startswith(r + ".") for r in
+RISKS)` — **OR (c)** `code ∉ registry.topic.names` (unknown-hinge, unchanged). This stays programmatic
+and tracks the FtM pin: a future RISKS-parented sub-code is covered with no code change. Verified
+against the installed FtM, clause (b) flags **exactly** those 7 known sub-codes and **no other** known
+code (zero over-flag — no non-risky code has a RISKS ancestor).
+
+**`_legacy_is_sensitive` is UNCHANGED.** It still prefix-matches `role.pep*` / `sanction*`, correctly
+modelling the historical legacy guard for the Decision-5 fence. The exemption interaction is therefore
+consistent and intended:
+
+- `role.pep.*` sub-codes → `is_sensitive` True **and** `_legacy_is_sensitive` True →
+  `is_newly_broadened_sensitive` **False** → stays **EXEMPTIBLE** (the legacy prefix saw them; a prior
+  approval could have considered them — not a stale exemption).
+- `crime.cyber` / `crime.env` / `crime.traffick.*` → `is_sensitive` True **and** `_legacy_is_sensitive`
+  **False** (legacy had no `crime*` prefix) → `is_newly_broadened_sensitive` **True** →
+  **NON-exemptible** (re-parks past a stale approval; the legacy guard never caught them).
+
+**Person-affecting: NONE.** Strictly stricter (adds parks only); auto-promotes nothing; un-flags
+nothing; does not touch `DEFAULT_MERGE_THRESHOLD`, Splink, scores, the k-hop, or the Chow stages.
+Person-NEUTRAL / fail-closed → **no human sign-off** (same posture as the rest of this ADR).
 
 ## Status of related ADRs
 
