@@ -1,8 +1,15 @@
 # 0049 — Cross-store GDPR source erasure (`erase_source`)
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-26
 - **Gate:** B-4a — GDPR cross-store source erasure (`docs/reviews/GATE_B4A_ERASURE_SPEC.md`). **BUILD gate.**
+- **Accepted scope (v1, operator sign-off 2026-06-26):** ships **property-level / node-level** erasure
+  (all Tier-1 supports). The known residual — a value the erased source UNIQUELY supplied that sits
+  inside a property a SURVIVING source also witnesses persists (sole-source subjects + non-erased
+  sources are fully correct) — is **consciously accepted** for v1. **Value-level erasure inside a
+  multi-witness property is a tracked follow-up (`WM-ERASE-T2`)** requiring Gate C **Tier-2** (reified
+  `:Statement`/`:Source`, unbuilt in B). v1 MUST NOT be described as complete erasure for a
+  multi-source subject; full erasure of such a subject awaits `WM-ERASE-T2`.
 - **Closes:** the cross-line audit's HIGH-severity finding — Workflow B has **no right-to-erasure of any
   kind**, violating CLAUDE.md's non-negotiable that provenance "doubles as the GDPR/audit log".
 - **Amends (does NOT overturn):** [0045](0045-value-level-provenance.md) — §4 proposed `delete_source`
