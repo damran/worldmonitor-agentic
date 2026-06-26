@@ -207,7 +207,7 @@ def test_ghost_target_tagged_and_excluded(clean_graph: Neo4jClient) -> None:
     ]
     members[0].context["wm_anchor_lei"] = ["5493001KJTIIGC8Y1R12"]
     anchor = pick_anchor(members)
-    assert anchor == "lei:5493001KJTIIGC8Y1R12", "real members anchor on their durable id"
+    assert anchor == "wm-anchor-lei-5493001KJTIIGC8Y1R12", "real members anchor on their durable id"
     assert anchor is not None and "ghost" not in anchor.lower(), (
         "a :Ghost is never a cluster member, so pick_anchor never derives a ghost-backed id "
         "(D-GHOST: a ghost must never anchor)"

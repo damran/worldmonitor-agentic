@@ -35,7 +35,7 @@ from worldmonitor.resolution.pipeline import resolve_pending
 pytestmark = pytest.mark.integration
 
 Q_ACME = "Q42"
-_DURABLE = f"qid:{Q_ACME}"
+_DURABLE = f"wm-anchor-qid-{Q_ACME}"
 
 
 def _company(entity_id: str) -> dict[str, object]:

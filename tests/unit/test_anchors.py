@@ -85,16 +85,19 @@ def test_anchored_merge_is_not_keyed_wmc(ledger_session: Session) -> None:
     members = [_company("m1", wikidata_id=Q_ACME), _company("m2", wikidata_id=Q_ACME)]
     rekeyed, prior = _rekeyed(ledger_session, members, [ScoredPair("m1", "m2", 0.99)])
     assert prior.startswith("wmc-")  # the cluster's idempotency fingerprint
-    assert rekeyed.canonical_id == f"qid:{Q_ACME}"
+    assert rekeyed.canonical_id == f"wm-anchor-qid-{Q_ACME}"
     assert not rekeyed.canonical_id.startswith("wmc-")
-    assert rekeyed.entity.id == f"qid:{Q_ACME}"
+    assert rekeyed.entity.id == f"wm-anchor-qid-{Q_ACME}"
 
 
 def test_referent_map_targets_durable_id(ledger_session: Session) -> None:
     """The referent map redirects each collapsed member onto the durable id (not ``wmc-``)."""
     members = [_company("m1", wikidata_id=Q_ACME), _company("m2", wikidata_id=Q_ACME)]
     rekeyed, _ = _rekeyed(ledger_session, members, [ScoredPair("m1", "m2", 0.99)])
-    assert build_referent_map([rekeyed]) == {"m1": f"qid:{Q_ACME}", "m2": f"qid:{Q_ACME}"}
+    assert build_referent_map([rekeyed]) == {
+        "m1": f"wm-anchor-qid-{Q_ACME}",
+        "m2": f"wm-anchor-qid-{Q_ACME}",
+    }
 
 
 def test_unanchored_merge_keeps_wmc(ledger_session: Session) -> None:

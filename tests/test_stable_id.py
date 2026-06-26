@@ -17,8 +17,9 @@ verbatim):
 
     pick_anchor(members: Sequence[FtmEntity]) -> str | None
         The anchor-preferred DURABLE id over a sequence of FtM entities. Honors the precedence
-        QID > LEI > regNo > taxNo (anchor-kind-prefixed: ``qid:Q42`` / ``lei:<20-char>`` /
-        ``regno:<…>`` / ``taxno:<…>``), reading the value from the FtM identifier property
+        QID > LEI > regNo > taxNo (FtM-clean, injective ``wm-anchor-<kind>-<encoded>``, ADR 0048:
+        ``wm-anchor-qid-Q42`` / ``wm-anchor-lei-<20-char>`` / ``wm-anchor-regno-<…>`` /
+        ``wm-anchor-taxno-<…>``), reading the value from the FtM identifier property
         (``wikidataId`` / ``leiCode`` / ``registrationNumber`` / ``taxNumber``) and/or the
         ``wm_anchor_*`` context. ADR-0040 anchor-conflict guard: if members carry TWO distinct
         values at the chosen tier, FALL THROUGH to the next tier (NEVER pick ``[0]``). Returns
@@ -161,7 +162,7 @@ def _derive_durable(session: Session, members: Sequence[FtmEntity]) -> str:
     existing = canonical.lookup_durable_for_anchor(session, anchor)
     if existing is not None:
         return existing  # ADOPT — no new durable id minted
-    kind, _, value = anchor.partition(":")
+    kind, _, value = anchor.removeprefix("wm-anchor-").partition("-")
     canonical.record_canonical(session, anchor, anchor_kind=kind, anchor_value=value)
     return anchor
 
@@ -199,7 +200,7 @@ def test_reingest_anchored_entity_yields_identical_durable_id(ledger_session: Se
 
     # The durable id is IDENTICAL across re-ingest (A2) and is the anchor-prefixed QID, not a hash.
     assert first_durable == second_durable
-    assert first_durable == f"qid:{Q_ACME}"
+    assert first_durable == f"wm-anchor-qid-{Q_ACME}"
     assert not first_durable.startswith("wmc-")
 
     # CONTRAST — the old wmc- fingerprint DOES churn across the fresh member-id sets, proving wmc-
@@ -226,8 +227,8 @@ def test_reingest_adopts_existing_durable_id_no_new_mint(ledger_session: Session
     durable_1 = _derive_durable(ledger_session, first)
 
     # Adopt path: lookup must find the recorded durable id for the anchor.
-    adopted = canonical.lookup_durable_for_anchor(ledger_session, f"qid:{Q_ACME}")
-    assert adopted == durable_1 == f"qid:{Q_ACME}"
+    adopted = canonical.lookup_durable_for_anchor(ledger_session, f"wm-anchor-qid-{Q_ACME}")
+    assert adopted == durable_1 == f"wm-anchor-qid-{Q_ACME}"
 
     # Second ingest, fresh member id, same real entity -> adopts, mints nothing new.
     second = [_company("ing2-z", wikidata_id=Q_ACME)]
@@ -235,10 +236,14 @@ def test_reingest_adopts_existing_durable_id_no_new_mint(ledger_session: Session
     assert durable_2 == durable_1
 
     # Exactly ONE durable canonical row exists for this QID (no second node / no churn).
-    canon_rows = [c for (c, _alias) in _ledger_rows(ledger_session) if c == f"qid:{Q_ACME}"]
+    canon_rows = [
+        c for (c, _alias) in _ledger_rows(ledger_session) if c == f"wm-anchor-qid-{Q_ACME}"
+    ]
     assert canon_rows, "the QID durable id must be recorded in the ledger"
     durable_canonicals = {c for (c, _a) in _ledger_rows(ledger_session)}
-    assert durable_canonicals == {f"qid:{Q_ACME}"}, "adopt must not mint a second durable id"
+    assert durable_canonicals == {f"wm-anchor-qid-{Q_ACME}"}, (
+        "adopt must not mint a second durable id"
+    )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -256,7 +261,7 @@ def test_merge_records_alias_for_every_collapsed_id(ledger_session: Session) -> 
     cluster = _merge_cluster(members, [ScoredPair("m1", "m2", 0.99)])
 
     survivor = canonical.pick_anchor(members)
-    assert survivor == f"qid:{Q_ACME}"
+    assert survivor == f"wm-anchor-qid-{Q_ACME}"
     assert not survivor.startswith("wmc-"), "an anchored merge survivor must NOT be a wmc- hash"
 
     canonical.record_canonical(ledger_session, survivor, anchor_kind="qid", anchor_value=Q_ACME)
@@ -315,26 +320,25 @@ def test_two_qid_cluster_does_not_derive_durable_from_qid_tier() -> None:
     members = [_company("a", wikidata_id=Q_ACME), _company("b", wikidata_id=Q_OTHER)]
     anchor = canonical.pick_anchor(members)
     # Never one of the conflicting QIDs (the catastrophic-merge back-door D5 forbids).
-    assert anchor != f"qid:{Q_ACME}"
-    assert anchor != f"qid:{Q_OTHER}"
+    assert anchor != f"wm-anchor-qid-{Q_ACME}"
+    assert anchor != f"wm-anchor-qid-{Q_OTHER}"
     # And not a QID-tier id at all — it fell THROUGH the conflicting tier.
-    assert anchor is None or not anchor.startswith("qid:")
+    assert anchor is None or not anchor.startswith("wm-anchor-qid-")
 
 
 def test_two_qid_cluster_falls_through_to_next_clean_tier() -> None:
     """The fall-through is to the NEXT tier, not a blind None: two conflicting QIDs but a SINGLE
-    shared LEI -> the durable id is the LEI (``lei:…``), never a QID. Proves ``pick_anchor``
-    does not
-    stop at the first conflicting tier (D5: never pick [0]; §5: fall through to next NON-conflicting
-    tier).
+    shared LEI -> the durable id is the LEI (``wm-anchor-lei-…``), never a QID. Proves
+    ``pick_anchor`` does not stop at the first conflicting tier (D5: never pick [0]; §5: fall
+    through to next NON-conflicting tier).
     """
     members = [
         _company("a", wikidata_id=Q_ACME, lei=LEI_ACME),
         _company("b", wikidata_id=Q_OTHER, lei=LEI_ACME),
     ]
     anchor = canonical.pick_anchor(members)
-    assert anchor == f"lei:{LEI_ACME}"
-    assert not anchor.startswith("qid:")
+    assert anchor == f"wm-anchor-lei-{LEI_ACME}"
+    assert not anchor.startswith("wm-anchor-qid-")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -398,7 +402,7 @@ def test_reingest_concurrent_split_race_keeps_durable_stable_and_ejected_traceab
     durable_t0 = _derive_durable(ledger_session, initial)
     canonical.record_alias(ledger_session, durable_t0, "ing1-a")
     canonical.record_alias(ledger_session, durable_t0, "ing1-b")
-    assert durable_t0 == f"qid:{Q_ACME}"
+    assert durable_t0 == f"wm-anchor-qid-{Q_ACME}"
 
     # t1 — re-ingest with FRESH member ids races in; it must ADOPT the same durable id.
     reingest = [_company("ing2-a", wikidata_id=Q_ACME), _company("ing2-b", wikidata_id=Q_ACME)]

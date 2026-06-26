@@ -12,6 +12,18 @@ identifiers (Wikidata QID > LEI > registration number > tax number), anchor-kind
 across re-ingest — with a minted ``wm-mint-<uuid>`` fallback for an unanchored cluster, and a
 ``canonical_id_ledger`` recording the durable id + its superseded aliases.
 
+ADR 0048 (Gate CID-fix) — the durable id is an **FtM-clean, INJECTIVE** entity reference
+``wm-anchor-<kind>-<encoded-value>`` (kind ∈ {qid, lei, regno, taxno}). The earlier
+``f"{kind}:{value}"`` serialization (``qid:Q42``) used a **colon**, which is NOT in FtM's
+entity-reference charset (``[A-Za-z0-9.-]``): ``registry.entity.clean('qid:Q42') is None``. Because
+this durable id is rewritten into edge ENDPOINTS by referent rewriting (``referents.py`` →
+``pipeline.py``) and FtM cleans entity-typed values through ``registry.entity``, a colon endpoint
+cleaned to ``None`` and the **edge silently dropped** — corrupting the resolved graph for every
+anchored entity. ``_anchor_id`` mints an id that is a ``registry.entity.clean`` fixed point AND is
+injective over distinct raw values (two provably disjoint namespaces along the trailing
+``-<12 hex>`` SHA-256-tail shape; a non-injective id would be a silent cross-entity merge the
+catastrophic-merge guard never sees). ``wm-mint-<uuid>`` and the ``wmc-`` fingerprint are unchanged.
+
 DESIGN (spec §3): the durable id is derived OUTSIDE the nomenklatura resolver. nomenklatura already
 does anchor-preferred canonical selection but **QID-only** (``Resolver.get_canonical`` returns
 ``max(connected)`` and only a QID has ``Identifier`` ``weight=3``; LEI/regNo/taxNo are weight-1 raw
@@ -29,6 +41,8 @@ fusion of two real-world identities.
 
 from __future__ import annotations
 
+import hashlib
+import re
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -56,6 +70,47 @@ __all__ = [
 ]
 
 _MINT_PREFIX = "wm-mint-"
+
+# ADR 0048 — the FtM-clean, INJECTIVE anchor-id serialization. ``_ANCHOR_ID_PREFIX`` namespaces
+# every anchor-derived durable id; ``_HASH_TAIL`` is the SHA-256-tail shape (``-<12 hex>``) that
+# partitions the clean (verbatim-value) and hashed namespaces — ``[0-9a-f]`` keeps the tail clean.
+_ANCHOR_ID_PREFIX = "wm-anchor-"
+_HASH_TAIL = re.compile(r"-[0-9a-f]{12}$")
+
+
+def _anchor_id(kind: str, value: str) -> str:
+    """Mint an FtM-clean, INJECTIVE durable id ``wm-anchor-<kind>-<encoded-value>`` (ADR 0048 §3.2).
+
+    Pure / deterministic in ``(kind, raw value)`` — re-ingest stability falls straight out. The id
+    is a ``registry.entity.clean`` FIXED POINT for EVERY value (so it survives as a node id AND as a
+    rewritten edge endpoint, unlike the old ``f"{kind}:{value}"`` colon form that cleaned to
+    ``None`` and dropped the edge), and it is INJECTIVE over distinct raw ``(kind, value)`` pairs (a
+    non-injective id would be a silent cross-entity merge the catastrophic-merge guard never sees):
+
+    * **clean (verbatim) branch** — ``wm-anchor-<kind>-<value>`` when the value is already an
+      FtM-safe token (QID / LEI / a clean regNo such as ``GOV-9`` always take this branch, staying
+      legible); the value is embedded verbatim, so distinct values → distinct ids.
+    * **hashed branch** — append ``-<sha256(ORIGINAL value)[:12]>`` iff (a) sanitisation changed the
+      value, OR (b) the verbatim candidate is not an FtM fixed point (the CID-5 trailing-``.``/``-``
+      / empty class), OR (c) the verbatim candidate would already end in ``-<12 hex>`` (forced into
+      the hashed namespace so it can never alias a hostile value's hashed id). Digesting the
+      ORIGINAL value keeps sanitisation-collision twins (``HRB/12`` vs ``HRB-12`` both → ``HRB-12``)
+      distinct.
+
+    A hashed id ALWAYS ends in ``-<12 hex>``; a clean id NEVER does — the two namespaces are thus
+    provably disjoint, and per-kind prefixes keep kinds disjoint. Only hostile regNo/taxNo hash.
+    """
+    safe = re.sub(r"[^A-Za-z0-9.-]", "-", value)
+    candidate = f"{_ANCHOR_ID_PREFIX}{kind}-{safe}"
+    if (
+        safe != value  # (a) sanitisation changed the value
+        or registry.entity.clean(candidate) != candidate  # (b) not an FtM fixed point (CID-5)
+        or _HASH_TAIL.search(candidate)  # (c) verbatim id would land in the hashed namespace
+    ):
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        candidate = f"{_ANCHOR_ID_PREFIX}{kind}-{safe}-{digest}"
+    return candidate
+
 
 # The DURABLE-id precedence (spec §4, first-hit-wins): QID > LEI > regNo > taxNo. This is a
 # SEPARATE ordered list from ``ontology.anchors.CANONICAL_ID_FIELDS`` (which has the wrong storage
@@ -124,10 +179,12 @@ def _tier_values(entity: FtmEntity, tier: _Tier) -> set[str]:
 def pick_anchor(members: Sequence[FtmEntity]) -> str | None:
     """Return the anchor-preferred DURABLE id over ``members``, or ``None`` if none is usable.
 
-    Honors the precedence QID > LEI > regNo > taxNo (anchor-kind-prefixed: ``qid:Q42`` /
-    ``lei:<20-char>`` / ``regno:<…>`` / ``taxno:<…>``), reading each tier from the FtM identifier
-    property (``wikidataId`` / ``leiCode`` / ``registrationNumber`` / ``taxNumber``) and/or the
-    ``wm_anchor_*`` context. DB-free and pure (unit-testable like ``cluster_and_merge``).
+    Honors the precedence QID > LEI > regNo > taxNo, serialized by ``_anchor_id`` as the FtM-clean,
+    injective ``wm-anchor-<kind>-<encoded-value>`` (ADR 0048: ``wm-anchor-qid-Q42`` /
+    ``wm-anchor-lei-<20-char>`` / ``wm-anchor-regno-<…>`` / ``wm-anchor-taxno-<…>``), reading each
+    tier from the FtM identifier property (``wikidataId`` / ``leiCode`` / ``registrationNumber`` /
+    ``taxNumber``) and/or the ``wm_anchor_*`` context. DB-free and pure (unit-testable like
+    ``cluster_and_merge``).
 
     ADR 0040 anchor-conflict guard: if the cluster's members carry TWO DISTINCT values at a tier,
     that tier is in conflict and is SKIPPED — ``pick_anchor`` falls through to the next
@@ -140,7 +197,7 @@ def pick_anchor(members: Sequence[FtmEntity]) -> str | None:
         for member in members:
             union |= _tier_values(member, tier)
         if len(union) == 1:
-            return f"{tier.kind}:{next(iter(union))}"
+            return _anchor_id(tier.kind, next(iter(union)))
         # 0 values → tier empty, try the next; >1 distinct values → ADR-0040 conflict at this
         # tier, FALL THROUGH (never pick an arbitrary winner from a conflicting anchor set).
     return None
@@ -150,7 +207,7 @@ def mint() -> str:
     """Mint a durable id for an unanchored cluster with no prior ledger entry.
 
     Shape ``wm-mint-<uuid>`` — distinct from the ``wmc-`` idempotency fingerprint and from the
-    anchor-prefixed forms (``qid:``/``lei:``/``regno:``/``taxno:``).
+    anchor-prefixed forms (``wm-anchor-<kind>-…`` for kind ∈ {qid, lei, regno, taxno}).
     """
     return f"{_MINT_PREFIX}{uuid.uuid4()}"
 
@@ -230,8 +287,8 @@ def lookup_durable_for_anchor(session: Session, anchor_id: str) -> str | None:
     """The durable id already recorded for ``anchor_id`` (the ADOPT read), else ``None``.
 
     ``anchor_id`` is an anchor-kind-prefixed durable id (``pick_anchor``'s output, e.g.
-    ``qid:Q42``). A re-ingested anchored member adopts this existing durable id instead of minting
-    a new one — no id churn, no second node (spec §7 adopt).
+    ``wm-anchor-qid-Q42``). A re-ingested anchored member adopts this existing durable id instead of
+    minting a new one — no id churn, no second node (spec §7 adopt).
     """
     stmt = select(CanonicalIdLedger.canonical_id).where(
         CanonicalIdLedger.canonical_id == anchor_id,
@@ -287,8 +344,10 @@ def record_durable_id(
     is EVER derived from a ``wmc-`` hash — ``wmc-`` only ever appears here as the fallback value of
     ``durable_id`` itself (an unanchored merge) or as a recorded ``prior_id`` alias.
     """
-    kind, sep, value = durable_id.partition(":")
-    if sep:
+    if durable_id.startswith(_ANCHOR_ID_PREFIX):
+        # ADR 0048: the colon discriminator is gone — the anchor kind is the first token after the
+        # ``wm-anchor-`` prefix (kinds never contain a hyphen), the encoded value is the remainder.
+        kind, _, value = durable_id.removeprefix(_ANCHOR_ID_PREFIX).partition("-")
         record_canonical(session, durable_id, anchor_kind=kind, anchor_value=value)
     elif durable_id.startswith(_MINT_PREFIX):
         record_canonical(session, durable_id, anchor_kind="mint", anchor_value="")
