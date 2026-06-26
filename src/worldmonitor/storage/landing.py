@@ -123,6 +123,11 @@ class LandingStore:
         erasing ``"ofac/sdn/"`` never sweeps ``"ofac-eu/sdn/"``. Missing keys are a no-op, so a
         repeat erase returns 0; the count returned is what ``erase_source`` audits as
         ``landing_objects_deleted``.
+
+        A partial ``DeleteObjects`` failure (a non-empty ``Errors`` array — e.g. object lock /
+        retention / a transient error) RAISES rather than silently under-reporting: on a GDPR
+        right-to-erasure path a left-behind object must surface (and ``erase_source`` is idempotent,
+        so the operator retries), never report a misleading "request honored" count.
         """
         keys = self.list_keys(prefix=prefix)
         deleted = 0
@@ -132,5 +137,11 @@ class LandingStore:
                 Bucket=self.bucket,
                 Delete={"Objects": [{"Key": key} for key in batch]},
             )
+            errors = response.get("Errors")
+            if errors:
+                raise RuntimeError(
+                    f"delete_prefix({prefix!r}): {len(errors)} object(s) failed to delete "
+                    f"(e.g. {errors[0]}); landing erase INCOMPLETE - retry (idempotent)"
+                )
             deleted += len(response.get("Deleted", []))
         return deleted

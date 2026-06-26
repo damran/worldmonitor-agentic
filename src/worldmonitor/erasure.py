@@ -72,21 +72,19 @@ def _landing_prefix(source_id: str) -> str:
     TRUE prefix of the real ingest key), and ``/``-terminates so a prefix delete is collision-safe
     (erasing ``"ofac:sdn"`` → ``"ofac/sdn/"`` never sweeps ``"ofac-eu:sdn"`` → ``"ofac-eu/sdn/"``).
 
-    OVER-DELETE GUARD: a ``source_id`` lacking ``':'`` (a bare ``connector_id``, or ``""``) is
-    REFUSED — it would derive a bare ``"connector/"`` prefix sweeping EVERY dataset under that
-    connector (``""`` → ``"/"`` would sweep the whole bucket). A connector-wide / whole-bucket erase
-    is never an intended GDPR right-to-erasure scope, so it raises rather than over-deleting.
+    OVER-DELETE GUARD: a ``source_id`` without BOTH a non-empty ``connector_id`` AND a non-empty
+    ``dataset`` is REFUSED. A bare ``connector_id`` (no ``':'``), an empty dataset (``"conn:"`` —
+    the trailing-colon case), an empty connector (``":ds"``), or ``""`` would each derive a
+    connector-wide ``"connector/"`` (or whole-bucket ``"/"``) prefix sweeping EVERY dataset under
+    that connector — never an intended GDPR erasure scope, so it raises rather than over-deleting.
     """
-    if ":" not in source_id:
+    connector_id, sep, dataset = source_id.partition(":")
+    if not sep or not connector_id or not dataset.strip():
         raise ValueError(
-            "erase: source_id must be '<connector_id>:<dataset>' (a ':' is required); refusing the "
-            f"connector-wide / whole-bucket prefix that {source_id!r} would derive"
+            "erase: source_id must be '<connector_id>:<dataset>' with a non-empty connector AND "
+            f"dataset; refusing the connector-wide / whole-bucket prefix {source_id!r} would derive"
         )
-    connector_id, _, dataset = source_id.partition(":")
-    segments = [connector_id]
-    if dataset:
-        segments.append(_safe_segment(dataset))
-    return "/".join(segments) + "/"
+    return "/".join([connector_id, _safe_segment(dataset)]) + "/"
 
 
 def _redact_queue(session: Session, source_id: str) -> int:
@@ -155,10 +153,11 @@ def erase_source(
     """
     # Validate BEFORE touching any store or staging the audit row: neither a connector-wide /
     # whole-bucket source_id nor a blank authorization may reach session / landing / neo4j.
-    if ":" not in source_id:
+    connector_id, sep, dataset = source_id.partition(":")
+    if not sep or not connector_id or not dataset.strip():
         raise ValueError(
-            "erase_source: source_id must be '<connector_id>:<dataset>' (a ':' is required); "
-            f"refusing the connector-wide / whole-bucket erase that {source_id!r} would trigger"
+            "erase_source: source_id must be '<connector_id>:<dataset>' with a non-empty "
+            f"connector AND dataset; refusing a connector-wide/whole-bucket erase ({source_id!r})"
         )
     if not authorized_by.strip():
         raise ValueError(
