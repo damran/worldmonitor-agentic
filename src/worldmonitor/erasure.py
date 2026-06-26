@@ -71,7 +71,17 @@ def _landing_prefix(source_id: str) -> str:
     This REUSES that ``_safe_segment`` sanitizer (no duplicated sanitizer — the derived prefix is a
     TRUE prefix of the real ingest key), and ``/``-terminates so a prefix delete is collision-safe
     (erasing ``"ofac:sdn"`` → ``"ofac/sdn/"`` never sweeps ``"ofac-eu:sdn"`` → ``"ofac-eu/sdn/"``).
+
+    OVER-DELETE GUARD: a ``source_id`` lacking ``':'`` (a bare ``connector_id``, or ``""``) is
+    REFUSED — it would derive a bare ``"connector/"`` prefix sweeping EVERY dataset under that
+    connector (``""`` → ``"/"`` would sweep the whole bucket). A connector-wide / whole-bucket erase
+    is never an intended GDPR right-to-erasure scope, so it raises rather than over-deleting.
     """
+    if ":" not in source_id:
+        raise ValueError(
+            "erase: source_id must be '<connector_id>:<dataset>' (a ':' is required); refusing the "
+            f"connector-wide / whole-bucket prefix that {source_id!r} would derive"
+        )
     connector_id, _, dataset = source_id.partition(":")
     segments = [connector_id]
     if dataset:
@@ -143,6 +153,19 @@ def erase_source(
     dead-letter redaction + the audit row) are staged on ``session`` for the CALLER to commit; the
     landing + graph removals are applied immediately.
     """
+    # Validate BEFORE touching any store or staging the audit row: neither a connector-wide /
+    # whole-bucket source_id nor a blank authorization may reach session / landing / neo4j.
+    if ":" not in source_id:
+        raise ValueError(
+            "erase_source: source_id must be '<connector_id>:<dataset>' (a ':' is required); "
+            f"refusing the connector-wide / whole-bucket erase that {source_id!r} would trigger"
+        )
+    if not authorized_by.strip():
+        raise ValueError(
+            "erase_source: authorized_by must name the human operator who authorized the erase "
+            "(non-blank); a GDPR erase can never run (or be audited) anonymously"
+        )
+
     run = TaskRun(id=str(uuid.uuid4()), kind="erase", status="running")
     session.add(run)
     try:

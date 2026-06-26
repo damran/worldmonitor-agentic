@@ -24,6 +24,10 @@ from worldmonitor.settings import Settings, get_settings
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
+# S3/MinIO ``DeleteObjects`` accepts at most 1000 keys per call (the same cap ``ListObjectsV2``
+# applies per page), so a prefix sweep must batch its deletes in <=1000-key chunks.
+_S3_DELETE_BATCH = 1000
+
 
 @dataclass(frozen=True, slots=True)
 class LandingStore:
@@ -84,9 +88,20 @@ class LandingStore:
         return response["Body"].read()
 
     def list_keys(self, prefix: str = "") -> list[str]:
-        """List object keys under ``prefix`` (used by tests/inspection)."""
-        response = self.client.list_objects_v2(Bucket=self.bucket, Prefix=prefix)
-        return [key for obj in response.get("Contents", []) if (key := obj.get("Key"))]
+        """List EVERY object key under ``prefix``, paging past the S3/MinIO 1000-keys-per-page cap.
+
+        A single ``list_objects_v2`` returns at most 1000 keys (``IsTruncated`` + a
+        ``NextContinuationToken`` for the rest); this walks every page via the boto3 paginator so a
+        GDPR erase of a >1000-object source sees the source's ENTIRE landed footprint — not just its
+        first page (Gate B-4a / ADR 0049).
+        """
+        paginator = self.client.get_paginator("list_objects_v2")
+        return [
+            key
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix)
+            for obj in page.get("Contents", [])
+            if (key := obj.get("Key"))
+        ]
 
     def delete(self, key: str) -> None:
         """Delete the object at ``key`` (idempotent — deleting a missing key is a no-op in S3).
@@ -98,15 +113,24 @@ class LandingStore:
         self.client.delete_object(Bucket=self.bucket, Key=key)
 
     def delete_prefix(self, prefix: str) -> int:
-        """Delete EVERY object under ``prefix`` and return how many were deleted (idempotent).
+        """Delete EVERY object under ``prefix`` and return the TRUE count deleted (idempotent).
 
-        Lists the keys under ``prefix`` then deletes each. Keyed on a source's
-        ``"{connector_id}/{safe_dataset}/"`` prefix (Gate B-4a / ADR 0049), this erases the source's
-        queue-referenced, dead-letter-referenced, AND orphaned landed bytes in one sweep — more
-        complete than a per-queue-row delete. The ``/``-terminated prefix is collision-safe: erasing
-        ``"ofac/sdn/"`` never sweeps ``"ofac-eu/sdn/"``. Returns 0 (no-op) when the prefix is empty.
+        Lists ALL keys under ``prefix`` (paged past the 1000-key list cap), then deletes them in
+        <=1000-key batches because S3 ``DeleteObjects`` also caps at 1000 keys/call. Keyed on a
+        source's ``"{connector_id}/{safe_dataset}/"`` prefix (Gate B-4a / ADR 0049), this erases the
+        source's queue-referenced, dead-letter-referenced, AND orphaned landed bytes in one sweep —
+        more complete than a per-queue-row delete. The ``/``-terminated prefix is collision-safe:
+        erasing ``"ofac/sdn/"`` never sweeps ``"ofac-eu/sdn/"``. Missing keys are a no-op, so a
+        repeat erase returns 0; the count returned is what ``erase_source`` audits as
+        ``landing_objects_deleted``.
         """
         keys = self.list_keys(prefix=prefix)
-        for key in keys:
-            self.delete(key)
-        return len(keys)
+        deleted = 0
+        for start in range(0, len(keys), _S3_DELETE_BATCH):
+            batch = keys[start : start + _S3_DELETE_BATCH]
+            response = self.client.delete_objects(
+                Bucket=self.bucket,
+                Delete={"Objects": [{"Key": key} for key in batch]},
+            )
+            deleted += len(response.get("Deleted", []))
+        return deleted
