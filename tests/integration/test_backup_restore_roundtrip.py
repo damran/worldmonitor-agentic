@@ -575,6 +575,86 @@ def test_restore_aborts_on_incomplete_backup_without_touching_any_store(
     engine.dispose()
 
 
+def test_restore_aborts_on_corrupt_backup_artifacts_without_touching_any_store(
+    minio: tuple[str, str, str], postgres_dsn: str, clean_graph: Neo4jClient, tmp_path: Any
+) -> None:
+    """A backup that passes the manifest check but is CORRUPT in its CONTENTS — a landing object
+    byte-file the index lists is missing (the canonical bit-rot / partial-copy DR input), or a Neo4j
+    node carries a null id — must make ``restore()`` RAISE BEFORE any store is wiped. Pins
+    validate-before-touch over artifact CONTENTS, not just presence: Neo4j + MinIO imports are
+    non-transactional, so a wipe-then-discover-corrupt restore would destroy the live stores."""
+    landing = _landing(minio)
+    engine, sessions = _db(postgres_dsn)
+    ensure_constraints(clean_graph)
+    from worldmonitor.backup import backup, restore
+
+    write_entities(
+        clean_graph,
+        [
+            _stamped(
+                {
+                    "id": "seed-node",
+                    "schema": "Company",
+                    "properties": {"name": ["KeepMe Ltd"]},
+                    "datasets": ["t"],
+                },
+                Provenance("seed:src", "2026-06-26T00:00:00Z", "A", "s3://seed/keep.json"),
+            )
+        ],
+    )
+    with sessions() as s:
+        s.add(
+            ResolverJudgement(
+                id=str(uuid.uuid4()),
+                left_id="keep-a",
+                right_id="keep-b",
+                judgement="negative",
+                source="signoff",
+            )
+        )
+        s.commit()
+    landing.put("seed/keep.json", b"keep-me")
+
+    base_nodes = _node_ids(clean_graph)
+    with sessions() as s:
+        base_counts = _pg_counts(s)
+    base_keys = landing.list_keys("")
+
+    def _assert_untouched() -> None:
+        assert _node_ids(clean_graph) == base_nodes, "a corrupt restore must not wipe the graph"
+        with sessions() as s:
+            assert _pg_counts(s) == base_counts, "a corrupt restore must not truncate Postgres"
+            assert ("keep-a", "keep-b", "negative") in _judgements(s)
+        assert landing.list_keys("") == base_keys, "a corrupt restore must not empty the bucket"
+        assert landing.get("seed/keep.json") == b"keep-me"
+
+    # corruption A — a landing object byte-file the index lists is missing (bit-rot / partial copy).
+    dest_a = tmp_path / "corrupt-landing"
+    with sessions() as s:
+        backup(neo4j=clean_graph, session=s, landing=landing, dest=dest_a)
+    obj_files = [p for p in (dest_a / "landing").rglob("*") if p.is_file()]
+    assert obj_files, "the backup must have mirrored at least one landing object"
+    obj_files[0].unlink()  # the index still lists it; the byte-file is gone
+    with sessions() as s, pytest.raises(Exception):  # noqa: B017
+        restore(neo4j=clean_graph, session=s, landing=landing, src=dest_a)
+    _assert_untouched()
+
+    # corruption B — a Neo4j node with a null id (would raise mid-MERGE, AFTER the DETACH DELETE).
+    dest_b = tmp_path / "corrupt-neo4j"
+    with sessions() as s:
+        backup(neo4j=clean_graph, session=s, landing=landing, dest=dest_b)
+    neo_path = dest_b / "neo4j.json"
+    neo = json.loads(neo_path.read_text())
+    assert neo["nodes"], "the backup must have captured at least one node"
+    neo["nodes"][0]["props"]["id"] = ""  # corrupt the id
+    neo_path.write_text(json.dumps(neo))
+    with sessions() as s, pytest.raises(Exception):  # noqa: B017
+        restore(neo4j=clean_graph, session=s, landing=landing, src=dest_b)
+    _assert_untouched()
+
+    engine.dispose()
+
+
 # ======================================================================== R3 — halt-loud backup
 
 

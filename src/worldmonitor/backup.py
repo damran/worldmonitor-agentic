@@ -452,10 +452,15 @@ def backup(
 
 
 def _validate_restore_source(src: Path) -> dict[str, Any]:
-    """Validate the manifest + all three artifacts BEFORE any store is touched, else raise.
+    """Validate the manifest + ALL three artifacts — incl. the landing byte-files and the Neo4j
+    payload's node ids / labels / edge types — BEFORE any store is touched, else raise.
 
-    A missing / ``complete:false`` / missing-artifact backup aborts with NOTHING touched
-    (validate-before-wipe — A's ``a5bb7d5`` #4): a wipe then discovering a bad backup is total loss.
+    A missing / ``complete:false`` / missing-or-corrupt-artifact backup aborts with NOTHING touched
+    (validate-before-wipe — A's ``a5bb7d5`` #4): the canonical DR input is a copied / rsync'd /
+    bit-rotted backup, and the Neo4j + MinIO imports are non-transactional (auto-committed, not
+    rolled back), so this pre-flight is the load-bearing half of the guarantee — anything an
+    ``_import_*`` step would raise on (a missing landing object, a null node id, an off-vocabulary
+    label / edge type) must be caught HERE, before the destructive ``DETACH DELETE`` / bucket wipe.
     """
     manifest_path = src / _MANIFEST
     if not manifest_path.exists():
@@ -470,6 +475,37 @@ def _validate_restore_source(src: Path) -> dict[str, Any]:
         if not path.exists():
             raise FileNotFoundError(f"restore: complete manifest but missing artifact {path}")
         json.loads(path.read_text())  # must be parseable
+
+    # Pre-validate the Neo4j payload so a null id / off-vocabulary label / bad edge type is caught
+    # BEFORE _import_neo4j's destructive DETACH DELETE (validate-before-touch).
+    neo = json.loads((src / _NEO4J).read_text())
+    allowed_labels = _allowed_node_labels()
+    for node in neo.get("nodes", []):
+        if not node.get("props", {}).get("id"):
+            raise ValueError("restore: neo4j artifact has a node with a missing/empty id")
+        for label in node.get("labels", []):
+            _validate_token(label, allowed_labels, "node label")
+    allowed_types = _allowed_edge_types()
+    for edge in neo.get("edges", []):
+        _validate_token(edge["type"], allowed_types, "relationship type")
+        if not edge.get("start") or not edge.get("end"):
+            raise ValueError("restore: neo4j artifact has an edge with a missing endpoint id")
+
+    # Pre-validate every landing object byte-file the index references exists + is path-safe, BEFORE
+    # _import_landing wipes the live bucket (mirror _verify_backup_artifacts at restore time). A
+    # backup corrupted AFTER creation (valid index + complete manifest, but a missing object file)
+    # must NOT pass validation and then destroy the live stores.
+    keys = json.loads((src / _LANDING_INDEX).read_text())
+    landing_dir = src / _LANDING_DIR
+    base = landing_dir.resolve()
+    for key in keys:
+        obj = (landing_dir / key).resolve()
+        if not obj.is_relative_to(base):
+            raise ValueError(f"restore: landing key {key!r} escapes the backup directory")
+        if not obj.exists():
+            raise FileNotFoundError(
+                f"restore: landing_index lists {key!r} but {obj} is missing (corrupt backup)"
+            )
     return manifest
 
 
@@ -505,11 +541,14 @@ def restore(
 ) -> RestoreResult:
     """Rebuild all three stores from a verified backup at ``src`` (destructive — a runbook action).
 
-    All-or-nothing + halt-loud: validates the manifest + every artifact BEFORE touching any store;
-    stages the Postgres rebuild on ``session`` (the CALLER commits only after Neo4j + MinIO succeed,
-    so a later failure rolls the relational restore back); re-verifies every store's count against
-    the manifest. Reproduces — never re-clusters / un-merges / re-scores — the human-decision rows +
-    the ``canonical_id_ledger`` byte-for-byte (H-1 + canonical-id byte-identity invariants).
+    Validate-before-touch + halt-loud + idempotent-retry: fully validates the manifest + every
+    artifact (incl. landing byte-files + the Neo4j node ids/labels/edge types) BEFORE touching any
+    store, so a corrupt/partial backup raises with NOTHING wiped. The Postgres rebuild is staged on
+    ``session`` (the CALLER commits only after Neo4j + MinIO succeed, so a later failure rolls the
+    relational restore back); Neo4j + MinIO are NOT transactional — but restore always wipes-then-
+    rebuilds, so re-running the SAME (immutable) backup is idempotent. Re-verifies every store's
+    count against the manifest. Reproduces — never re-clusters / un-merges / re-scores — the
+    human-decision rows + the ``canonical_id_ledger`` byte-for-byte (H-1 + canonical-id identity).
     """
     src = Path(src)
     manifest = _validate_restore_source(src)

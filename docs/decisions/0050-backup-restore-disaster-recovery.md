@@ -78,10 +78,15 @@ so the **application identity (the canonical id) round-trips byte-for-byte** eve
 
 **5. Halt loudly on partial failure.** Backup writes a `manifest.json` (per-store counts +
 `complete:true`) **last**, only after all three stores are captured and verified non-empty/present,
-and **raises** on any store-export failure. Restore **validates** the manifest + all three artifacts
-**before touching any store** (abort, nothing touched, if incomplete), restores Postgres inside a
-**single transaction** (commit only after Neo4j + MinIO also succeed), and **re-verifies post-restore
-counts against the manifest** — a half-restore can never return success.
+and **raises** on any store-export failure. Restore **fully validates before touching any store** —
+the manifest, all three artifacts' presence + parseability, **every landing object byte-file the
+index references**, and **every Neo4j node's id / label and edge type** (so a corrupt / partially-
+copied / bit-rotted backup raises with NOTHING wiped — the canonical DR input). It restores Postgres
+inside a **single transaction** (committed by the caller only after Neo4j + MinIO succeed, so a later
+failure rolls the relational data back) and **re-verifies post-restore counts against the manifest**.
+Caveat (honest): Neo4j + MinIO imports are **not** transactionally rolled back — but restore always
+wipes-then-rebuilds, so re-running the **same immutable backup** is idempotent. The guarantee is
+**validate-before-touch + relational-atomic + idempotent-retry**, not cross-store atomic.
 
 **6. The round-trip test is the deliverable.** `test_backup_restore_roundtrip.py` seeds an anchored
 merge (a `wm-anchor-qid-*` canonical node + ledger), an edge with `prov_*`, a topic label, a human
