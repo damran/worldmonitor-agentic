@@ -87,3 +87,26 @@ class LandingStore:
         """List object keys under ``prefix`` (used by tests/inspection)."""
         response = self.client.list_objects_v2(Bucket=self.bucket, Prefix=prefix)
         return [key for obj in response.get("Contents", []) if (key := obj.get("Key"))]
+
+    def delete(self, key: str) -> None:
+        """Delete the object at ``key`` (idempotent — deleting a missing key is a no-op in S3).
+
+        Part of the GDPR right-to-erasure surface (Gate B-4a / ADR 0049): removing a source's raw
+        PII bytes from the landing zone. S3 ``DeleteObject`` succeeds whether or not the key exists,
+        so a repeat erase of an already-deleted object is a clean no-op.
+        """
+        self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete EVERY object under ``prefix`` and return how many were deleted (idempotent).
+
+        Lists the keys under ``prefix`` then deletes each. Keyed on a source's
+        ``"{connector_id}/{safe_dataset}/"`` prefix (Gate B-4a / ADR 0049), this erases the source's
+        queue-referenced, dead-letter-referenced, AND orphaned landed bytes in one sweep — more
+        complete than a per-queue-row delete. The ``/``-terminated prefix is collision-safe: erasing
+        ``"ofac/sdn/"`` never sweeps ``"ofac-eu/sdn/"``. Returns 0 (no-op) when the prefix is empty.
+        """
+        keys = self.list_keys(prefix=prefix)
+        for key in keys:
+            self.delete(key)
+        return len(keys)
