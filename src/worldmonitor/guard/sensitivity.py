@@ -39,29 +39,18 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only import; avoids a runtime gra
 # G5 — NOT inverted by this gate; conservative-by-default).
 MAX_AUTO_MERGE_SIZE = 10
 
-# Reason markers for the NEWLY-DETECTED sensitivity signals (Gate E slice-2) that NO prior approval
-# could have considered: the Stage-2 k-hop graph proximity flag and the Stage-3 Chow abstain band.
-# Both are non-legacy-visible (the legacy guard had no graph/score awareness), so — like a
-# newly-broadened topic sensitivity (``is_newly_broadened_sensitive``) — they MUST NOT be silently
-# un-flagged by a stale approved-group exemption (spec §5 / ADR 0047 Decision 5;
-# :func:`is_nonexemptible_reason`). They are baked into the Stage-2/Stage-3 reason strings so the
-# pipeline can classify the flag from its returned reason without re-running the guard.
-_KHOP_REASON_MARKER = "graph hop(s) of a risk-labelled node"
-_ABSTAIN_REASON_MARKER = "marginal-confidence abstain band"
-
-
-def is_nonexemptible_reason(reason: str) -> bool:
-    """True iff ``reason`` is a Stage-2 (k-hop) or Stage-3 (Chow) newly-detected sensitivity flag.
-
-    The approved-group exemption (``pipeline.py``) un-flags a cluster ⊆ an approved group, but a
-    NEWLY-DETECTED sensitivity a prior approval could not have considered MUST NOT be un-flagged
-    (spec §5 / ADR 0047 Decision 5). Stage-1 newly-broadened topic sensitivity is handled by
-    :func:`is_newly_broadened_sensitive` (it inspects the members); Stage-2/Stage-3 flags are not
-    member-topic-derived, so they are classified here off the guard's own reason string. The size
-    flag and the anchor-conflict flag (ADR 0040) and a legacy-visible topic flag are exemptible and
-    do NOT match here.
-    """
-    return _KHOP_REASON_MARKER in reason or _ABSTAIN_REASON_MARKER in reason
+# Non-exemptibility (the approved-group-exemption fence in ``pipeline.py``) is computed by the
+# STRUCTURED probe :func:`has_nonexemptible_sensitivity` (Gate E slice-3; spec §15 / ADR 0047
+# Decision 5 refinement), NOT by substring-matching ``needs_review``'s returned reason. The probe
+# evaluates ALL THREE newly-detectable sensitivity signals a prior approval could not have
+# considered — a newly-broadened TOPIC (:func:`is_newly_broadened_sensitive`), Stage-2 k-hop graph
+# proximity (:func:`_risk_within_khop`), and the Stage-3 Chow abstain band — INDEPENDENTLY of
+# ``needs_review``'s first-flag short-circuit, so an exemptible-first flag (size / anchor-conflict /
+# legacy-caught topic) can never MASK a co-occurring non-exemptible signal (Finding B / E-MASK). The
+# human-readable Stage-2/Stage-3 reason strings stay (they are the audit / ``record_merge`` reason)
+# but are NO LONGER load-bearing for the fence — the deleted ``is_nonexemptible_reason`` + marker
+# constants substring-matched a free-text reason that also embeds hostile data-bearing fields
+# (``member_id``, anchor VALUES — Finding F), which the structured probe removes entirely.
 
 
 # The LEGACY ADR-0020 denylist (review.py:22, now deleted as a sensitivity source of truth). It is
@@ -254,7 +243,7 @@ def needs_review(
                 return (
                     True,
                     f"member {member_id} is within {settings.sensitivity_khop_depth} "
-                    f"{_KHOP_REASON_MARKER}",
+                    "graph hop(s) of a risk-labelled node",
                 )
 
     # Stage 3 — Chow (1970) reject-option abstain band over the cluster's ALREADY-COMPUTED score.
@@ -266,7 +255,30 @@ def needs_review(
     if settings.sensitivity_abstain_low <= cluster.score < settings.sensitivity_abstain_high:
         return (
             True,
-            f"cluster score {cluster.score:.3f} is in the {_ABSTAIN_REASON_MARKER} "
+            f"cluster score {cluster.score:.3f} is in the marginal-confidence abstain band "
             f"[{settings.sensitivity_abstain_low}, {settings.sensitivity_abstain_high})",
         )
     return False, ""
+
+
+def has_nonexemptible_sensitivity(
+    cluster: ResolvedCluster,
+    by_id: Mapping[str, FtmEntity],
+    *,
+    neo4j: Neo4jClient | None = None,
+) -> bool:
+    """True iff the cluster carries a sensitivity a prior identity-approval could NOT have
+    considered — evaluated INDEPENDENTLY of needs_review's first-flag short-circuit (spec §15;
+    ADR 0047 Dec 5 refinement). Newly-broadened TOPIC sensitivity OR Stage-2 k-hop graph
+    proximity OR the Stage-3 Chow abstain band. Size, anchor-conflict, and legacy-caught topic
+    flags are EXEMPTIBLE and never make this True. Strictly stricter -> person-NEUTRAL."""
+    for member_id in cluster.member_ids:
+        member = by_id.get(member_id)
+        if member is not None and is_newly_broadened_sensitive(member):
+            return True
+    settings = get_settings()
+    if neo4j is not None and settings.sensitivity_khop_depth > 0:
+        for member_id in cluster.member_ids:
+            if _risk_within_khop(neo4j, member_id, settings.sensitivity_khop_depth):
+                return True
+    return settings.sensitivity_abstain_low <= cluster.score < settings.sensitivity_abstain_high

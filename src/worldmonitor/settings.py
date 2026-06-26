@@ -93,7 +93,9 @@ class Settings(BaseSettings):
     #                              ⇒ an empty half-open interval ⇒ the band is OFF (the default).
     # The band defaults to ``[0.92, 0.92)`` (empty) so slice-2 over-parks NOTHING until a human
     # tunes it; ``low > high`` is rejected by the validator below (an inverted, nonsensical band).
-    sensitivity_khop_depth: int = Field(default=1, ge=0)
+    # le=4 caps the f-string-inlined ``[*1..k]`` traversal (exponential in k) so a misconfiguration
+    # cannot stall the resolve hot path on a dense graph (spec §15 / ADR 0047 §6); 0 = kill-switch.
+    sensitivity_khop_depth: int = Field(default=1, ge=0, le=4)
     sensitivity_abstain_low: float = Field(default=0.92, ge=0.0, le=1.0)
     sensitivity_abstain_high: float = Field(default=0.92, ge=0.0, le=1.0)
 

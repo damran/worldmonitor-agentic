@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 from worldmonitor.db.models import ErQueueItem, IngestDeadLetter, ResolverJudgement
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
-from worldmonitor.guard.sensitivity import is_nonexemptible_reason
+from worldmonitor.guard.sensitivity import has_nonexemptible_sensitivity
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
 from worldmonitor.ontology.validation import validate_or_raise
 from worldmonitor.resolution.audit import record_merge, record_merge_alert
@@ -50,7 +50,7 @@ from worldmonitor.resolution.merge import (
     rekey_cluster,
 )
 from worldmonitor.resolution.referents import build_referent_map, rewrite_referents
-from worldmonitor.resolution.review import is_newly_broadened_sensitive, needs_review
+from worldmonitor.resolution.review import needs_review
 from worldmonitor.resolution.splink_model import score_pairs
 from worldmonitor.settings import get_settings
 
@@ -357,31 +357,36 @@ def _resolve_batch(
 
         flagged, reason = needs_review(cluster, by_id, neo4j=neo4j)
         members = set(cluster.member_ids)
-        # The approved-group-exemption fence (Gate E / ADR 0047 Decision 5). This implements the
-        # user's decision "re-review a newly-detected sensitivity ONCE": deny-by-default now flags a
-        # cluster the legacy denylist MISSED (e.g. a role.rca / crime.war / off-ontology member), so
-        # a cluster whose members are a subset of an approval recorded BEFORE that topic was
-        # understood sensitive must NOT be silently un-flagged -> auto-merged — a sign-off approving
-        # "these records are the same entity" could not have considered a risk it never saw, so the
-        # cluster re-parks for a fresh human look. The override is mechanically SCOPED TO
-        # legacy-visibility (is_newly_broadened_sensitive): a sensitivity the legacy guard ALREADY
-        # caught (e.g. `sanction`) was visible at approval time, so it stays exemptible — as do the
-        # SIZE flag and the anchor-conflict flag (ADR 0040). That scoping is why it is "once," not
-        # forever-churn: an already-reviewable sensitivity is not re-parked, and the existing
-        # non-sensitive AND legacy-caught approve->promote paths are preserved unchanged. KNOWN
-        # PROPERTY (intended, conservative): a newly-broadened-sensitive cluster re-parks on every
-        # RE-INGEST/re-resolution (the fence keys on legacy-visibility, not "was ever approved") —
-        # the deliberate fail-closed posture, not a bug. The SAME fence covers slice-2's
-        # newly-detected signals (Stage-2 k-hop graph proximity, Stage-3 Chow abstain band): each is
-        # non-legacy-visible (the legacy guard had no graph/score awareness), so a prior approval
-        # could not have considered them either — they are recognised off the guard's reason string
-        # via ``is_nonexemptible_reason`` and likewise NOT un-flagged by a stale exemption.
-        newly_broadened = any(
-            (member := by_id.get(mid)) is not None and is_newly_broadened_sensitive(member)
-            for mid in cluster.member_ids
-        )
-        nonexemptible = newly_broadened or is_nonexemptible_reason(reason)
-        if flagged and not nonexemptible and any(members <= group for group in approved_groups):
+        # The approved-group-exemption fence (Gate E / ADR 0047 Decision 5 + slice-3 refinement).
+        # This implements the user's decision "re-review a newly-detected sensitivity ONCE":
+        # deny-by-default now flags a cluster the legacy denylist MISSED (e.g. a role.rca /
+        # crime.war / off-ontology member), so a cluster whose members are a subset of an approval
+        # recorded BEFORE that topic was understood sensitive must NOT be silently un-flagged ->
+        # auto-merged: a sign-off approving "these records are the same entity" could not have
+        # considered a risk it never saw, so the cluster re-parks for a fresh human look.
+        # Non-exemptibility is computed by the STRUCTURED probe ``has_nonexemptible_sensitivity``
+        # over ALL THREE newly-detectable signals — a newly-broadened TOPIC, Stage-2 k-hop graph
+        # proximity, and the Stage-3 Chow abstain band — each evaluated INDEPENDENTLY of which flag
+        # short-circuited ``needs_review``. slice-3 fixes the slice-2 masking fail-open: the old
+        # reason-string classifier saw only the FIRST flag, so an exemptible-first flag (size>10 /
+        # anchor-conflict / a legacy-caught topic like `sanction`) MASKED a co-occurring
+        # k-hop/Chow/newly-broadened signal and the stale exemption silently un-flagged it. A
+        # sensitivity the legacy guard ALREADY caught (e.g. `sanction`) was visible at approval
+        # time, so it stays exemptible — as do the SIZE flag and the anchor-conflict flag (ADR
+        # 0040). That scoping is why it is "once," not forever-churn: an already-reviewable
+        # sensitivity is not re-parked, and the existing non-sensitive AND legacy-caught
+        # approve->promote paths are preserved unchanged. KNOWN PROPERTY (intended, conservative):
+        # a newly-broadened-sensitive cluster re-parks on every RE-INGEST / re-resolve (the fence
+        # keys on legacy-visibility / structural signal, not "was ever approved") — the deliberate
+        # fail-closed posture, not a bug. The structured probe is evaluated LAZILY — only when a
+        # cluster is both flagged AND a subset of an approved group (the sole path the exemption can
+        # un-flag) — so the common case never pays the probe's k-hop graph read a second time on the
+        # resolve hot path (``and`` short-circuits — needs_review already ran Stage-2 above).
+        if (
+            flagged
+            and any(members <= group for group in approved_groups)
+            and not has_nonexemptible_sensitivity(cluster, by_id, neo4j=neo4j)
+        ):
             flagged = False  # an already-approved, exemptible merge — promote
 
         # mode="block": park the flagged cluster for human review; never write it.

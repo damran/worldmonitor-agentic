@@ -1,6 +1,6 @@
 # ADR 0047 — Fail-closed sensitivity guard (deny-by-default; topics → graph → Chow abstain)
 
-> Status: **ACCEPTED** · 2026-06-25 · Closes audit gap **G6** · Inverts the denylist half of **ADR 0020**
+> Status: **ACCEPTED** · 2026-06-25 (slice-3 refinement 2026-06-26) · Closes audit gap **G6** · Inverts the denylist half of **ADR 0020**
 > Gate: [Gate E — Fail-Closed Sensitivity Guard](../reviews/GATE_E_SENSITIVITY_GUARD_SPEC.md)
 > Person-affecting: **NO (fail-closed)** — the change can only move MORE clusters to human review;
 > it auto-promotes nothing and needs no sign-off (CLAUDE.md self-improvement rule).
@@ -124,13 +124,55 @@ deliberately deferred. (Alternative considered: a fuller reason-scoped exemption
 what each approval reviewed — rejected as heavier, requiring approvals to persist their review
 rationale; deferred unless the legacy-visibility heuristic proves too coarse in the field.)
 
+#### Post-review refinement (slice-3, 2026-06-26) — STRUCTURED non-exemptibility replaces the reason-string coupling
+
+An adversarial verification of slice-2 (`c26570d`, APPROVE_WITH_NITS) surfaced a **short-circuit
+masking fail-open** in the slice-2 wiring of this fence (gate spec §15.1). slice-2 derived
+non-exemptibility from **(1)** `is_newly_broadened_sensitive` over the members (TOPIC-only — correct)
+**and (2)** `is_nonexemptible_reason(reason)`, a **substring match of the single reason** that
+`needs_review` returns. Because `needs_review` short-circuits on the FIRST flag (`size>10` → topic →
+anchor-conflict → k-hop → Chow), an **exemptible** flag firing first (`size>10`, anchor-conflict, or a
+**legacy-caught** topic like `sanction`) masked a co-occurring **non-exemptible** Stage-2 k-hop or
+Stage-3 Chow signal → a cluster ⊆ a stale approval could be silently un-flagged and auto-promoted
+despite real risk-adjacency / marginal confidence — contradicting this Decision's intent and the
+fence's own code comment.
+
+**slice-3 replaces the reason-string coupling with a structured probe.**
+`guard.sensitivity.has_nonexemptible_sensitivity(cluster, by_id, *, neo4j=None)` returns `True` iff
+**any** of the three non-exemptible conditions holds, **each evaluated independently of the
+short-circuit**: a member `is_newly_broadened_sensitive` (Stage-1 newly-broadened topic), **or**
+(`neo4j is not None and sensitivity_khop_depth > 0` and) a member `_risk_within_khop` (Stage-2 graph
+proximity), **or** the cluster `score` is in the Chow band (Stage-3). The pipeline computes the fence
+from this probe (recommended: lazily, only on the exemption path, so the common case adds no graph
+read), not from the reason. `is_nonexemptible_reason` and the `_KHOP_REASON_MARKER` /
+`_ABSTAIN_REASON_MARKER` constants are **deleted** (Finding F: they substring-matched English markers
+inside a free-text reason that also embeds hostile data-bearing fields — `member_id`, anchor VALUES);
+the human-readable `reason` from `needs_review` stays as the audit reason. This is **monotonically
+STRICTER** (more clusters non-exemptible ⇒ more parks) — still person-NEUTRAL / fail-closed, no
+sign-off — and **preserves both frozen T4 cases**: `role.rca` (newly-broadened) ⊆ stale approval
+re-parks; legacy-caught `sanction` ⊆ approval still auto-promotes (no risk node seeded ⇒ k-hop False;
+band OFF ⇒ Chow False; not newly-broadened). DENY **E-MASK** (a facet of E-STALE-EXEMPT) if an
+exemptible-first flag masks a co-occurring non-exemptible signal.
+
 ### 6. Config (pydantic `BaseSettings`, env-driven; NO YAML)
 
-`sensitivity_khop_depth` (`int ge=0`, default `1`; `0` disables Stage 2),
-`sensitivity_abstain_low`/`sensitivity_abstain_high` (`float [0,1]`, default `0.92`/`0.92` ⇒ band OFF
-until tuned), `sensitivity_extra_topics` (UNION-only extension — WM-070; never SUBTRACTS a `RISKS`
-code). The risk SET is NOT configured. No config field can remove a `RISKS` code (deny-by-default
-cannot be configured open).
+`sensitivity_khop_depth` (`int`, `ge=0`, **`le=4`** — slice-3 ceiling; default `1`; `0` disables
+Stage 2), `sensitivity_abstain_low`/`sensitivity_abstain_high` (`float [0,1]`, default `0.92`/`0.92`
+⇒ band OFF until tuned). The risk SET is NOT configured. **No config field can remove a `RISKS` code**
+(deny-by-default cannot be configured open).
+
+- **`sensitivity_khop_depth` operational ceiling (slice-3).** The depth is f-string-INLINED into the
+  `[*1..k]` variable-length bound, and a var-length traversal is **exponential in `k`**; the field is
+  bounded `le=4` so a misconfiguration cannot launch an unbounded graph scan in the resolve hot path.
+  `ge=0` is unchanged (`0` is the Stage-2 kill-switch); the default `1` is unchanged.
+- **`sensitivity_extra_topics` (WM-070) — DEFERRED, NOT SHIPPED (slice-3 reconciliation).** The
+  earlier draft of this Decision and gate spec §6 listed a UNION-only `sensitivity_extra_topics`
+  extension surface. It was **never implemented** in `settings.py`; slice-3 reconciles the ADR to the
+  shipped code by marking it **DEFERRED**. The deny-by-default set is therefore **exactly**
+  `registry.topic.RISKS` + unknown⇒sensitive, with **no config UNION surface at all** — so
+  E-CONFIG-OPEN is trivially held (no config field touches the sensitive set). If a CTI/crypto
+  enricher later needs to mark its own vocabulary risky, WM-070 reintroduces a UNION-only field
+  (never a SUBTRACT) in a dedicated slice.
 
 ## Alternatives considered
 
@@ -143,6 +185,11 @@ cannot be configured open).
 - **Use the Chow band as the merge threshold.** Rejected: that is the merge-vs-no-merge axis owned by
   Splink + `DEFAULT_MERGE_THRESHOLD`; conflating them would re-tune ER and is person-affecting. The
   abstain band is a distinct park-vs-promote axis on an already-formed cluster.
+- **Reason-string coupling for the fence (slice-2's `is_nonexemptible_reason`).** Superseded by the
+  slice-3 structured probe (Decision 5 refinement). Rejected because the short-circuit in
+  `needs_review` made the single returned reason an incomplete view of the cluster's non-exemptible
+  signals (the masking fail-open), and because substring-matching a free-text reason that embeds
+  hostile data fields is brittle (Finding F).
 - **Fuller reason-scoped exemption keyed on per-approval review rationale** (instead of the chosen
   legacy-visibility scoping). Deferred (Decision 5) — heavier (requires approvals to persist what
   they reviewed) and unnecessary; the legacy-visibility heuristic gives the same conservative
@@ -161,16 +208,21 @@ cannot be configured open).
 - ✅ Strengthens the catastrophic-merge net; auto-promotes nothing; person-NEUTRAL, no sign-off.
 - ✅ Tracks FtM's risk vocabulary automatically — a topic added upstream is covered without a code
   change (the adversarial target).
+- ✅ (slice-3) The exemption fence is **masking-proof**: non-exemptibility is computed structurally
+  (`has_nonexemptible_sensitivity`), independent of `needs_review`'s first-flag short-circuit, so an
+  exemptible-first flag can no longer hide a co-occurring k-hop/Chow/newly-broadened signal.
 - ⚠️ More clusters route to `pending_review` (the intended trade): the sign-off queue grows. The
-  Chow band ships OFF by default and `k` is tunable (`0` disables Stage 2) so the operator controls
-  the volume.
+  Chow band ships OFF by default and `k` is tunable (`0` disables Stage 2, `le=4` ceiling) so the
+  operator controls the volume.
 - ⚠️ Stage 2 adds a per-cluster Neo4j read in the resolve path; bounded by `k` and skipped when
-  `neo4j is None` or `k == 0`.
+  `neo4j is None` or `k == 0`. The slice-3 fence runs the k-hop probe only on the exemption path
+  (flagged ∧ ⊆ an approved group), so the common case adds no extra read.
 - ⚠️ The exemption fix means a previously approved merge that is NEWLY-BROADENED-sensitive (flagged
-  for a risk the legacy guard MISSED) re-enters review against the now-understood risk; a
-  legacy-caught-sensitive merge that was knowingly approved still auto-promotes. KNOWN PROPERTY: a
-  newly-broadened-sensitive cluster re-parks on every re-ingest (the fence keys on legacy-visibility,
-  not "was ever approved") — intended fail-closed conservatism, not a bug.
+  for a risk the legacy guard MISSED, OR k-hop-adjacent, OR Chow-in-band) re-enters review against the
+  now-understood risk; a legacy-caught-sensitive merge that was knowingly approved still auto-promotes.
+  KNOWN PROPERTY: a newly-broadened-sensitive cluster re-parks on every re-ingest (the fence keys on
+  legacy-visibility / structural signal, not "was ever approved") — intended fail-closed conservatism,
+  not a bug.
 
 ## Status of related ADRs
 

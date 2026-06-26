@@ -442,3 +442,183 @@ choice in ADR 0047.
   verbatim before code (§2).
 - **NO `DEFAULT_MERGE_THRESHOLD` / Splink / clustering / `pick_anchor` change (HARD INV)** — the
   abstain band is a distinct axis on an already-formed cluster (§3.4).
+
+---
+
+## 15. slice-3 — pre-merge hardening (post-review of slice-2)
+
+> **Hardening slice**, NOT a new gate. Branch `gate/e-sensitivity-guard-2` (PR #93). slice-1 + slice-2
+> are built; an adversarial verification of slice-2 (`c26570d`) returned **APPROVE_WITH_NITS** (CI
+> green, no DENY) and surfaced findings to fix BEFORE the human merges. slice-3 does NOT relitigate
+> the gate; it closes a masking fail-open in the slice-2 exemption fence and reconciles two doc/code
+> mismatches. **Person-affecting posture: NEUTRAL (fail-closed)** — slice-3 is **monotonically
+> STRICTER** (more clusters become non-exemptible ⇒ MORE parks); it auto-promotes nothing the slice-2
+> fence parked. **No human sign-off** (§9 reasoning holds, strengthened).
+
+### 15.1 Finding B (MEDIUM) — short-circuit masking fail-open (the core fix)
+
+`needs_review` returns only the **FIRST** flag's reason (order: `size>10` → Stage-1 topic →
+anchor-conflict → Stage-2 k-hop → Stage-3 Chow). The slice-2 fence (`pipeline.py:379-384`) derives
+non-exemptibility from **(1)** `is_newly_broadened_sensitive` over the members (TOPIC-only,
+member-derived — correctly NOT masked) and **(2)** `is_nonexemptible_reason(reason)` — a **substring
+match of the SINGLE returned reason**. So when an **EXEMPTIBLE** flag fires FIRST (`size>10`,
+anchor-conflict, or a **legacy-caught** topic such as `sanction`), a co-occurring **NON-exemptible**
+Stage-2 k-hop or Stage-3 Chow signal is **never evaluated** → a cluster ⊆ a **stale** approved group
+is silently un-flagged → **auto-promoted despite real k-hop risk-adjacency / marginal Chow
+confidence**. This contradicts the fence's own comment at `pipeline.py:374-378`. It is **NOT a
+regression** (slice-1 had no k-hop/Chow) and was not a slice-2 DENY, but it **under-realizes** the
+fail-closed contract of §5/§14.
+
+### 15.2 The fix — a STRUCTURED non-exemptibility probe (replaces the reason-string coupling)
+
+Replace `is_nonexemptible_reason(reason)` with, in `guard/sensitivity.py`:
+
+```
+has_nonexemptible_sensitivity(cluster, by_id, *, neo4j=None) -> bool
+```
+
+returning `True` iff **ANY** of the following, each evaluated **INDEPENDENTLY** of `needs_review`'s
+first-flag short-circuit:
+
+- any member `is_newly_broadened_sensitive` (newly-broadened TOPIC — Stage 1, member-derived), **OR**
+- `neo4j is not None and settings.sensitivity_khop_depth > 0` and any member
+  `_risk_within_khop(neo4j, member_id, settings.sensitivity_khop_depth)` (Stage-2 graph proximity), **OR**
+- `settings.sensitivity_abstain_low <= cluster.score < settings.sensitivity_abstain_high`
+  (Stage-3 Chow band).
+
+`pipeline.py` computes the fence from the probe, **not** the reason. Recommended (perf-neutral)
+wiring — evaluate the probe **lazily, only on the exemption path**, so the common (non-exempt) case
+adds **no** extra graph read:
+
+```python
+exempt = flagged and any(members <= group for group in approved_groups)
+if exempt and not has_nonexemptible_sensitivity(cluster, by_id, neo4j=neo4j):
+    flagged = False  # an exemptible (size / anchor-conflict / legacy-caught-topic) approved merge — promote
+```
+
+The human-readable `reason` returned by `needs_review` **STAYS** (it remains the audit / `record_merge`
+reason). Correct the `pipeline.py:374-378` comment to describe the structured probe truthfully (it is
+no longer "recognised off the guard's reason string"). **REMOVE** `is_nonexemptible_reason` and the
+now-unused `_KHOP_REASON_MARKER` / `_ABSTAIN_REASON_MARKER` constants — grep-confirmed referenced only
+in `guard/sensitivity.py`, `resolution/pipeline.py`, and the two **NON-frozen** slice-2 test files
+(`tests/unit/test_exemption_fence.py`, `tests/integration/test_sensitivity_guard_khop.py`) which
+slice-3 adapts; **no FROZEN test references them**. The Stage-2/Stage-3 reason f-strings in
+`needs_review` keep their human-readable text **inlined** (they no longer reference the removed
+constants).
+
+### 15.3 Finding F (NIT) — classify structurally, not by substring
+
+`is_nonexemptible_reason` substring-matched long English markers inside a **free-text reason that also
+embeds data-bearing fields** (`member_id`, anchor VALUES — hostile data per CLAUDE.md): brittle and a
+(theoretical) confused-deputy surface. The structured probe (15.2) **removes the coupling entirely** —
+non-exemptibility is computed from the cluster + members + graph, **never** from a string.
+
+### 15.4 Preserved FROZEN behaviour — both T4 cases stay green
+
+The probe is constructed to preserve `tests/integration/test_sensitivity_guard.py` T4 byte-for-byte:
+
+- **role.rca** (newly-broadened-topic) ⊆ stale approval → `is_newly_broadened_sensitive` True →
+  probe **True** → re-parks (the T4 oracle). ✅
+- **sanction** (legacy-caught-topic) ⊆ stale approval → `is_newly_broadened_sensitive` False; no risk
+  node seeded ⇒ k-hop False; band OFF (`low==high`) ⇒ Chow False → probe **False** → auto-promotes
+  (the T4 discriminator). ✅
+
+### 15.5 ALSO — (C)/(D)/(E)
+
+**(C) — VERIFIED_API.md E-VERIFY completeness (builder verifies against installed FtM).** Add to the
+"Gate E" section, verbatim (confirmed against the installed `followthemoney==4.9.2`,
+`.venv`): `registry.topic.names` is a **`dict`, `len == 73`**; `set(registry.topic.RISKS) <=
+set(registry.topic.names) == True`; source path **`followthemoney/types/topic.py`**.
+
+**(D) — WM-070 (`sensitivity_extra_topics`) is DEFERRED (reconcile ADR/spec to shipped code).** The
+field is **NOT** implemented in `settings.py` (shipped fields: `sensitivity_khop_depth`,
+`sensitivity_abstain_low`, `sensitivity_abstain_high` only). The §6 table row for
+`sensitivity_extra_topics` is hereby marked **DEFERRED — NOT SHIPPED**; ADR 0047 Decision 6 is
+reconciled likewise. **Do NOT implement `extra_topics` this slice.** Consequence: the deny-by-default
+set is **exactly** `registry.topic.RISKS` + unknown⇒sensitive with **no config UNION surface at all**,
+so **E-CONFIG-OPEN is trivially held** (no config field touches the sensitive set).
+
+**(E) — `sensitivity_khop_depth` upper bound.** Add `le=4` to the field (keep `default=1`, `ge=0`
+unchanged; `0` stays the kill-switch). One-line rationale: a var-length `[*1..k]` traversal is
+exponential in `k`; a conservative ceiling stops a misconfiguration from launching an unbounded graph
+scan in the resolve hot path. Note the operational ceiling in ADR 0047 §6.
+
+### 15.6 New / changed invariants (slice-3)
+
+- **STRUCTURED NON-EXEMPTIBILITY / NO-MASKING (NEW HARD INV).** A cluster that is **simultaneously**
+  `[size>10 OR legacy-caught-topic OR anchor-conflict]` **AND** `[k-hop-adjacent to a non-ghost risk
+  node OR Chow-in-band OR newly-broadened-topic]` **AND** ⊆ a **stale** approved group **MUST RE-PARK,
+  never auto-promote.** Non-exemptibility is computed by `has_nonexemptible_sensitivity(cluster,
+  by_id, neo4j)` — **independent of `needs_review`'s first-flag short-circuit and of the returned
+  reason string.** The fence **MUST NOT** derive non-exemptibility by substring-matching a free-text
+  reason. DENY **E-MASK** (a facet of E-STALE-EXEMPT).
+- **MONOTONIC-STRICTER (held).** slice-3 only makes MORE clusters non-exemptible (more parks); it
+  auto-promotes nothing the slice-2 fence parked. Person-NEUTRAL / fail-closed; no sign-off.
+- All §14 invariants UNCHANGED (G1 prov on node+edge, append-only / no un-merge,
+  canonical-canonical only via the guard, `:Ghost` exclusion, **no** `DEFAULT_MERGE_THRESHOLD` /
+  Splink / `cluster_and_merge` / `pick_anchor` change, no migration).
+
+### 15.7 Failing-first requirement + APPROVE / DENY deltas
+
+A **non-vacuous failing-first** test is REQUIRED before the fix (§16): an integration test where a
+cluster with an **exemptible-first** flag (a legacy-caught `sanction` member and/or `size>10`) ALSO
+carries a **k-hop adjacency** to a seeded non-ghost risk node, ⊆ a **stale** approval → on slice-2
+code it **AUTO-PROMOTES** (the masking fail-open) → the test **FAILS**; after
+`has_nonexemptible_sensitivity` it **RE-PARKS** → PASSES.
+
+**APPROVE delta (adds to §7):**
+- **A9** — the masking case re-parks (§16 `T-MASK-khop` integration + `T-MASK-chow` unit).
+- **A10** — non-exemptibility is **structural**: `is_nonexemptible_reason` + the marker constants are
+  gone; no substring-of-reason classifier remains in the fence path.
+
+**DENY delta (adds to §7):**
+- **E-MASK** (facet of E-STALE-EXEMPT) — an exemptible-first flag masks a co-occurring
+  k-hop/Chow/newly-broadened signal so a cluster ⊆ a stale approval auto-promotes; **or** the
+  structured probe is absent; **or** the fence still classifies by reason-substring; **or** the
+  masking failing-first test is absent.
+- **E-FROZEN** unchanged — both slice-1 T4 cases (integration) stay byte-for-byte green.
+
+### 15.8 slice-3 file list + Definition of Done
+
+- **Code (builder):** `src/worldmonitor/guard/sensitivity.py` (add `has_nonexemptible_sensitivity`;
+  delete `is_nonexemptible_reason` + the two marker constants; inline the Stage-2/3 reason text),
+  `src/worldmonitor/resolution/pipeline.py` (probe-based fence + corrected `:374-378` comment + import
+  swap), `src/worldmonitor/settings.py` (`sensitivity_khop_depth` gains `le=4`).
+- **Docs:** `VERIFIED_API.md` (C), `docs/decisions/0047-fail-closed-sensitivity-guard.md` (Decision 5
+  refinement note, Decision 6 WM-070 DEFERRED + khop cap), this spec.
+- **Tests (test-author):** `tests/unit/test_exemption_fence.py` (REWRITE to the structured probe),
+  `tests/integration/test_sensitivity_guard_khop.py` (ADAPT `test_t5e` to the structured probe),
+  `tests/integration/test_exemption_fence_masking.py` (**NEW** — the masking failing-first).
+- **DoD:** the masking failing-first test is **RED** on slice-2 code and **GREEN** after the fix; both
+  T4 cases and every FROZEN test (§10) stay green; CI (`quality` + `security`) green; no DENY facet
+  (incl. E-MASK) open.
+
+---
+
+## 16. slice-3 test plan (for the test-author)
+
+| # | Test | File | Kind | Asserts |
+|---|---|---|---|---|
+| **T-MASK-khop** | The **failing-first** masking oracle. A cluster with an **exemptible-first** flag (a legacy-caught `sanction` member; size>10 is an equivalent parametrization) AND a member **one hop from a seeded non-ghost `:Sanction` node** AND ⊆ a **stale** approved group is driven through `resolve_pending(guard_mode="block")` | `tests/integration/test_exemption_fence_masking.py` (**NEW**) | integration (Neo4j + Postgres, CI-only) | `stats.review == 1`, `stats.promoted == 0`, nothing written to the graph, both queue rows → `pending_review`. **PRE-FIX (slice-2): the `sanction`/size flag short-circuits `needs_review` with an exemptible reason, `is_nonexemptible_reason` misses the k-hop signal, the stale exemption un-flags → AUTO-PROMOTES → FAILS.** POST-FIX: `has_nonexemptible_sensitivity` evaluates the k-hop independently → re-parks. |
+| **T-MASK-chow** | The score-band masking, cheap. A **size>10** cluster (topic-clean, `neo4j=None`) scoring inside a configured Chow band `[0.90, 0.95)`: `needs_review(...)` returns the **SIZE reason** (proving the masking — the old reason-string path would see only the size reason); `has_nonexemptible_sensitivity(cluster, by_id)` returns **True** | `tests/unit/test_exemption_fence.py` | unit | `needs_review[1]` is the size reason; `has_nonexemptible_sensitivity(...) is True`. Failing-first by construction (the function does not exist on slice-2). |
+| **Fence contract — "no wider"** | `has_nonexemptible_sensitivity` is **False** for every exemptible-only cluster: a pure size>10 (band OFF, `neo4j=None`), an anchor-conflict, a **legacy-caught `sanction`** (band OFF, `neo4j=None`), and a clean merge | `tests/unit/test_exemption_fence.py` (REWRITE) | unit | all `is False` — preserves the frozen approve→promote path for a knowingly-approved legacy-caught / size / anchor merge. |
+| **Fence contract — "no narrower"** | `has_nonexemptible_sensitivity` is **True** for a **newly-broadened-topic** (`role.rca`) member, and **True** for a Chow-in-band cluster (band `[0.90,0.95)`, score `0.92`) | `tests/unit/test_exemption_fence.py` (REWRITE) | unit | both `is True`. |
+| **T5e (adapted)** | `has_nonexemptible_sensitivity(merge, by_id, neo4j=clean_graph)` is **True** for the T5a risk-adjacent cluster (`near-1` one hop from a `:Sanction` node) and **False** when no risk node is seeded | `tests/integration/test_sensitivity_guard_khop.py` (ADAPT) | integration (Neo4j) | replaces the removed `is_nonexemptible_reason` coupling-guard with the structured probe's k-hop branch. |
+
+**Notes for the test-author:**
+
+- **k-hop needs Neo4j ⇒ integration (CI-only).** The score-band masking (`T-MASK-chow`) and both
+  fence-contract directions are **pure unit** (no graph). `T-MASK-khop` is the end-to-end re-park
+  proof and is the load-bearing failing-first.
+- **`T-MASK-khop` construction (sanction variant, simplest):** seed a prior-batch
+  `(:Entity:Person:Sanction {id:"risk-1"})-[:LINKED]->(:Entity:Person {id:"p2"})` (mirrors T5a);
+  record a **stale** positive judgement `{p1, p2}`; re-ingest `p1` with `topics:["sanction"]`
+  (legacy-caught — Stage 1 fires FIRST with an exemptible reason; `is_newly_broadened_sensitive(p1)`
+  is False) and a topic-clean `p2` (graph-resolvable to `risk-1`). The **only** non-exemptible signal
+  is `p2`'s k-hop adjacency; without the masking fix the `sanction` reason hides it. The size>10
+  variant (11 topic-clean members, one graph-resolvable + adjacent, ⊆ a stale approval) is an
+  equivalent parametrization.
+- **Do NOT touch the FROZEN `tests/integration/test_sensitivity_guard.py`** (slice-1 T4). The new
+  masking test lives in its own file so the frozen T4 stays byte-for-byte.
+- **No private name is hand-referenced as a marker constant** — the adapted tests exercise the
+  structured probe directly, so the brittle string coupling cannot regress silently.

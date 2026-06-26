@@ -293,6 +293,11 @@ registry.topic.names   # -> dict[code, label], the full topic vocabulary (member
   crime.war, debarment, export.control, export.control.linked, export.risk, invest.ban, invest.risk,
   mare.detained, mare.shadow, poi, reg.action, reg.warn, role.oligarch, role.pep, role.rca, sanction,
   sanction.control, sanction.counter, sanction.linked, wanted`.
+- **`registry.topic.names` completeness (slice-3 E-VERIFY gap C, verified 2026-06-26 against installed
+  `followthemoney==4.9.2`):** `registry.topic.names` -> `dict`, **73 entries**;
+  `set(registry.topic.RISKS) <= set(registry.topic.names) == True` (RISKS is a strict subset of the full
+  topic vocabulary — every risk code is a real topic, so the off-ontology membership test
+  `code not in registry.topic.names` is sound). source path `followthemoney/types/topic.py`.
 - **Deny-by-default / unknown ⇒ sensitive:** sensitive iff `topic_codes & registry.topic.RISKS` is non-empty
   **OR** a topic code is NOT in `registry.topic.names` at all (off-ontology / enricher vocab → treat as
   sensitive). Confirmed: `"totally.madeup" in registry.topic.names == False`. Loaded programmatically — the

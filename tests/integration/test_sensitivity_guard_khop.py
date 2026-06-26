@@ -332,28 +332,33 @@ def test_t5d_member_not_in_graph_is_clean_no_flag(
 
 
 # --------------------------------------------------------------------------------------------
-# T5e — coupling-guard: the REAL emitted k-hop reason is classified non-exemptible (fence drift).
+# T5e (slice-3, adapted) — the STRUCTURED probe's k-hop branch (replaces reason-marker coupling).
 # --------------------------------------------------------------------------------------------
 
 
-def test_t5e_real_khop_reason_is_nonexemptible(clean_graph: Neo4jClient, khop_depth: int) -> None:
-    """Coupling-guard: the ACTUAL reason ``needs_review`` EMITS for a k-hop-flagged cluster is
-    classified non-exemptible by ``guard.sensitivity.is_nonexemptible_reason``.
+def test_t5e_has_nonexemptible_sensitivity_khop_branch(
+    clean_graph: Neo4jClient, khop_depth: int
+) -> None:
+    """``guard.sensitivity.has_nonexemptible_sensitivity(merge, by_id, neo4j=clean_graph)`` is True
+    for the T5a risk-adjacent cluster and False when no risk node is seeded.
 
-    The approved-group exemption (``pipeline.py``) un-flags a cluster ⊆ an approved group UNLESS the
-    flag is non-exemptible; a Stage-2 k-hop graph-proximity flag MUST be non-exemptible (a prior
-    approval had no graph awareness — spec §5 / ADR 0047 Decision 5). The fence keys on a
-    MARKER baked into the guard's returned ``reason``. This reuses the T5a risk-adjacent
-    fixture (``near-1`` one hop from a ``:Sanction`` node), captures the REAL emitted k-hop
-    reason, and feeds it straight into the classifier — so the test BREAKS the instant the
-    Stage-2 reason-builder and ``is_nonexemptible_reason``'s marker DRIFT apart (the
-    person-relevant fail-open this pins).
+    Spec §15.2/§16 (the slice-3 structured probe). slice-3 deletes ``is_nonexemptible_reason`` (and
+    the marker constants) — the reason-string coupling this test used to pin — and replaces it with
+    the structured probe, which evaluates the Stage-2 k-hop adjacency INDEPENDENTLY of
+    ``needs_review``'s first-flag short-circuit and of the returned reason string (closing the
+    masking fail-open, Finding B). This test exercises the probe's k-hop branch directly, which the
+    pure unit file (``tests/unit/test_exemption_fence.py``) cannot (it has no graph).
 
-    REGRESSION-PIN: it PASSES on the current wired code; it is the integration half of the
-    marker-coupling guard whose Chow half is
-    ``tests/unit/test_exemption_fence.py::test_real_chow_reason_is_nonexemptible``.
+    True case: ``near-1`` is topic-clean (no newly-broadened axis), the band is OFF (no Chow axis),
+    so the probe's True provably comes from the k-hop branch — ``near-1`` one hop from the seeded
+    ``:Sanction`` node ``risk-1``. False case: a topic-clean cluster whose members are NOT in the
+    graph has no risk neighbour, no risk topic, and an out-of-band score ⇒ the probe is False (the
+    "no wider" direction — the structured probe does not over-flag a benign cluster).
+
+    RED pre-fix: ``has_nonexemptible_sensitivity`` does not exist on slice-2 (ImportError). DENY
+    E-MASK if the probe's k-hop branch is absent.
     """
-    from worldmonitor.guard.sensitivity import is_nonexemptible_reason
+    from worldmonitor.guard.sensitivity import has_nonexemptible_sensitivity
 
     assert khop_depth == 1
     clean_graph.execute_write(
@@ -363,14 +368,24 @@ def test_t5e_real_khop_reason_is_nonexemptible(clean_graph: Neo4jClient, khop_de
         risk="risk-1",
         near="near-1",
     )
+    # Non-vacuity: confirm the merge formed AND near-1 flags via Stage-2 k-hop (structural).
     merge = _merge_pair("near-1")
     by_id = _by_id(merge)
-
     flagged, reason = needs_review(merge, by_id, neo4j=clean_graph)
-    assert flagged is True, "fixture: near-1 one hop from a :Sanction node must flag via Stage 2"
-    assert is_nonexemptible_reason(reason) is True, (
-        "the REAL emitted k-hop reason must be classified non-exemptible — if this fails "
-        "the Stage-2 reason-builder has DRIFTED from is_nonexemptible_reason's marker and "
-        "the approved-group exemption fence would silently fail OPEN "
-        "(spec §5 / ADR 0047 Dec 5; DENY E-STALE-EXEMPT)"
+    assert flagged is True and "sensitive (PEP/sanctioned)" not in reason, (
+        "fixture: near-1 must flag via Stage-2 k-hop (structural, not a topic) — else vacuous"
+    )
+
+    assert has_nonexemptible_sensitivity(merge, by_id, neo4j=clean_graph) is True, (
+        "a member within k hops of a non-ghost risk node is NON-exemptible — the structured probe "
+        "must catch the k-hop signal a stale approval could not have considered (spec §15.2/§16; "
+        "DENY E-MASK)"
+    )
+
+    # No risk node seeded for this cluster: not graph-resolvable, topic-clean, out-of-band ⇒ False.
+    benign = _merge_pair("lonely-1")
+    benign_by_id = _by_id(benign)
+    assert has_nonexemptible_sensitivity(benign, benign_by_id, neo4j=clean_graph) is False, (
+        "a topic-clean cluster with NO risk neighbour has no non-exemptible signal — the probe "
+        "must not over-flag it (the 'no wider' direction; preserves the approve→promote path)"
     )
