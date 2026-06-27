@@ -1,7 +1,7 @@
 # 0050 — Backup / restore disaster recovery (Gate B-4b)
 
-- **Status:** PROPOSED
-- **Date:** 2026-06-26
+- **Status:** ACCEPTED
+- **Date:** 2026-06-26 (accepted 2026-06-27 on merge of PR #97)
 - **Gate:** B-4b (`docs/reviews/GATE_B4B_BACKUP_RESTORE_SPEC.md`) — a focused DR gate off `master`.
   ONE B-4 slice (backup/restore only).
 - **Touches:** new `src/worldmonitor/backup.py` (`backup` / `restore` + a `__main__` CLI); thin
