@@ -18,6 +18,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # password passes anyway); a real Fernet key / any non-placeholder value is accepted.
 _PLACEHOLDER_SECRET_MARKERS = ("change-me", "worldmonitor123")
 
+# Local/CI environments where placeholder secrets are allowed (the unit suite boots create_app with
+# environment="test"). Anything NOT in this set — production, staging, or an unknown/typo'd value —
+# enforces the placeholder check (fail CLOSED on unknown). ADR 0061.
+_LOCAL_ENVIRONMENTS = ("development", "test")
+
 
 class Settings(BaseSettings):
     """Process configuration, loaded from the environment (and ``.env`` in dev)."""
@@ -167,16 +172,17 @@ class Settings(BaseSettings):
         return self
 
     def validate_production_secrets(self) -> None:
-        """Fail closed in any non-``development`` environment on a placeholder secret (ADR 0061).
+        """Fail closed outside the local/test environments on a placeholder secret (ADR 0061).
 
-        In ``development`` placeholders are allowed (return immediately). Otherwise raise
-        ``ValueError`` naming the offending field if a secret the app actually reads is still a
-        recognizable placeholder/weak value: ``config_encryption_key`` empty or ``change-me``;
-        ``postgres_dsn`` / ``redis_url`` / ``neo4j_password`` / ``minio_secret_key`` containing
-        ``change-me`` or a known-guessable token (``worldmonitor123``). A simple, explicit
-        placeholder-marker check — NO entropy scoring; a real Fernet key passes.
+        LOCAL environments ``development``/``test`` allow placeholders (the unit suite boots
+        ``create_app`` with ``environment="test"`` and no ``.env``) and return immediately. EVERY
+        other value — ``production``, ``staging``, or an unrecognized/typo'd string — enforces (fail
+        CLOSED on unknown): raise ``ValueError`` naming the field if a secret the app actually reads
+        is a placeholder/weak value: ``config_encryption_key`` empty or ``change-me``; or
+        ``change-me``/``worldmonitor123`` inside ``postgres_dsn``/``redis_url``/``neo4j_password``/
+        ``minio_secret_key``. A plain marker check — NO entropy scoring; a real Fernet key passes.
         """
-        if self.environment == "development":
+        if self.environment in _LOCAL_ENVIRONMENTS:
             return
 
         if not self.config_encryption_key or self.config_encryption_key == "change-me":

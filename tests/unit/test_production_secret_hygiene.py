@@ -122,6 +122,24 @@ def test_development_with_placeholders_does_not_raise() -> None:
     assert settings.validate_production_secrets() is None
 
 
+def test_test_environment_with_placeholders_does_not_raise() -> None:
+    """``test`` is a LOCAL environment (the unit suite boots create_app with environment='test' and
+    no .env) — placeholders are allowed, the validator returns None. Pins the CI-safety fix."""
+    settings = _settings(
+        environment="test",
+        config_encryption_key="",
+        postgres_dsn="postgresql://worldmonitor:change-me@localhost:5432/worldmonitor",
+    )
+    assert settings.validate_production_secrets() is None
+
+
+def test_unknown_environment_fails_closed() -> None:
+    """An unrecognized/typo'd environment (not development/test) enforces — fail CLOSED."""
+    settings = _settings(environment="prod", config_encryption_key="change-me")
+    with pytest.raises(ValueError):
+        settings.validate_production_secrets()
+
+
 def test_production_with_strong_secrets_does_not_raise() -> None:
     """Non-dev + real Fernet key + non-placeholder DSN/URL/passwords: no raise."""
     settings = _settings(environment="production")
