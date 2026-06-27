@@ -39,7 +39,10 @@ from worldmonitor.graph.ftmg_fork import generate_node_entity
 from worldmonitor.ontology.ftm import FtmEntity
 from worldmonitor.provenance.model import PROVENANCE_NODE_PREFIX, provenance_node_properties
 
-_SETTINGS = settings(max_examples=150, suppress_health_check=[HealthCheck.too_slow])
+# deadline=None: per-example work (ftmg config + node-query generation) is heavier than a pure
+# function, so the default 200ms deadline flakes under load. Bounded by max_examples; assertions
+# unchanged — this only stops a CORRECT example failing for being slow on a busy runner.
+_SETTINGS = settings(max_examples=150, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 
 
 def _config() -> Configuration:
