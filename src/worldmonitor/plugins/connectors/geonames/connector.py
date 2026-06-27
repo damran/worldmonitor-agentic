@@ -20,8 +20,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-import httpx
-
+from worldmonitor.net.ssrf import guarded_stream
 from worldmonitor.ontology.anchors import set_anchor
 from worldmonitor.ontology.ftm import FtmEntity
 from worldmonitor.ontology.validation import validate_or_raise
@@ -94,7 +93,7 @@ def _download_lines(country: str) -> Iterator[str]:
     file is removed when the generator is exhausted or closed.
     """
     url = f"{_BASE_URL}/{country}.zip"
-    with httpx.stream("GET", url, timeout=_HTTP_TIMEOUT, follow_redirects=True) as response:
+    with guarded_stream("GET", url, timeout=_HTTP_TIMEOUT) as response:
         response.raise_for_status()
         zip_path = _stream_to_tempfile(response)
     try:
