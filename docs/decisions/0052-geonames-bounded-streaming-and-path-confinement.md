@@ -50,6 +50,18 @@ to be read — the win is that peak RAM is one chunk + one decompressed line, no
 `rstrip("\n")`-stripped so each emitted `RawRecord` is **byte-identical** to today's
 `splitlines()`-based output (the FROZEN negative-space invariant).
 
+**Scope of the byte-identity guarantee (line-splitting semantics).** The guarantee holds for
+well-formed GeoNames dumps — i.e. records delimited by `\n` / `\r\n` (and a final line with no trailing
+terminator). It is *intentionally* **not** bug-for-bug identical to `str.splitlines()` in one respect:
+`splitlines()` also splits on the exotic Unicode/control line boundaries (`\v`, `\f`, `\x1c`, `\x1d`, `\x1e`, `\x85`, `\u2028`, `\u2029`), whereas the streaming path (universal-newline file/`TextIOWrapper` iteration) splits only
+on `\n` / `\r` / `\r\n`. If one of those exotic code points ever appeared *inside* a GeoNames field
+(e.g. an `alternatenames` value), the old code would have **mis-split that record into two malformed
+rows**; the streaming code keeps it as one physical line — the *more correct* behavior for a
+line-oriented TSV dump. This divergence is therefore a latent-bug fix, not a regression; it is documented
+here rather than preserved. The `tests/unit/test_geonames_connector.py` `splitlines()` oracle pins exact
+byte-identity for the real `VA.txt` fixture (which contains no such code points), and all real-world
+GeoNames data is newline-delimited.
+
 ### D2 — H-7: fail-closed, default-deny, realpath-confined + size-capped local `path`.
 
 Two new settings:

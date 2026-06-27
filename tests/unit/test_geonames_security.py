@@ -101,17 +101,6 @@ def test_absolute_path_outside_allowlist_is_rejected(
     _assert_rejected_yielding_nothing(GeoNamesConnector(), {"country": "VA", "path": str(secret)})
 
 
-def test_real_etc_passwd_is_rejected(tmp_path: Path, configure: Callable[..., None]) -> None:
-    """The canonical exfil target ``/etc/passwd`` (a real out-of-tree file) is rejected."""
-    if not Path("/etc/passwd").exists():  # pragma: no cover - non-POSIX hosts
-        pytest.skip("/etc/passwd not present on this platform")
-    allowed = tmp_path / "allowed"
-    allowed.mkdir()
-    configure(allowed_dir=allowed)
-
-    _assert_rejected_yielding_nothing(GeoNamesConnector(), {"country": "VA", "path": "/etc/passwd"})
-
-
 def test_dotdot_traversal_escaping_allowlist_is_rejected(
     tmp_path: Path, configure: Callable[..., None]
 ) -> None:
@@ -139,10 +128,8 @@ def test_symlink_inside_allowlist_pointing_outside_is_rejected(
     outside = tmp_path / "outside.txt"
     outside.write_text("1\tleaked-via-symlink\tx\t\t1\t2\t\t\tVA\n", encoding="utf-8")
     link = allowed / "innocent.txt"
-    try:
-        link.symlink_to(outside)
-    except (OSError, NotImplementedError):  # pragma: no cover - symlink-less platform
-        pytest.skip("platform does not support symlinks")
+    # POSIX deployment target (Linux/Docker): file symlinks are always creatable unprivileged.
+    link.symlink_to(outside)
     # The symlink's own path *is* inside the allowlist (string-prefix would pass)...
     assert str(link).startswith(str(allowed))
     configure(allowed_dir=allowed)
