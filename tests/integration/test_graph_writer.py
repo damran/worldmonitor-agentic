@@ -11,6 +11,7 @@ import pytest
 from worldmonitor.graph.constraints import CANONICAL_ID_PROPERTIES, ensure_constraints
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
+from worldmonitor.ontology.anchors import set_anchor
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
 from worldmonitor.provenance.model import Provenance, stamp
 
@@ -231,3 +232,137 @@ def test_edge_provenance_is_the_asserting_source_not_an_endpoint(
     )
     node_sources = {row["id"]: row["source_id"] for row in nodes}
     assert node_sources == {"c-9": "src:company-source", "p-9": "src:person-source"}
+
+
+# ======================================================================================
+# ADR 0060 — node provenance integrity (Gate M-1): additive re-emit + fail-closed node.
+# ======================================================================================
+def test_node_reemit_is_additive_preserves_anchors_and_prov(clean_graph: Neo4jClient) -> None:
+    """A thinner re-emit of the SAME node id must NOT clobber its prior anchors / prov_* (M-1).
+
+    Defect 1 (ADR 0060): nodes are written by ftmg's ``generate_node_entity`` with
+    ``SET n = props`` (a full replace), so re-emitting the same ``{id}`` from a sparser
+    source erases the node's prior canonical anchor (and any property the second emit omits)
+    — a G1 + anchor-stability regression on every re-ingest. The fix is an additive
+    ``SET n += props`` node override.
+
+    A RICH first emit lands ``co-1`` with a Wikidata anchor (``wikidata_id = Q1``) + its own
+    provenance; a THINNER second emit of the SAME id (a different, sparser source, NO anchor)
+    is then written. Post-fix the original ``wikidata_id`` anchor SURVIVES (additive) and the
+    node still carries provenance. RED today: ``SET n = props`` replaces the whole node with
+    the thin emit's properties, so ``wikidata_id`` is wiped to ``None``.
+    """
+    ensure_constraints(clean_graph)
+
+    rich = _stamped(
+        {"id": "co-1", "schema": "Company", "properties": {"name": ["Acme"]}, "datasets": ["t"]},
+        "rich-registry",
+    )
+    set_anchor(rich, "wikidata_id", "Q1")
+    write_entities(clean_graph, [rich])
+
+    # Sanity: the anchor + provenance landed on the first write.
+    before = clean_graph.execute_read(
+        "MATCH (n:Entity {id: 'co-1'}) "
+        "RETURN n.wikidata_id AS wikidata_id, n.prov_source_id AS source_id"
+    )[0]
+    assert before["wikidata_id"] == "Q1", "the rich first emit must land the wikidata anchor"
+    assert before["source_id"] == "src:rich-registry"
+
+    # A THINNER re-emit of the SAME id from a different, sparser source — no anchor.
+    thin = _stamped(
+        {"id": "co-1", "schema": "Company", "properties": {"name": ["Acme"]}, "datasets": ["t"]},
+        "thin-feed",
+    )
+    write_entities(clean_graph, [thin])
+
+    after = clean_graph.execute_read(
+        "MATCH (n:Entity {id: 'co-1'}) "
+        "RETURN n.wikidata_id AS wikidata_id, n.prov_source_id AS source_id"
+    )[0]
+    # The prior anchor must NOT have been clobbered by the thinner re-emit (additive write).
+    assert after["wikidata_id"] == "Q1", (
+        "the prior wikidata_id anchor must survive a thinner re-emit (ADR 0060 additive "
+        "`SET n += props`); `SET n = props` clobbers it to None"
+    )
+    # And the node still carries provenance (G1 holds on every node across re-ingest).
+    assert after["source_id"], "the node must still carry prov_* after re-emit (G1)"
+
+
+def test_writer_refuses_unprovenanced_node(clean_graph: Neo4jClient) -> None:
+    """Fail closed (ADR 0060): an unprovenanced non-edge entity halts the write (node G1).
+
+    Defect 2 (ADR 0060): ADR 0055 made *edges* fail closed, but a non-edge entity reaching
+    Pass 1 with NO provenance was still written as a node with no ``prov_*`` — silently
+    violating "provenance on every node". The writer must raise ``NodeProvenanceError`` (a
+    ``ValueError`` mirroring ``EdgeProvenanceError``), naming the offending entity id, rather
+    than write an unprovenanced node.
+
+    RED today: ``NodeProvenanceError`` does not exist (ImportError) and/or ``write_entities``
+    writes the node silently (``DID NOT RAISE``). Either is red-for-the-right-reason.
+    """
+    # Imported inside the body so collection does not break before the builder adds the symbol.
+    from worldmonitor.graph.writer import NodeProvenanceError
+
+    ensure_constraints(clean_graph)
+    # A non-edge entity with NO provenance stamp — the exact node-side G1 hole.
+    orphan = make_entity(
+        {
+            "id": "orphan-1",
+            "schema": "Company",
+            "properties": {"name": ["Ghostless Co"]},
+            "datasets": ["t"],
+        }
+    )
+
+    # The error must name the offending entity id so the failure is attributable.
+    with pytest.raises(NodeProvenanceError, match="orphan-1"):
+        write_entities(clean_graph, [orphan])
+
+
+def test_ghost_endpoint_node_has_no_prov_and_does_not_raise(clean_graph: Neo4jClient) -> None:
+    """Ghost endpoints are EXEMPT from the node fail-closed (ADR 0060) — must stay GREEN.
+
+    A ghost endpoint is minted in Pass 2 by the entity-link ``ON CREATE SET t:Ghost`` (never
+    via ``generate_node_entity``), so it is a typed traversal-only placeholder with NO anchor
+    / ``prov_*`` by design (ADR 0046). The node fail-closed check is scoped to Pass-1 asserted
+    entities, so a ghost must continue to be WRITTEN without provenance and ``write_entities``
+    must NOT raise.
+
+    Guards against the builder OVER-fail-closing (raising on the legitimately-unprovenanced
+    ghost). Green today and must stay green after the fix.
+    """
+    ensure_constraints(clean_graph)
+
+    # A STAMPED Sanction whose entity target was never ingested -> a Pass-2 :Ghost endpoint.
+    sanction = _stamped(
+        {
+            "id": "san-ghost",
+            "schema": "Sanction",
+            "properties": {"entity": ["ghost-1"]},
+            "datasets": ["t"],
+        },
+        "ofac",
+    )
+
+    # Must NOT raise — the ghost endpoint is exempt from the node-provenance fail-closed check.
+    write_entities(clean_graph, [sanction])
+
+    ghost = clean_graph.execute_read(
+        "MATCH (g {id: 'ghost-1'}) "
+        "RETURN labels(g) AS labels, g.prov_source_id AS source_id, "
+        "g.prov_source_record AS source_record"
+    )
+    assert len(ghost) == 1, "the never-ingested Sanction target must be MERGEd as a node"
+    assert "Ghost" in ghost[0]["labels"], (
+        "the never-ingested target must be tagged :Ghost (ADR 0046)"
+    )
+    # A ghost carries NO provenance by design — and that is allowed (exempt).
+    assert ghost[0]["source_id"] is None, "a :Ghost endpoint carries no prov_source_id (exempt)"
+    assert ghost[0]["source_record"] is None, "a :Ghost endpoint carries no prov_source_record"
+
+    # The Sanction->ghost edge is preserved (the assertion is traversable).
+    edge = clean_graph.execute_read(
+        "MATCH (:Sanction {id: 'san-ghost'})-[r]->(:Ghost {id: 'ghost-1'}) RETURN count(r) AS n"
+    )[0]["n"]
+    assert edge == 1, "the Sanction->ghost edge must be preserved"

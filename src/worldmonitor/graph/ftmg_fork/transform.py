@@ -53,7 +53,6 @@ from ftmg.transform import (
     ENTITY_LABEL,
     QueryBatch,
     QueryBatcher,
-    generate_node_entity,
     generate_topic_labels,
     get_schema_labels,
 )
@@ -71,6 +70,60 @@ __all__ = [
     "generate_topic_labels",
     "get_schema_labels",
 ]
+
+
+def generate_node_entity(
+    config: Configuration,
+    proxy: ValueEntity,
+) -> Generator[QueryBatch, None, None]:
+    """Override of ``ftmg.transform.generate_node_entity`` — additive re-emit (ADR 0060, M-1).
+
+    Replicates upstream ``ftmg/transform.py:91-133`` VERBATIM — the property build, the
+    ``get_schema_labels`` multi-label derivation, the ``{id: props.id}`` MERGE key and the
+    ``UNWIND $batch AS props`` shape — replacing ONLY the SET clause: upstream's full-replace
+    ``SET n = props`` becomes additive ``SET n += props``.
+
+    Upstream ``SET n = props`` is a full node replace: a *thinner* re-emit of the same ``{id}``
+    (a sparser source variant, or a B-1 re-resolve) silently ERASES the node's prior anchors /
+    ``prov_*`` / ``prov_witnesses`` — a G1 (provenance-on-every-node) + anchor-stability
+    regression on any re-ingest. ``SET n += props`` ACCUMULATES, so prior anchors / provenance
+    are never lost (a value present earlier but absent in a later emit persists — correct for an
+    append-only resolved graph; a genuine retraction is the sign-off-gated ``delete_source`` path,
+    ADR 0045/0049, not a silent re-emit). The label is derived from ``get_schema_labels`` exactly
+    as upstream (NOT hardcoded), so every node keeps its ``:Entity`` base label + schema labels.
+    """
+    sconfig = config.nodes.schemata.get(proxy.schema.name)
+    if sconfig is None or sconfig.ignore:
+        return
+    assert proxy.id is not None
+
+    # Build properties dict (upstream 110-114, unchanged).
+    properties: QueryParams = {
+        "id": proxy.id,
+        "caption": proxy.caption,
+        "datasets": list(proxy.datasets),
+    }
+
+    # Process properties (upstream 117-123, unchanged).
+    for prop_name in sconfig.properties:
+        prop = proxy.schema.get(prop_name)
+        assert prop is not None
+
+        values = proxy.get(prop)
+        if len(values):
+            properties[prop.name] = values
+
+    # Create node with all labels, using MERGE to make it idempotent (upstream 126-127,
+    # unchanged). THE ONLY CHANGE vs upstream: `SET n += props` (additive) replaces the
+    # full-replace `SET n = props`, so a thinner re-emit cannot clobber prior anchors / prov_*.
+    labels = get_schema_labels(config, proxy.schema)
+    label = ":".join(labels)
+    create_query = f"""
+    UNWIND $batch AS props
+    MERGE (n:{label} {{id: props.id}})
+    SET n += props
+    """
+    yield QueryBatch(query=create_query, params=properties)
 
 
 def _node_match_label(config: Configuration, range_schema_name: str) -> str:

@@ -18,6 +18,7 @@ from worldmonitor.ontology.anchors import get_anchors, set_anchor
 from worldmonitor.ontology.ftm import make_entity
 from worldmonitor.plugins.connectors.geonames import GeoNamesConnector
 from worldmonitor.plugins.enrichers.wikidata import WikidataEnricher
+from worldmonitor.provenance.model import Provenance, stamp
 from worldmonitor.resolution.pipeline import resolve_pending
 from worldmonitor.settings import get_settings
 from worldmonitor.storage.landing import LandingStore
@@ -26,6 +27,17 @@ pytestmark = pytest.mark.integration
 
 _FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "geonames"
 _FIXTURE = str(_FIXTURES_DIR / "VA.txt")
+
+# ADR 0060 (fail-closed node provenance): a non-edge entity reaching the writer with NO
+# provenance is refused (the node half of G1). Real ingest stamps every entity before queueing
+# (run_ingest -> connector.map(provenance=...)), so these node fixtures must be stamped too —
+# stamping only; the anchor-projection assertions are unaffected by provenance.
+_PROV = Provenance(
+    source_id="src:anchor-test",
+    retrieved_at="2026-06-21T00:00:00Z",
+    reliability="A",
+    source_record="s3://landing/anchor-test.json",
+)
 
 
 @pytest.fixture
@@ -59,13 +71,16 @@ def test_wikidata_live_lookup_anchors_known_org() -> None:
 
 def test_writer_projects_anchor_onto_node(clean_graph: Neo4jClient) -> None:
     ensure_constraints(clean_graph)
-    entity = make_entity(
-        {
-            "id": "org-1",
-            "schema": "Organization",
-            "properties": {"name": ["Acme"]},
-            "datasets": ["t"],
-        }
+    entity = stamp(
+        make_entity(
+            {
+                "id": "org-1",
+                "schema": "Organization",
+                "properties": {"name": ["Acme"]},
+                "datasets": ["t"],
+            }
+        ),
+        _PROV,
     )
     set_anchor(entity, "wikidata_id", "Q12345")
     write_entities(clean_graph, [entity])
@@ -113,13 +128,16 @@ def test_pipeline_anchors_resolved_entity(clean_graph: Neo4jClient, postgres_dsn
     sessions = session_factory(engine)
     ensure_constraints(clean_graph)
 
-    raw = make_entity(
-        {
-            "id": "org-q",
-            "schema": "Organization",
-            "properties": {"name": ["Anchored Org"], "wikidataId": ["Q98765"]},
-            "datasets": ["t"],
-        }
+    raw = stamp(
+        make_entity(
+            {
+                "id": "org-q",
+                "schema": "Organization",
+                "properties": {"name": ["Anchored Org"], "wikidataId": ["Q98765"]},
+                "datasets": ["t"],
+            }
+        ),
+        _PROV,
     ).to_dict()
     with sessions() as session:
         session.add(

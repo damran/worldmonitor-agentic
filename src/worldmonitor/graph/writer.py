@@ -35,7 +35,6 @@ from ftmg.config import Configuration, DatabaseConfig
 from ftmg.transform import (
     QueryBatch,
     QueryBatcher,
-    generate_node_entity,
     generate_topic_labels,
 )
 from sqlalchemy.orm import Session
@@ -43,12 +42,15 @@ from sqlalchemy.orm import Session
 # Gate D / ADR 0046: the two abstract-``Thing``-range drop sites are re-keyed off
 # ``prop.type == registry.entity`` (with an ``ENTITY_LABEL`` fallback) in the thin
 # ``ftmg_fork`` override, so a ``Sanction.entity → Thing`` / ``UnknownLink.subject → Thing``
-# link materializes instead of being dropped at the range-schema lookup. Everything else
-# (nodes, topic labels, QueryBatch/QueryBatcher) stays upstream — the ftmg boundary lives in
-# this module + ``ftmg_fork`` only.
+# link materializes instead of being dropped at the range-schema lookup.
+# Gate M-1 / ADR 0060: ``generate_node_entity`` is ALSO imported from the fork — its SET clause
+# is additive (``SET n += props``) so a thinner re-emit cannot clobber a node's prior anchors /
+# ``prov_*``. Everything else (topic labels, QueryBatch/QueryBatcher) stays upstream — the ftmg
+# boundary lives in this module + ``ftmg_fork`` only.
 from worldmonitor.graph.ftmg_fork import (
     generate_edge_entity,
     generate_entity_links,
+    generate_node_entity,
 )
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.ontology.anchors import get_anchors
@@ -67,6 +69,21 @@ class EdgeProvenanceError(ValueError):
     empty dict and the edge would otherwise land **silently unprovenanced**, corrupting
     the GDPR/audit log. Per ADR 0055 the writer fails closed: it raises this (naming the
     offending asserting entity's id) rather than write an untraceable edge.
+    """
+
+
+class NodeProvenanceError(ValueError):
+    """A non-edge entity reaching the writer with no provenance (the node half of G1).
+
+    G1 (non-negotiable): provenance on every node *and* every edge. ADR 0055 made *edges*
+    fail closed, but a non-edge entity reaching ``write_entities`` Pass 1 with no provenance
+    would otherwise be written as a node with **no** ``prov_*`` — silently violating
+    "provenance on every node" and corrupting the GDPR/audit log. Per ADR 0060 the writer
+    fails closed on the node side too: if :func:`provenance_node_properties` returns an empty
+    dict for an asserted (Pass-1) entity, it raises this (naming the offending entity's id)
+    rather than write an unprovenanced node. **Ghost endpoints are exempt by construction:**
+    a ghost is minted in Pass 2 by the entity-link ``ON CREATE SET t:Ghost`` (never via
+    ``generate_node_entity``), so it is never subject to this Pass-1 check (ADR 0046).
     """
 
 
@@ -184,6 +201,17 @@ def write_entities(client: Neo4jClient, entities: Iterable[FtmEntity]) -> None:
         for entity in materialized:
             if entity.schema.edge:
                 continue
+            # Fail closed on the node side of G1 (ADR 0060): an asserted (Pass-1) entity with
+            # NO provenance would otherwise be written as a node with no prov_* — silently
+            # violating "provenance on every node". Raise rather than corrupt the audit log.
+            # (Ghost endpoints are exempt: they are minted in Pass 2 by the entity-link
+            # `ON CREATE SET t:Ghost`, never via generate_node_entity, so they never reach here.)
+            if not provenance_node_properties(entity):
+                raise NodeProvenanceError(
+                    f"refusing to write unprovenanced node for entity {entity.id} "
+                    f"(schema {entity.schema.name}): G1 requires provenance on every node "
+                    "(ADR 0060)"
+                )
             for batch in generate_node_entity(config, entity):
                 batcher.add(_with_props(batch, node_props_by_id))
         batcher.flush()
