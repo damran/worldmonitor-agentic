@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     # Finished (ok/error) task_run rows older than this are pruned on driver startup
     # so the history table does not grow without bound (ADR 0029 follow-up). 0 disables.
     task_run_retention_days: int = Field(default=30, ge=0)
+    # Dead-letter (``ingest_dead_letter``) rows older than this are pruned on driver startup so the
+    # replayable error-audit table does not grow without bound (Gate B-4d / ADR 0053). 0 disables.
+    dead_letter_retention_days: int = Field(default=30, ge=0)
 
     # --- Driver supervision & containerization (Gate B-4c / ADR 0051) ---
     # The driver writes a last-tick heartbeat FILE (per-container; not a table) once per loop
