@@ -1,8 +1,39 @@
 # 0045 — Value-level (per-claim) provenance: StatementEntity fusion + two-tier witness model
 
-- **Status:** PROPOSED
-- **Date:** 2026-06-25
+- **Status:** ACCEPTED (2026-06-27) — **Tier-1 shipped; Tier-2 deferred with an upgrade trigger** (see
+  the Acceptance section directly below). Decided with the user during the cross-workflow Phase C fork.
+- **Date:** 2026-06-25 (accepted 2026-06-27)
 - **Gate:** C — Value-Level Provenance (`docs/reviews/GATE_C_VALUE_PROVENANCE_SPEC.md`). **BUILD gate.**
+
+## Acceptance (2026-06-27) — Tier-1 accepted as the current model; Tier-2 deferred
+
+The cross-workflow comparison (`docs/reviews/CROSS_WORKFLOW_REVIEW.md`) surfaced the sibling line's
+reified `:Statement`/`:Source` Tier-2 provenance and asked: is B's Tier-1-only live graph a real gap?
+A file:line deep-read (recorded in the cross-workflow review) found the gap is **real but its payoff is
+Phase-2-shaped**, and the decision was taken **with the user** to **defer Tier-2**:
+
+- **Tier-1 is ACCEPTED and shipped** (live): `prov_*` on every node+edge (G1) + the per-property
+  `prov_witnesses` JSON map (`provenance/model.py`, `graph/writer.py`), source-scoped GDPR erasure
+  (`graph/ops.py::erase_source_graph`, **value-complete for sole-source entities** — stronger than the
+  sibling's lineage-only `delete_source`). This is sufficient for property-level provenance, the
+  catastrophic-merge audit log, and the current (write-side) phase.
+- **Tier-2 is DEFERRED, not rejected**: the reified `(:Statement)-[:FROM_SOURCE]->(:Source)` write pass,
+  the `config/audited_properties.yml` allow-list + loader, and value-level `delete_source` remain
+  **specified-but-unbuilt**. They are additive (no Tier-1 rework needed to add them later).
+- **What deferral costs:** per-value attribution, in-Cypher value-level conflict detection, and
+  value-level GDPR erasure *inside a multi-witness property* stay Python-side / unavailable until built.
+  (The erasure corner is tracked as `WM-ERASE-T2` in [0049](0049-cross-store-gdpr-source-erasure.md).)
+
+### Tier-2 upgrade trigger (build it when EITHER holds)
+1. The **Phase-2 read API/MCP** needs to expose **per-statement lineage** (e.g. `GET /entity/{id}/statements`
+   listing per-source values, timestamps, reliability) or in-Cypher value-level conflict surfacing; OR
+2. **Value-level GDPR erasure inside a multi-witness property** becomes a requirement (the `WM-ERASE-T2`
+   follow-up) — i.e. removing one source's specific value from a property other sources also witness.
+
+### Reversibility
+Additive / low-regret. Building Tier-2 later does **not** rework Tier-1 (it adds a write pass + delete
+branch gated by an allow-list). Estimated cost when triggered: ~2–3 days + 3–5× write amplification on
+allow-listed props only. Until a trigger fires, Tier-1 + the witness map is the accepted model.
 - **Deepens (does NOT overturn):** [0018](0018-provenance-as-ftm-context-properties.md) — 0018:29-30
   explicitly anticipated this debt ("provenance is currently single-source per entity; multi-source
   provenance after a merge collapses to the surviving context values. Revisit if per-claim provenance is
@@ -184,14 +215,27 @@ incremental/streaming-ER (OPEN fork of ADR 0019); a new datastore / parallel mod
 cutover. The `followthemoney` API used MUST be verified verbatim before any code (`VERIFIED_API.md`;
 spec §2) — a paraphrased/unverified binding is a judge DENY.
 
-## Builder record (to be completed before this ADR is ACCEPTED)
+## Builder record (resolved at acceptance, 2026-06-27)
 
-- Verbatim `StatementEntity` / `Statement` / `Dataset` signatures + the `merge` type-branch evidence in
-  `VERIFIED_API.md`.
-- The `StatementEntity`→writer handoff (does `ftmg` accept the `StatementEntity` directly, or is an
-  equal-valued value entity produced for the write — and the proof their value sets match).
-- The Tier-1 Neo4j encoding chosen (JSON string `prov_witnesses` vs flattened `prov_src_<prop>` arrays).
-- The Tier-2 `:Statement` MERGE key (FtM `Statement.id` vs a `(canonical_id, prop, value, dataset)` hash).
-- `pyyaml` added (a) or stdlib/`tomllib`/constant (b) for the allow-list, and the final allow-list.
-- Whether a `delete_source` audit table (`0007_*`) shipped or an audit log sufficed.
-- Confirmation the value-set-invariance fence (A10) passes for every cluster shape.
+**Tier-1 (shipped) — DONE:**
+- ✅ Verbatim `StatementEntity` / `Statement` / `Dataset` signatures + the `merge` type-branch evidence
+  recorded in `VERIFIED_API.md`.
+- ✅ `StatementEntity`→writer handoff: the fused `StatementEntity`'s per-prop dataset sets are projected
+  via `resolution/merge.py::_witness_map_from_statements` → `stamp_witness_map` → the flat node path in
+  `graph/writer.py`; the value-set-invariance fence (below) proves the written value set matches the
+  `ValueEntity` path.
+- ✅ Tier-1 Neo4j encoding chosen: **JSON string `prov_witnesses`** (`{prop: [datasets]}`), projected
+  alongside `get_anchors` + `prov_*` (`provenance/model.py::witness_node_properties`, `graph/writer.py`).
+- ✅ Value-set-invariance fence passes for every cluster shape (`tests/unit/test_provenance_witnesses.py`
+  + the merge/witness suites) — the change is lineage-only / person-neutral.
+- ✅ `delete_source`: shipped as the Tier-1 op `graph/ops.py::erase_source_graph` (ADR 0049),
+  value-complete for sole-source nodes; an audit row lands via the `TaskRun(kind="erase")` record (no
+  separate `0007_*` table needed — the log sufficed).
+
+**Tier-2 (DEFERRED, 2026-06-27 — see the Acceptance section's upgrade trigger) — NOT built:**
+- ⏸ The Tier-2 `:Statement` MERGE key (FtM `Statement.id` vs a `(canonical_id, prop, value, dataset)`
+  hash) — to be chosen when Tier-2 is built.
+- ⏸ `pyyaml` (a) vs stdlib `tomllib`/constant (b) for the allow-list, and the final allow-list — deferred.
+  (Lean: option (b), a stdlib/constant allow-list, to avoid a new dep — but not binding until built.)
+- ⏸ The reified `(:Statement)-[:FROM_SOURCE]->(:Source)` write pass + value-level `delete_source` branch.
+- ⏸ Value-level erasure inside a multi-witness property → tracked as `WM-ERASE-T2` (ADR 0049).
