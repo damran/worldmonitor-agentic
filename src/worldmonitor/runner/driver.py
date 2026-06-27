@@ -412,6 +412,10 @@ def build_driver(settings: Settings | None = None) -> IngestDriver:
     from ``worldmonitor.plugins.connectors``.
     """
     settings = settings or get_settings()
+    # Fail closed: a non-development boot with a placeholder secret halts loud here, before any
+    # store client is built (ADR 0061). Development is unaffected (placeholders allowed locally).
+    # The cheap --healthcheck path in main() never reaches here, so it stays connection-free.
+    settings.validate_production_secrets()
     return IngestDriver(
         registry=discover_connectors(),
         sessions=session_factory(engine_from_settings(settings)),

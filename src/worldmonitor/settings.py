@@ -12,6 +12,17 @@ from typing import Literal
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Placeholder/weak markers a non-development boot refuses (ADR 0061). A secret the app
+# reads is rejected if it is empty or contains one of these — the realistic "forgot to
+# replace change-me" footgun. NOT an entropy/strength check (a strong-looking but weak
+# password passes anyway); a real Fernet key / any non-placeholder value is accepted.
+_PLACEHOLDER_SECRET_MARKERS = ("change-me", "worldmonitor123")
+
+# Local/CI environments where placeholder secrets are allowed (the unit suite boots create_app with
+# environment="test"). Anything NOT in this set — production, staging, or an unknown/typo'd value —
+# enforces the placeholder check (fail CLOSED on unknown). ADR 0061.
+_LOCAL_ENVIRONMENTS = ("development", "test")
+
 
 class Settings(BaseSettings):
     """Process configuration, loaded from the environment (and ``.env`` in dev)."""
@@ -159,6 +170,37 @@ class Settings(BaseSettings):
                 f"(got low={self.sensitivity_abstain_low}, high={self.sensitivity_abstain_high})"
             )
         return self
+
+    def validate_production_secrets(self) -> None:
+        """Fail closed outside the local/test environments on a placeholder secret (ADR 0061).
+
+        LOCAL environments ``development``/``test`` allow placeholders (the unit suite boots
+        ``create_app`` with ``environment="test"`` and no ``.env``) and return immediately. EVERY
+        other value — ``production``, ``staging``, or an unrecognized/typo'd string — enforces (fail
+        CLOSED on unknown): raise ``ValueError`` naming the field if a secret the app actually reads
+        is a placeholder/weak value: ``config_encryption_key`` empty or ``change-me``; or
+        ``change-me``/``worldmonitor123`` inside ``postgres_dsn``/``redis_url``/``neo4j_password``/
+        ``minio_secret_key``. A plain marker check — NO entropy scoring; a real Fernet key passes.
+        """
+        if self.environment in _LOCAL_ENVIRONMENTS:
+            return
+
+        if not self.config_encryption_key or self.config_encryption_key == "change-me":
+            raise ValueError(
+                "config_encryption_key is a placeholder/empty value; set a real secret "
+                f"(non-development environment={self.environment!r} refuses placeholders, ADR 0061)"
+            )
+
+        guarded_fields = ("postgres_dsn", "redis_url", "neo4j_password", "minio_secret_key")
+        for field in guarded_fields:
+            value: str = getattr(self, field)
+            for marker in _PLACEHOLDER_SECRET_MARKERS:
+                if marker in value:
+                    raise ValueError(
+                        f"{field} contains placeholder/guessable marker {marker!r}; set a real "
+                        f"secret (non-development environment={self.environment!r} refuses "
+                        "placeholders, ADR 0061)"
+                    )
 
     @property
     def sqlalchemy_dsn(self) -> str:
