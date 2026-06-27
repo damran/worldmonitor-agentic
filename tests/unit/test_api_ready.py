@@ -20,6 +20,15 @@ in :func:`create_app`):
   ``.ready`` else **503** + body. Body is ``{"ready": bool, "checks": {...}}``.
 * ``/ready`` is reachable WITHOUT auth (public, like ``/health``).
 
+Phase-D extension (ADR 0059) — a NON-FATAL ``driver`` component on ``/ready``:
+
+* ``check_readiness`` gains a ``driver_probe`` keyword: a zero-arg callable returning a
+  freshness **status string** ``"ok"`` | ``"stale"`` | ``"unknown"`` (NOT raise-based — the
+  driver is non-fatal). If it raises, it is recorded ``"unknown"``.
+* ``ReadinessResult.checks`` gains a ``"driver"`` key carrying that string. ``.ready`` stays
+  gated on the THREE STORE probes ONLY — the driver field is pure observability and never
+  flips ``ready`` or the HTTP status. A dead driver must NOT 503 the API (separate services).
+
 NOTE: ``tests/unit/test_api_health.py`` is FROZEN; the ``/health`` contrast assertion lives
 here, not there.
 """
@@ -37,6 +46,7 @@ from worldmonitor.authz.oidc import InvalidTokenError
 from worldmonitor.settings import Settings
 
 Probe = Callable[[], None]
+DriverProbe = Callable[[], str]
 _STORES = ("postgres", "neo4j", "minio")
 
 
@@ -48,6 +58,26 @@ def _ok_probe() -> None:
 def _down_probe() -> None:
     """An unreachable store: a probe raises (must be caught, never a 500)."""
     raise RuntimeError("store unreachable")
+
+
+def _driver_ok() -> str:
+    """A fresh driver heartbeat -> ``"ok"`` (non-fatal observability)."""
+    return "ok"
+
+
+def _driver_stale() -> str:
+    """A stale/missing driver heartbeat -> ``"stale"`` (still NON-FATAL)."""
+    return "stale"
+
+
+def _driver_unknown() -> str:
+    """Heartbeat path unset/unreadable -> ``"unknown"`` (still NON-FATAL)."""
+    return "unknown"
+
+
+def _driver_raises() -> str:
+    """A driver probe that blows up — must degrade to ``"unknown"``, never a 500."""
+    raise RuntimeError("heartbeat unreadable")
 
 
 class _RejectAllVerifier:
@@ -62,12 +92,14 @@ def _readiness(
     postgres: Probe = _ok_probe,
     neo4j: Probe = _ok_probe,
     minio: Probe = _ok_probe,
+    driver: DriverProbe = _driver_ok,
 ) -> Callable[[], ReadinessResult]:
     """A zero-arg readiness callable wired to the real ``check_readiness`` + fake probes."""
     return lambda: check_readiness(
         postgres_probe=postgres,
         neo4j_probe=neo4j,
         minio_probe=minio,
+        driver_probe=driver,
     )
 
 
@@ -92,10 +124,16 @@ def test_check_readiness_all_ok_is_ready() -> None:
         postgres_probe=_ok_probe,
         neo4j_probe=_ok_probe,
         minio_probe=_ok_probe,
+        driver_probe=_driver_ok,
     )
     assert isinstance(result, ReadinessResult)
     assert result.ready is True
-    assert result.checks == {"postgres": "ok", "neo4j": "ok", "minio": "ok"}
+    assert result.checks == {
+        "postgres": "ok",
+        "neo4j": "ok",
+        "minio": "ok",
+        "driver": "ok",
+    }
 
 
 @pytest.mark.parametrize("down", _STORES)
@@ -106,6 +144,7 @@ def test_check_readiness_one_store_down_is_not_ready(down: str) -> None:
         postgres_probe=probes["postgres"],
         neo4j_probe=probes["neo4j"],
         minio_probe=probes["minio"],
+        driver_probe=_driver_ok,
     )
     assert result.ready is False
     assert result.checks[down] == "down"
@@ -113,6 +152,96 @@ def test_check_readiness_one_store_down_is_not_ready(down: str) -> None:
     for store in _STORES:
         if store != down:
             assert result.checks[store] == "ok"
+
+
+# --- Phase-D (ADR 0059): NON-FATAL driver-heartbeat freshness -------------- #
+
+
+def test_check_readiness_fresh_driver_is_ok_and_ready_stays_true() -> None:
+    """(1) Fresh driver -> ``"ok"``; the driver field never lowers ``ready``."""
+    result = check_readiness(
+        postgres_probe=_ok_probe,
+        neo4j_probe=_ok_probe,
+        minio_probe=_ok_probe,
+        driver_probe=_driver_ok,
+    )
+    assert result.ready is True
+    assert result.checks == {
+        "postgres": "ok",
+        "neo4j": "ok",
+        "minio": "ok",
+        "driver": "ok",
+    }
+
+
+def test_check_readiness_stale_driver_is_non_fatal() -> None:
+    """(2) A stale driver is reported but does NOT flip ``ready`` to False."""
+    result = check_readiness(
+        postgres_probe=_ok_probe,
+        neo4j_probe=_ok_probe,
+        minio_probe=_ok_probe,
+        driver_probe=_driver_stale,
+    )
+    assert result.ready is True  # NON-FATAL — not False
+    assert result.checks["driver"] == "stale"
+    # The stores are still individually ok (driver staleness changed nothing about them).
+    for store in _STORES:
+        assert result.checks[store] == "ok"
+
+
+def test_ready_route_returns_200_when_driver_is_stale() -> None:
+    """(2) Through the real route: a stale driver does NOT 503 a healthy API."""
+    resp = _client(_readiness(driver=_driver_stale)).get("/ready")
+    assert resp.status_code == 200  # driver staleness must not 503
+    body = resp.json()
+    assert body["ready"] is True
+    assert body["checks"]["driver"] == "stale"
+    assert body["checks"] == {
+        "postgres": "ok",
+        "neo4j": "ok",
+        "minio": "ok",
+        "driver": "stale",
+    }
+
+
+@pytest.mark.parametrize("down", _STORES)
+def test_check_readiness_reports_driver_independent_of_down_store(down: str) -> None:
+    """(3) The driver field is reported regardless of fatal store state."""
+    probes: dict[str, Probe] = dict.fromkeys(_STORES, _ok_probe)
+    probes[down] = _down_probe
+    result = check_readiness(
+        postgres_probe=probes["postgres"],
+        neo4j_probe=probes["neo4j"],
+        minio_probe=probes["minio"],
+        driver_probe=_driver_ok,
+    )
+    # A store is down -> still NOT ready (fatal), but the driver field is still surfaced.
+    assert result.ready is False
+    assert result.checks[down] == "down"
+    assert result.checks["driver"] == "ok"
+
+
+def test_ready_route_503_on_down_store_still_reports_driver_ok() -> None:
+    """(3) Through the route: store-down 503 is unchanged; driver field rides along."""
+    resp = _client(_readiness(neo4j=_down_probe, driver=_driver_ok)).get("/ready")
+    assert resp.status_code == 503  # store-down fatal semantics intact
+    body = resp.json()
+    assert body["ready"] is False
+    assert body["checks"]["neo4j"] == "down"
+    assert body["checks"]["driver"] == "ok"
+
+
+@pytest.mark.parametrize("probe", [_driver_unknown, _driver_raises])
+def test_check_readiness_driver_unknown_is_tolerated(probe: DriverProbe) -> None:
+    """(4) ``"unknown"`` (returned OR raised) is tolerated; ready stays store-gated."""
+    result = check_readiness(
+        postgres_probe=_ok_probe,
+        neo4j_probe=_ok_probe,
+        minio_probe=_ok_probe,
+        driver_probe=probe,
+    )
+    assert result.checks["driver"] == "unknown"
+    assert result.ready is True  # all stores ok -> ready, driver irrelevant to the gate
 
 
 # --- /ready route (TestClient + injected fake probes) ---------------------- #
@@ -123,7 +252,12 @@ def test_ready_returns_200_and_all_ok_body_when_every_store_up() -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["ready"] is True
-    assert body["checks"] == {"postgres": "ok", "neo4j": "ok", "minio": "ok"}
+    assert body["checks"] == {
+        "postgres": "ok",
+        "neo4j": "ok",
+        "minio": "ok",
+        "driver": "ok",
+    }
 
 
 @pytest.mark.parametrize("down", _STORES)

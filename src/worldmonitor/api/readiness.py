@@ -23,17 +23,24 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy import text
 
 from worldmonitor.db.engine import engine_from_settings, session_factory
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.runner.heartbeat import Heartbeat
 from worldmonitor.settings import Settings, get_settings
 from worldmonitor.storage.landing import LandingStore
 
 Probe = Callable[[], None]
+# The driver probe is NON-FATAL: it RETURNS a freshness string ("ok"/"stale"/"unknown")
+# rather than raising. If it does raise, the caller degrades it to "unknown" (ADR 0059).
+DriverProbe = Callable[[], str]
 
-# Component order is stable so the body reads the same every call.
+# Store component order is stable so the body reads the same every call. The driver field is
+# appended after these — it is observability only and is EXCLUDED from the fatal ready gate.
 _COMPONENTS = ("postgres", "neo4j", "minio")
 
 
@@ -50,11 +57,17 @@ def check_readiness(
     postgres_probe: Probe,
     neo4j_probe: Probe,
     minio_probe: Probe,
+    driver_probe: DriverProbe,
 ) -> ReadinessResult:
-    """Run each injected probe; ready IFF all three succeed (fail-closed).
+    """Run the three STORE probes; ready IFF all three succeed (fail-closed).
 
-    A probe that raises (for ANY reason) marks its component ``"down"`` — never a 500.
+    A store probe that raises (for ANY reason) marks its component ``"down"`` — never a 500.
     The reachable components stay ``"ok"`` so the body always names exactly what failed.
+
+    The ``driver_probe`` is **non-fatal** (ADR 0059): it RETURNS a freshness string
+    (``"ok"``/``"stale"``/``"unknown"``) recorded under ``checks["driver"]``; if it raises it
+    degrades to ``"unknown"``. It is pure observability — it NEVER flips ``ready`` or the HTTP
+    status. ``ready`` is computed over the THREE STORES ONLY, before the driver field is added.
     """
     probes: dict[str, Probe] = {
         "postgres": postgres_probe,
@@ -68,7 +81,12 @@ def check_readiness(
             checks[component] = "ok"
         except Exception:  # noqa: BLE001 - any failure means the store is unreachable -> "down"
             checks[component] = "down"
-    ready = all(state == "ok" for state in checks.values())
+    # The ready gate is STORES-ONLY — fix it BEFORE the non-fatal driver field is appended.
+    ready = all(checks[component] == "ok" for component in _COMPONENTS)
+    try:
+        checks["driver"] = driver_probe()
+    except Exception:  # noqa: BLE001 - driver is non-fatal: any failure degrades to "unknown"
+        checks["driver"] = "unknown"
     return ReadinessResult(ready=ready, checks=checks)
 
 
@@ -131,8 +149,30 @@ def build_default_readiness(
         # never ensure_bucket (storage/landing.py stays untouched).
         landing.client.head_bucket(Bucket=landing.bucket)
 
+    def driver_probe() -> str:
+        # NON-FATAL driver-heartbeat freshness (ADR 0059): read B's existing FILE heartbeat
+        # (runner.heartbeat.Heartbeat) — no new table/migration. Fresh -> "ok"; missing/stale/
+        # unparseable -> "stale" (is_alive fails closed); path unset/empty or an unexpected read
+        # error -> "unknown". This NEVER raises into the fatal path and NEVER flips ``ready``.
+        path = settings.driver_heartbeat_path
+        if not path:
+            return "unknown"
+        heartbeat = Heartbeat(Path(path), settings.driver_heartbeat_stale_seconds)
+        status: dict[str, bool] = {}
+
+        def read() -> None:
+            status["alive"] = heartbeat.is_alive(datetime.now(UTC))
+
+        try:
+            # Bound the read like the store probes so a wedged filesystem can't hang /ready.
+            _bounded(read, timeout)()
+        except Exception:  # noqa: BLE001 - any failure (timeout/unexpected) degrades to "unknown"
+            return "unknown"
+        return "ok" if status["alive"] else "stale"
+
     return lambda: check_readiness(
         postgres_probe=_bounded(postgres_probe, timeout),
         neo4j_probe=_bounded(neo4j_probe, timeout),
         minio_probe=_bounded(minio_probe, timeout),
+        driver_probe=driver_probe,
     )
