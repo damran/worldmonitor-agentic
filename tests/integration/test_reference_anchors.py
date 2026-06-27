@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -18,11 +19,25 @@ from worldmonitor.ontology.ftm import make_entity
 from worldmonitor.plugins.connectors.geonames import GeoNamesConnector
 from worldmonitor.plugins.enrichers.wikidata import WikidataEnricher
 from worldmonitor.resolution.pipeline import resolve_pending
+from worldmonitor.settings import get_settings
 from worldmonitor.storage.landing import LandingStore
 
 pytestmark = pytest.mark.integration
 
-_FIXTURE = str(Path(__file__).parent.parent / "fixtures" / "geonames" / "VA.txt")
+_FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "geonames"
+_FIXTURE = str(_FIXTURES_DIR / "VA.txt")
+
+
+@pytest.fixture
+def _allow_geonames_fixtures(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Allowlist wiring ONLY (Gate H-6/H-7, ADR 0052 §9): the local ``path`` override is
+    default-deny, so point ``geonames_allowed_path_dir`` at the fixtures dir for the in-tree fixture
+    ingest below (env + ``get_settings.cache_clear()``, the suite-wide pattern). No asserts change.
+    """
+    monkeypatch.setenv("GEONAMES_ALLOWED_PATH_DIR", str(_FIXTURES_DIR))
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def test_wikidata_live_lookup_anchors_known_org() -> None:
@@ -59,7 +74,9 @@ def test_writer_projects_anchor_onto_node(clean_graph: Neo4jClient) -> None:
     assert rows[0]["wd"] == "Q12345"
 
 
-def test_geonames_ingest_via_fixture(minio: tuple[str, str, str], postgres_dsn: str) -> None:
+def test_geonames_ingest_via_fixture(
+    minio: tuple[str, str, str], postgres_dsn: str, _allow_geonames_fixtures: None
+) -> None:
     endpoint, access_key, secret_key = minio
     landing = LandingStore.connect(
         endpoint=endpoint, access_key=access_key, secret_key=secret_key, bucket="landing"

@@ -15,7 +15,7 @@
     "path": {
       "type": "string",
       "title": "Local dump path",
-      "description": "Optional path to a local {CC}.txt dump (overrides live download)."
+      "description": "DEV/OFFLINE ONLY: path to a local {CC}.txt dump that overrides the live download. NOT a security boundary — this schema also drives the self-service config form, so the runtime confines the path to GEONAMES_ALLOWED_PATH_DIR (realpath-inside-allowlist, defeating absolute/../symlink escapes) and a GEONAMES_MAX_PATH_BYTES size cap. Leave unset (and GEONAMES_ALLOWED_PATH_DIR unset = default-deny) in production."
     }
   },
   "required": ["country"],
