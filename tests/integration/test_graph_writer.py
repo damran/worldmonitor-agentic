@@ -44,21 +44,31 @@ def test_writer_writes_nodes_and_edges(clean_graph: Neo4jClient) -> None:
     (Single-tenant, D1 / ADR 0042: ftmg's native ``{id}`` MERGE key is used directly,
     so this no longer asserts a per-tenant stamp — the per-edge provenance that DID
     survive the teardown is the subject of ``test_writer_stamps_provenance_on_every_edge``.)
+
+    ADR 0055: the asserting entities are now *stamped* — the realistic,
+    contract-respecting case. The unstamped ``Ownership`` edge this test used to
+    build (incidental to its node/edge *materialisation* purpose) is a G1 violation
+    under fail-closed edge provenance and is covered by
+    ``test_writer_refuses_unprovenanced_edge``. Every materialisation assertion here
+    is preserved.
     """
     ensure_constraints(clean_graph)
-    person = make_entity(
-        {"id": "p-1", "schema": "Person", "properties": {"name": ["Alice"]}, "datasets": ["t"]}
+    person = _stamped(
+        {"id": "p-1", "schema": "Person", "properties": {"name": ["Alice"]}, "datasets": ["t"]},
+        "person",
     )
-    company = make_entity(
-        {"id": "c-1", "schema": "Company", "properties": {"name": ["ACME"]}, "datasets": ["t"]}
+    company = _stamped(
+        {"id": "c-1", "schema": "Company", "properties": {"name": ["ACME"]}, "datasets": ["t"]},
+        "company",
     )
-    ownership = make_entity(
+    ownership = _stamped(
         {
             "id": "o-1",
             "schema": "Ownership",
             "properties": {"owner": ["p-1"], "asset": ["c-1"]},
             "datasets": ["t"],
-        }
+        },
+        "ownership",
     )
 
     write_entities(clean_graph, [person, company, ownership])
@@ -69,6 +79,47 @@ def test_writer_writes_nodes_and_edges(clean_graph: Neo4jClient) -> None:
 
     edge_rows = clean_graph.execute_read("MATCH ()-[r]->() RETURN count(r) AS n")
     assert edge_rows and edge_rows[0]["n"], "expected the ownership relationship to be written"
+
+
+def test_writer_refuses_unprovenanced_edge(clean_graph: Neo4jClient) -> None:
+    """Fail closed (ADR 0055): an unprovenanced edge-asserting entity halts the write.
+
+    G1 is "provenance on every node AND edge". The endpoints (person, company) are
+    stamped and would write fine, but the ``Ownership`` *edge* entity is UNSTAMPED —
+    so ``provenance_node_properties`` yields ``{}`` and, under the old ``if edge_props:``
+    guard, the edge would land **silently unprovenanced** (the G1 hole). The writer
+    must instead raise ``EdgeProvenanceError`` naming the offending entity id, rather
+    than corrupt the audit log.
+
+    RED today: ``EdgeProvenanceError`` does not yet exist (ImportError) and/or
+    ``write_entities`` does not raise (``DID NOT RAISE``) — it silently writes the
+    unprovenanced edge. Either is the correct red-for-the-right-reason.
+    """
+    from worldmonitor.graph.writer import EdgeProvenanceError
+
+    ensure_constraints(clean_graph)
+    person = _stamped(
+        {"id": "p-1", "schema": "Person", "properties": {"name": ["Alice"]}, "datasets": ["t"]},
+        "person",
+    )
+    company = _stamped(
+        {"id": "c-1", "schema": "Company", "properties": {"name": ["ACME"]}, "datasets": ["t"]},
+        "company",
+    )
+    # Unstamped edge entity — the assertion that creates the relationship has NO
+    # provenance. This is the exact case the fail-closed guard must refuse.
+    ownership = make_entity(
+        {
+            "id": "o-1",
+            "schema": "Ownership",
+            "properties": {"owner": ["p-1"], "asset": ["c-1"]},
+            "datasets": ["t"],
+        }
+    )
+
+    # The error must name the offending entity id so the failure is attributable.
+    with pytest.raises(EdgeProvenanceError, match="o-1"):
+        write_entities(clean_graph, [person, company, ownership])
 
 
 def test_writer_stamps_provenance_on_every_edge(clean_graph: Neo4jClient) -> None:

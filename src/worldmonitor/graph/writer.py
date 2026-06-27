@@ -57,6 +57,19 @@ from worldmonitor.provenance.model import provenance_node_properties, witness_no
 from worldmonitor.resolution.canonical import resolve_durable
 
 
+class EdgeProvenanceError(ValueError):
+    """An edge/relationship asserted by an entity that carries no provenance (G1).
+
+    G1 (non-negotiable): provenance on every node *and* every edge. ``write_entities``
+    projects a relationship's provenance from its *asserting* entity — the edge entity
+    itself (Ownership/Sanction/…) or, for an entity-reference link, the property-holder.
+    If that asserting entity is unstamped, :func:`provenance_node_properties` returns an
+    empty dict and the edge would otherwise land **silently unprovenanced**, corrupting
+    the GDPR/audit log. Per ADR 0055 the writer fails closed: it raises this (naming the
+    offending asserting entity's id) rather than write an untraceable edge.
+    """
+
+
 def _inject_props(
     params: dict[str, Any],
     node_props_by_id: dict[str, dict[str, str]] | None = None,
@@ -187,13 +200,35 @@ def write_entities(client: Neo4jClient, entities: Iterable[FtmEntity]) -> None:
         for entity in materialized:
             edge_prov = provenance_node_properties(entity)
             if entity.schema.edge:
+                # An edge-schema entity is, by definition, a relationship assertion. If it
+                # carries no provenance the edge would land silently unprovenanced (the G1
+                # hole) — fail closed (ADR 0055) instead of corrupting the audit log.
+                if not edge_prov:
+                    raise EdgeProvenanceError(
+                        f"refusing to write unprovenanced edge asserted by entity {entity.id} "
+                        f"(schema {entity.schema.name}): G1 requires provenance on every edge "
+                        "(ADR 0055)"
+                    )
                 for batch in generate_edge_entity(config, entity):
                     batcher.add(_with_props(batch, edge_props=edge_prov))
             else:
                 # Entity-typed property links: realign the `entity:`-prefixed endpoint ids
                 # to the raw node ids so the link materializes (H3). Edge-schema and topic
                 # batches already key on raw ids, so only this generator is realigned.
-                for batch in generate_entity_links(config, entity):
+                # Materialise once so emptiness can be tested without re-generating.
+                link_batches = list(generate_entity_links(config, entity))
+                # An entity-reference link is also a relationship asserted by this entity. If
+                # it yields ≥1 link batch but the property-holder is unstamped, the link would
+                # land silently unprovenanced — fail closed (ADR 0055). A non-edge entity with
+                # no entity-typed properties yields no link batch, so it never raises here, and
+                # topic-label batches (below, no nested `props`) are never gated on provenance.
+                if link_batches and not edge_prov:
+                    raise EdgeProvenanceError(
+                        f"refusing to write unprovenanced entity-reference link asserted by "
+                        f"entity {entity.id} (schema {entity.schema.name}): G1 requires "
+                        "provenance on every edge (ADR 0055)"
+                    )
+                for batch in link_batches:
                     batcher.add(_with_props(_align_entity_link_ids(batch), edge_props=edge_prov))
                 for batch in generate_topic_labels(config, entity):
                     batcher.add(_with_props(batch, edge_props=edge_prov))
