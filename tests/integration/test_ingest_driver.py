@@ -345,3 +345,85 @@ def test_run_due_ingests_survives_a_crashing_instance(
 
     assert id1 in attempted and id2 in attempted, "both instances attempted; the crash was isolated"
     engine.dispose()
+
+
+def test_prune_dead_letters_removes_old_only(postgres_dsn: str, clean_graph: Neo4jClient) -> None:
+    """Gate B-4d (ADR 0053): ``prune_dead_letters`` bounds the replayable dead-letter
+    error-audit table (M-6). It deletes every ``ingest_dead_letter`` row whose
+    ``created_at < now - dead_letter_retention_days`` (default 30d), KEEPS rows inside
+    the window AND the row exactly at the cutoff (``<`` semantics, off-by-one), returns
+    the deleted count, and treats ``retention <= 0`` as disabled (deletes nothing).
+
+    Dead-letters are terminal (written once, never mutated) — so, unlike
+    ``prune_task_runs``, there is NO status/finished_at filter: ALL rows older than the
+    window are pruned. Deterministic via an injected ``now`` + straddling ``created_at``
+    seeds (mirrors ``test_prune_task_runs_removes_old_finished_only``)."""
+    from worldmonitor.db.models import IngestDeadLetter
+
+    engine, sessions, driver, _ = _harness(postgres_dsn, clean_graph, _FakeConnector("stub"))
+
+    cutoff_at = _NOW - timedelta(days=30)  # default retention window edge
+    old = _NOW - timedelta(days=60)  # outside the window -> pruned
+    with sessions() as session:
+        session.add(
+            IngestDeadLetter(
+                id="dl-old",
+                connector_id="stub",
+                source_key="r-old",
+                stage="map",
+                error="boom",
+                created_at=old,
+            )
+        )
+        session.add(
+            IngestDeadLetter(
+                id="dl-boundary",
+                connector_id="stub",
+                source_key="r-boundary",
+                stage="map",
+                error="boom",
+                created_at=cutoff_at,  # exactly at cutoff -> KEPT (created_at < cutoff is False)
+            )
+        )
+        session.add(
+            IngestDeadLetter(
+                id="dl-recent",
+                connector_id="stub",
+                source_key="r-recent",
+                stage="land",
+                error="boom",
+                created_at=_NOW,  # inside the window -> kept
+            )
+        )
+        session.commit()
+
+    deleted = driver.prune_dead_letters(now=_NOW)
+    assert deleted == 1, "exactly the one row older than the 30d window is pruned"
+
+    with sessions() as session:
+        remaining = {row.id for row in session.execute(select(IngestDeadLetter)).scalars()}
+    assert "dl-old" not in remaining, "a row older than the retention window is pruned"
+    assert {"dl-boundary", "dl-recent"} <= remaining, (
+        "the row exactly at the cutoff and the in-window row are kept"
+    )
+
+    # Retention <= 0 disables pruning entirely: an ancient row survives, return is 0.
+    driver._settings = driver._settings.model_copy(update={"dead_letter_retention_days": 0})
+    with sessions() as session:
+        session.add(
+            IngestDeadLetter(
+                id="dl-ancient-disabled",
+                connector_id="stub",
+                source_key="r-ancient",
+                stage="resolve-row",
+                error="boom",
+                created_at=_NOW - timedelta(days=3650),
+            )
+        )
+        session.commit()
+
+    assert driver.prune_dead_letters(now=_NOW) == 0, "retention <= 0 deletes nothing"
+    with sessions() as session:
+        survived = session.get(IngestDeadLetter, "dl-ancient-disabled")
+    assert survived is not None, "with retention disabled even an ancient row survives"
+    engine.dispose()

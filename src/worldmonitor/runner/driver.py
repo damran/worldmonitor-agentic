@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from worldmonitor.db.crypto import ConfigCipher
 from worldmonitor.db.engine import engine_from_settings, session_factory
-from worldmonitor.db.models import ConnectorInstance, ErQueueItem, TaskRun
+from worldmonitor.db.models import ConnectorInstance, ErQueueItem, IngestDeadLetter, TaskRun
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.plugins.base import Capability
 from worldmonitor.plugins.registry import Registry
@@ -149,6 +149,33 @@ class IngestDriver:
         deleted = len(stale_ids)
         if deleted:
             logger.info("pruned %d finished task_run row(s) older than %dd", deleted, retention)
+        return deleted
+
+    def prune_dead_letters(self, *, now: datetime | None = None) -> int:
+        """Delete ``ingest_dead_letter`` rows older than the retention window.
+
+        Bounds the replayable error-audit table (``DEAD_LETTER_RETENTION_DAYS``, M-6 /
+        ADR 0053) so it does not grow without bound. Unlike ``prune_task_runs`` there is
+        NO status/finished_at filter — dead-letters are terminal (written once, never
+        mutated), so ALL rows with ``created_at < cutoff`` are pruned. A retention of 0
+        disables it. Returns the number deleted.
+        """
+        retention = self._settings.dead_letter_retention_days
+        if retention <= 0:
+            return 0
+        cutoff = (now or datetime.now(UTC)) - timedelta(days=retention)
+        with self._sessions() as session:
+            stale_ids = list(
+                session.execute(
+                    select(IngestDeadLetter.id).where(IngestDeadLetter.created_at < cutoff)
+                ).scalars()
+            )
+            if stale_ids:
+                session.execute(delete(IngestDeadLetter).where(IngestDeadLetter.id.in_(stale_ids)))
+                session.commit()
+        deleted = len(stale_ids)
+        if deleted:
+            logger.info("pruned %d dead_letter row(s) older than %dd", deleted, retention)
         return deleted
 
     # -- ingest pass --------------------------------------------------------- #
@@ -308,6 +335,7 @@ class IngestDriver:
         """Drive ingests + resolution on cadence until cancelled."""
         self.recover_stale()
         self.prune_task_runs()
+        self.prune_dead_letters()
         last_resolve: datetime | None = None
         while True:
             now = datetime.now(UTC)
