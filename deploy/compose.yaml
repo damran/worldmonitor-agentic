@@ -162,6 +162,162 @@ services:
       retries: 20
       start_period: 30s
 
+  # --- One-shot schema migration (Gate B-4c; ADR 0030 production schema path) ---
+  # The driver's startup recover_stale() queries task_run/connector_instance, so the app schema
+  # must exist before api/driver boot. Runs `alembic upgrade head` (via migrate_to_head) once
+  # after Postgres is healthy, then exits — the conventional deploy migration step.
+  migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: worldmonitor-app:dev
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - python
+      - -m
+      - worldmonitor.db.migrate
+    environment:
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-worldmonitor}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-worldmonitor}
+
+  # --- One-shot landing-bucket bootstrap (Gate B-4c) ---
+  # The API's /ready probe does a read-only head_bucket on the landing bucket; on a fresh stack
+  # that bucket does not exist yet (it was previously created lazily by the first ingest), so
+  # /ready would be 503 forever and `api` could never reach healthy. This runs our OWN image's
+  # canonical ensure_bucket() once, after MinIO is healthy, then exits — no extra image to pin.
+  minio-init:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: worldmonitor-app:dev
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    command:
+      - python
+      - -c
+      - "from worldmonitor.storage.landing import LandingStore; LandingStore.from_settings().ensure_bucket()"
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-worldmonitor}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD}}
+      MINIO_SECURE: "false"
+      LANDING_BUCKET: ${LANDING_BUCKET:-landing}
+
+  # --- WorldMonitor API (FastAPI; the only read surface onto the graph/scores) ---
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: worldmonitor-app:dev
+    restart: unless-stopped
+    # Bound the API container's memory so a runaway request can't take the host with it.
+    mem_limit: ${WM_API_MEM_LIMIT:-1g}
+    command:
+      - uvicorn
+      - worldmonitor.api.main:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      # Stores reached by SERVICE HOSTNAME (not localhost) inside the compose network.
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-worldmonitor}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-worldmonitor}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-worldmonitor}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD}}
+      MINIO_SECURE: "false"
+      LANDING_BUCKET: ${LANDING_BUCKET:-landing}
+      CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
+      READINESS_PROBE_TIMEOUT_SECONDS: ${READINESS_PROBE_TIMEOUT_SECONDS:-5}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      # /ready is the REAL store-reachability probe (200 all-ok / 503 names the down store).
+      # urllib.request.urlopen raises on any non-2xx (e.g. the 503 of a down store) -> unhealthy;
+      # a stdlib probe avoids baking curl into the image.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://localhost:8000/ready", timeout=5)
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # --- Ingest driver (the long-running pipeline; ADR 0029) — supervised in compose ---
+  driver:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: worldmonitor-app:dev
+    # restart: unless-stopped covers OOM-kill / crash / reboot (the core B-4 fix); plain Compose
+    # does NOT auto-restart on *unhealthy* — the HEALTHCHECK makes a STALL observable (ps ->
+    # unhealthy) and is the hook for a future autoheal sidecar / k8s liveness probe (ADR 0051 D1).
+    restart: unless-stopped
+    # mem_limit bounds an OOM (e.g. the GeoNames stream, H-6) to this container -> exit -> restart;
+    # it does NOT fix the stream itself (out of scope, H-6).
+    mem_limit: ${WM_DRIVER_MEM_LIMIT:-1g}
+    command:
+      - python
+      - -m
+      - worldmonitor.runner.driver
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-worldmonitor}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-worldmonitor}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-worldmonitor}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD}}
+      MINIO_SECURE: "false"
+      LANDING_BUCKET: ${LANDING_BUCKET:-landing}
+      # build_driver constructs a ConfigCipher eagerly -> needs a VALID Fernet key.
+      CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
+      # Last-tick heartbeat file (per-container); read by the --healthcheck below.
+      DRIVER_HEARTBEAT_PATH: ${DRIVER_HEARTBEAT_PATH:-/var/run/worldmonitor/driver.heartbeat}
+      DRIVER_HEARTBEAT_STALE_SECONDS: ${DRIVER_HEARTBEAT_STALE_SECONDS:-90}
+    healthcheck:
+      # Reads ONLY the heartbeat file (no store connections): exit 0 alive / 1 missing-or-stale.
+      # A stalled pipeline goes unhealthy here even while the API's /health still echoes ok.
+      test: ["CMD", "python", "-m", "worldmonitor.runner.driver", "--healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
 volumes:
   postgres-data:
   neo4j-data:

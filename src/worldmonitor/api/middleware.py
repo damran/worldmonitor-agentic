@@ -17,7 +17,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from worldmonitor.authz.oidc import InvalidTokenError, Principal, TokenVerifier
 
 # Paths reachable without authentication.
-DEFAULT_PUBLIC_PATHS: frozenset[str] = frozenset({"/health", "/docs", "/redoc", "/openapi.json"})
+DEFAULT_PUBLIC_PATHS: frozenset[str] = frozenset(
+    {"/health", "/ready", "/docs", "/redoc", "/openapi.json"}
+)
 
 
 def _unauthorized(detail: str) -> JSONResponse:

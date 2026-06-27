@@ -1,0 +1,43 @@
+# Keep the build context small + never ship secrets or local cruft into the image.
+# NOTE: README.md is NOT ignored — pyproject.toml's `readme` points at it, so the build needs it.
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# VCS + CI
+.git
+.gitignore
+.github
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtualenvs (the image builds its own under /app/.venv via uv)
+.venv/
+venv/
+
+# Test + tooling caches
+tests/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.pyright/
+
+# Docs + deploy (not needed at runtime)
+docs/
+deploy/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
