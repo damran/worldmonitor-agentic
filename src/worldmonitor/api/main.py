@@ -45,6 +45,9 @@ def create_app(
     tests; otherwise it is built from ``settings`` + the real store clients.
     """
     settings = settings or get_settings()
+    # Fail closed: a non-development boot with a placeholder secret halts loud here, before any
+    # client is built (ADR 0061). Development is unaffected (placeholders allowed locally).
+    settings.validate_production_secrets()
     if verifier is None:
         verifier = _build_verifier(settings)
     if readiness is None:
