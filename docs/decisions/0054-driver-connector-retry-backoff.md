@@ -73,3 +73,15 @@ intended-behaviour change, not a silent weakening; every other assertion in that
 Reversible (scheduling policy). Reversal cost: low — revert `_finalize` + drop two settings. Revisit
 trigger: if a future operator-driven hard-disable / alerting slice (H-8 alerting half) lands, fold the
 "retry forever" default into "retry until N failures, then hard-disable + page".
+
+## H-8 remaining halves — decisions for the follow-up gate (recorded 2026-06-28)
+
+This ADR shipped only the **retry/backoff** half of audit H-8. The remaining halves are a separate Stage-4
+gate; their directions were decided with the user during Phase-2 forward planning:
+- **Alerting/metrics transport: Prometheus `/metrics`.** Expose the `smoke_metrics` counters (dead-letter
+  rate, queue-growth slope, parked count, last-successful-tick age) on a `/metrics` endpoint; alert RULES
+  live in external Prometheus/Alertmanager (ops config, not in-code thresholds). Chosen over a
+  `plugins/notifiers` push and structured-logs-only for decoupling + standard tooling.
+- **Periodic in-loop maintenance cadence** (run `recover_stale`/`prune_*` on a cadence, not only at
+  startup), **resolve wall-clock timeout + lock-skip escalation**, and **auto-hard-disable after N
+  consecutive failures** — still to build in the same Stage-4 H-8 gate.

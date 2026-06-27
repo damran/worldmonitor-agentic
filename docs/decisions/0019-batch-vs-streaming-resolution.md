@@ -1,6 +1,7 @@
-# ADR 0019 — Entity resolution: whole-queue batch now, streaming/incremental OPEN
+# ADR 0019 — Entity resolution: periodic re-batch for streaming (incremental deferred)
 
-> Status: **OPEN** · June 2026 · Must be resolved with the user before the first Phase 2 STREAM connector.
+> Status: **ACCEPTED (2026-06-28)** — option (a) periodic re-batch, decided with the user during Phase-2
+> forward planning. Supersedes the OPEN state. (Was: June 2026, OPEN pending the first STREAM connector.)
 
 ## Context
 Phase 1 resolution (`resolution/pipeline.py:37-89`) is **whole-queue batch**: `resolve_pending` loads
@@ -10,18 +11,30 @@ a one-shot bulk import (OpenSanctions). Phase 2 introduces `StreamConnector`/`Re
 deliver a continuous trickle of small candidate batches.
 
 ## Decision
-**OPEN.** Two viable directions, not yet chosen:
-- **(a) Periodic re-batch** — keep `resolve_pending` and run it on a schedule over the accumulated queue.
-  Simple, reuses all existing code, but is **O(n²)** as the queue grows and re-scores already-resolved
-  records every tick.
-- **(b) Incremental resolution** — score each new candidate batch against the **already-resolved graph**
-  (blocking against existing canonical entities), maintaining clusters incrementally. Far more scalable,
-  but requires new incremental-clustering machinery and careful interaction with the merge audit trail
-  and referent-rewriting (ADR 0023).
+**ACCEPTED — (a) periodic re-batch.** A Phase-2 `StreamConnector`/`RestApiConnector` lands its candidate
+records into the existing `er_queue`; resolution stays the proven bounded-window `resolve_pending`
+(ADR 0026) on its cadence — **no new ER machinery**, and the merge guard / audit trail / referent
+rewriting are untouched. New records simply wait one batch cadence to resolve.
+
+Considered and **deferred**:
+- **(b) Incremental resolution** — score each new batch against the already-resolved graph, maintaining
+  clusters incrementally. Far more scalable for high-volume streaming, but is net-new incremental-cluster
+  machinery with non-trivial interaction with the merge audit trail + referent-rewriting (ADR 0023).
+  Deferred until stream volume actually demands it (see the upgrade trigger).
+
+**Rationale:** option (a) is the lowest-regret, fully-reversible choice — it reuses the proven resolver
+and ships the StreamConnector without destabilizing ER correctness. The O(n²)-per-window cost is bounded
+by `RESOLVE_BATCH_SIZE` windows and acceptable until stream volume grows.
+
+## Reversibility / upgrade trigger
+Reversible: (b) can be swapped in **behind the same `er_queue`** without changing connectors. **Build (b)
+when** a stream's sustained volume makes the per-cadence re-batch latency or cost unacceptable (e.g. the
+queue's resolve cadence can't keep up with ingest, or re-scoring dominates runtime) — i.e. when the H-8
+"resolve falls behind ingest" signal fires. Until then, (a) is the accepted model.
 
 ## Status
-**OPEN** — resolve with the user before building the first STREAM connector. Record the outcome by
-superseding this ADR. Until then, stream connectors are blocked from production resolution.
+**ACCEPTED (2026-06-28)** — option (a). Stream connectors may use production resolution via the queue +
+periodic re-batch. Revisit per the upgrade trigger above.
 
 ## Consequences
 - Choosing (a) ships fast but caps throughput and will need replacement; choosing (b) is the real answer
