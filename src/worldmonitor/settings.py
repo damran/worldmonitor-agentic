@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     # Fernet key for encrypting connector-instance config at rest. Required in
     # any environment that persists connector configs; empty default fails fast.
     config_encryption_key: str = ""
+    # Comma/whitespace-separated decryption-only OLD keys (ADR 0058). During a key
+    # rotation the previous CONFIG_ENCRYPTION_KEY moves here so tokens written under it
+    # still decrypt; empty default => one-key cipher == today's behaviour.
+    config_encryption_key_fallbacks: str = ""
 
     @model_validator(mode="after")
     def _validate_abstain_band(self) -> "Settings":
