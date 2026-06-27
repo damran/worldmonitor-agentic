@@ -66,6 +66,7 @@ def _getaddrinfo_returning(ip: str) -> Callable[..., list[tuple[object, ...]]]:
         "172.16.5.5",  # RFC1918
         "192.168.1.1",  # RFC1918
         "127.0.0.1",  # IPv4 loopback
+        "100.64.0.1",  # RFC 6598 carrier-grade NAT (not flagged is_private by ipaddress)
         "0.0.0.0",  # unspecified
         "::1",  # IPv6 loopback
         "fc00::1",  # IPv6 unique-local (ULA)

@@ -25,7 +25,9 @@ Add a small, reusable **SSRF guard** and route both connectors' streaming fetche
   - `BlockedAddressError(RuntimeError)` — raised when a target/redirect resolves to a non-public address.
   - `_is_blocked_ip(ip) -> bool` — pure: blocks loopback / private (RFC1918) / link-local (incl.
     `169.254.169.254`) / unique-local / reserved / multicast / unspecified, for both IPv4 and IPv6
-    (incl. IPv4-mapped IPv6). Uses the stdlib `ipaddress` module — no allowlist to maintain.
+    (incl. IPv4-mapped IPv6), **plus carrier-grade NAT `100.64.0.0/10` (RFC 6598)** — a shared
+    internal range that stdlib `ipaddress` does NOT flag `is_private`, so it is blocked explicitly.
+    Uses the stdlib `ipaddress` module — no allowlist to maintain.
   - `assert_public_host(host)` — resolve the host via `socket.getaddrinfo` and raise
     `BlockedAddressError` (naming the host + offending IP) if **any** resolved address is blocked. An IP
     literal is checked directly.

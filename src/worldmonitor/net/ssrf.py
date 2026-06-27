@@ -25,6 +25,11 @@ import httpx
 
 _DEFAULT_TIMEOUT = 120.0
 
+# Carrier-grade NAT (RFC 6598). Python's ``ipaddress`` does NOT flag it ``is_private``, but it is a
+# shared internal range used for cloud/k8s/CGNAT internal services — a redirect to a literal
+# ``100.64.x.x`` must not be a fetch target. Blocked explicitly (the predicates below miss it).
+_CGNAT_V4 = ipaddress.ip_network("100.64.0.0/10")
+
 
 class BlockedAddressError(RuntimeError):
     """Raised when a target or redirect host resolves to a non-public address.
@@ -57,6 +62,9 @@ def _is_blocked_ip(ip: str) -> bool:
         or addr.is_unspecified
     ):
         return True
+
+    if isinstance(addr, ipaddress.IPv4Address) and addr in _CGNAT_V4:
+        return True  # RFC 6598 carrier-grade NAT — not flagged is_private by ipaddress
 
     mapped = getattr(addr, "ipv4_mapped", None)
     if mapped is not None:
