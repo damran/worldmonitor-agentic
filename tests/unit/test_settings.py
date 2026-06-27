@@ -1,4 +1,9 @@
-"""Unit tests for application settings (merge-guard mode + ER batch size)."""
+"""Unit tests for application settings (merge-guard mode + ER batch size).
+
+Tests that assert a *declared default* instantiate ``Settings(_env_file=None)`` so they are
+independent of a developer's local ``.env`` (e.g. one that sets ``RESOLVE_BATCH_SIZE``), matching
+CI, which has no project ``.env``. Tests passing explicit overrides keep a bare ``Settings(...)``.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ from worldmonitor.settings import Settings
 
 def test_merge_guard_mode_defaults_to_block() -> None:
     """Production posture (ADR 0031): the guard blocks + parks sensitive merges by default."""
-    assert Settings().merge_guard_mode == "block"
+    assert Settings(_env_file=None).merge_guard_mode == "block"  # type: ignore[call-arg]
 
 
 def test_merge_guard_mode_accepts_alert() -> None:
@@ -24,7 +29,7 @@ def test_merge_guard_mode_rejects_unknown_value() -> None:
 
 def test_resolve_batch_size_defaults_to_1000() -> None:
     """ADR 0026: resolve_pending windows the queue in batches of this size."""
-    assert Settings().resolve_batch_size == 1000
+    assert Settings(_env_file=None).resolve_batch_size == 1000  # type: ignore[call-arg]
 
 
 def test_resolve_batch_size_accepts_override() -> None:
@@ -38,7 +43,7 @@ def test_resolve_batch_size_rejects_non_positive() -> None:
 
 def test_ingest_bounds_defaults() -> None:
     """ADR 0027: windowed commits + a wall-clock deadline + no record cap by default."""
-    settings = Settings()
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.ingest_commit_every == 1000
     assert settings.ingest_timeout_seconds == 1800.0
     assert settings.ingest_max_records is None
@@ -61,7 +66,7 @@ def test_ingest_max_records_accepts_cap_and_rejects_non_positive() -> None:
 
 def test_driver_cadence_defaults() -> None:
     """ADR 0029: per-connector ingest cadence + an independent resolution cadence."""
-    settings = Settings()
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.ingest_cadence_seconds == 3600
     assert settings.resolve_cadence_seconds == 300
     assert settings.driver_tick_seconds == 30.0
