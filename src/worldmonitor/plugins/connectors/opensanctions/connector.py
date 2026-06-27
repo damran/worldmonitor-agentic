@@ -16,8 +16,7 @@ from datetime import UTC, datetime
 from importlib import resources
 from typing import Any
 
-import httpx
-
+from worldmonitor.net.ssrf import guarded_stream
 from worldmonitor.plugins.base import Capability, Kind, Manifest, Mode, RawRecord, Status
 from worldmonitor.plugins.ftm_bulk import FtmBulkConnector
 
@@ -56,7 +55,7 @@ class OpenSanctionsConnector(FtmBulkConnector):
         retrieved_at = datetime.now(UTC).isoformat()
 
         count = 0
-        with httpx.stream("GET", url, timeout=_HTTP_TIMEOUT, follow_redirects=True) as response:
+        with guarded_stream("GET", url, timeout=_HTTP_TIMEOUT) as response:
             response.raise_for_status()
             for line in response.iter_lines():
                 if not line.strip():

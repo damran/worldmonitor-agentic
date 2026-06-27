@@ -183,6 +183,13 @@ def test_download_streams_and_never_reads_content(monkeypatch: pytest.MonkeyPatc
     # .content-on-get raises rather than hitting the network — RED for the RIGHT reason).
     monkeypatch.setattr(httpx, "stream", lambda *a, **k: fake)
     monkeypatch.setattr(httpx, "get", lambda *a, **k: fake)
+    # The download path now routes through the SSRF guard (ADR 0057), which resolves the host via
+    # socket.getaddrinfo before connecting — stub it to a public IP so this stays a hermetic unit
+    # test (no live DNS on download.geonames.org). DNS-stub only; no assertion change.
+    monkeypatch.setattr(
+        "worldmonitor.net.ssrf.socket.getaddrinfo",
+        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
 
     records = list(GeoNamesConnector().collect({"country": "VA"}))
 
