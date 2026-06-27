@@ -249,6 +249,10 @@ services:
       LANDING_BUCKET: ${LANDING_BUCKET:-landing}
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
       READINESS_PROBE_TIMEOUT_SECONDS: ${READINESS_PROBE_TIMEOUT_SECONDS:-5}
+    volumes:
+      # READ-ONLY view of the driver's last-tick heartbeat so /ready can surface a truthful,
+      # NON-FATAL driver freshness field (ADR 0059). The api is a READER only (:ro).
+      - driver-heartbeat:/var/run/worldmonitor:ro
     ports:
       - "8000:8000"
     healthcheck:
@@ -309,6 +313,11 @@ services:
       # Last-tick heartbeat file (per-container); read by the --healthcheck below.
       DRIVER_HEARTBEAT_PATH: ${DRIVER_HEARTBEAT_PATH:-/var/run/worldmonitor/driver.heartbeat}
       DRIVER_HEARTBEAT_STALE_SECONDS: ${DRIVER_HEARTBEAT_STALE_SECONDS:-90}
+    volumes:
+      # Sole WRITER of the shared heartbeat dir (read-write). The api mounts the same named
+      # volume read-only to surface driver freshness on /ready (ADR 0059) — one writer / one
+      # RO reader / atomic writes / non-fatal, so the ADR 0051 D3 shared-volume concern is moot.
+      - driver-heartbeat:/var/run/worldmonitor
     healthcheck:
       # Reads ONLY the heartbeat file (no store connections): exit 0 alive / 1 missing-or-stale.
       # A stalled pipeline goes unhealthy here even while the API's /health still echoes ok.
@@ -325,3 +334,6 @@ volumes:
   minio-data:
   redis-data:
   zitadel-machinekey:
+  # Shared driver last-tick heartbeat: written by `driver` (rw), read by `api` (ro) so /ready
+  # can report a NON-FATAL driver-freshness field across containers (ADR 0059).
+  driver-heartbeat:
