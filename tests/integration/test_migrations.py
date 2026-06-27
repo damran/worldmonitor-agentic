@@ -166,3 +166,50 @@ def test_no_autogenerate_drift(postgres_dsn: str) -> None:
     migrate_to_head(engine)
     command.check(_alembic_config(engine))  # raises on any model/migration drift
     engine.dispose()
+
+
+def test_partial_restore_is_refused_not_blindly_stamped(
+    postgres_dsn: str, reference_schema: dict[str, Any]
+) -> None:
+    """A partially-restored DB must NOT be blind-stamped at head (ADR 0056, Phase-B #3).
+
+    The buggy ``migrate_to_head`` (db/engine.py:72) decides "already at head" from a single
+    column: ``entity_id in er_queue_item -> stamp(head)``. A DB that has ``er_queue_item``
+    *with* ``entity_id`` (so it looks post-runway) but is MISSING a later-migration table
+    (``sign_off``) and has NO ``alembic_version`` hits that branch and is stamped at head
+    while incomplete — the missing tables are never created and Alembic reports it current.
+
+    Fix: a full-schema completeness check against ``Base.metadata`` must refuse such a
+    partial restore with ``SchemaIncompleteError`` naming the missing table. Fail-closed.
+    """
+    # Imported in-body so the (initially-missing) symbol doesn't break collection of the
+    # other tests in this module — its absence is a legitimate RED reason here.
+    from worldmonitor.db.engine import SchemaIncompleteError
+
+    # A full head schema via create_all (every table, er_queue_item.entity_id present),
+    # with NO alembic_version (create_all does not stamp).
+    engine = make_engine(_create_fresh_database(postgres_dsn))
+    create_all(engine)
+
+    # Simulate a partial restore: drop a later-migration table that is NOT er_queue_item.
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE sign_off CASCADE"))
+
+    # Preconditions that make the BUGGY branch (entity_id present -> stamp head) fire:
+    pre = inspect(engine)
+    tables = set(pre.get_table_names())
+    assert "sign_off" not in tables, "partial restore must be missing sign_off"
+    assert "alembic_version" not in tables, "an unmanaged (pre-Alembic) restore"
+    assert "er_queue_item" in tables, "er_queue_item must remain"
+    assert "entity_id" in {c["name"] for c in pre.get_columns("er_queue_item")}, (
+        "entity_id present -> the buggy branch would stamp head"
+    )
+
+    # Fail-closed: refuse the partial restore, naming the missing table.
+    with pytest.raises(SchemaIncompleteError, match="sign_off"):
+        migrate_to_head(engine)
+
+    # And it must NOT have silently stamped the incomplete DB as current.
+    assert _alembic_version(engine) is None, "a refused partial restore must not be stamped"
+    assert "sign_off" not in set(inspect(engine).get_table_names())
+    engine.dispose()
