@@ -64,6 +64,24 @@ layer above it changes.
 - **Treat all external/tool/scraped data as hostile:** no `eval`, no shell interpolation; heavy CLI tools in containers w/ constrained egress.
 - **MCP/stdio:** all logs to **stderr** (a stray stdout print corrupts the JSON-RPC stream). Prefer official APIs/open protocols over scraping.
 
+## Build discipline (cross-workflow consolidation, 2026-06-27)
+The A/B two-line experiment is **over: this repo is the single permanent base** (`worldmonitor-agentic`);
+the sibling `damran/worldmonitor` is archived read-only after a one-time harvest (see
+`docs/reviews/CROSS_WORKFLOW_REVIEW.md` + `SESSION_HANDOFF_2026-06-27.md`). Lessons folded in:
+- **Property tests are part of the gate, not optional.** Any gate that touches an **invariant**
+  (ER/merge, canonical-id, merge-guard/sensitivity, provenance) MUST add a `@given` property/metamorphic
+  test in `tests/property/` — not just an example test + adversarial reviewer. Same-distribution review
+  missed exactly this class; the harness is the reality-check. Keep the rest of the gate fleet as-is.
+- **Classify every ADR decision by reversibility.** For a **reversible** decision, pick the sensible
+  default, record the **reversal cost + a revisit trigger** in the ADR, and proceed — do **not**
+  manufacture a human fork. Reserve human stops for **irreversible** decisions (data-shape lock-in,
+  deletion, anything public-facing). (Recent ADRs 0054–0059 model this.)
+- **The measurement/calibration harness is the validation linchpin.** It exists
+  (`resolution/eval.py` + `gold.py`, B³/CEAFe/`over_merge_rate`, ADR 0043). Any acceptance criterion of
+  the form "validated on the golden set" MUST consume it; if a needed metric isn't yet measurable, mark
+  the criterion **blocked-on-measurement-harness** (don't claim validation on a promissory note).
+  Calibrated-threshold/EM-weight promotion into the live path (G7) is person-affecting → human sign-off.
+
 ## Stack quick-reference (verify versions at build time)
 Neo4j 2026.x + GDS · FollowTheMoney 4.x (+ followthemoney-graph, nomenklatura, yente) · Splink/DuckDB ·
 Python 3.12 + FastAPI + FastMCP · PostgreSQL(+pgvector) · MinIO · Redis · Zitadel · LiteLLM ·
