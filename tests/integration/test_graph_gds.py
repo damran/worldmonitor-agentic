@@ -8,8 +8,21 @@ from worldmonitor.graph.gds import degree_centrality
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
 from worldmonitor.ontology.ftm import make_entity
+from worldmonitor.provenance.model import Provenance, stamp
 
 pytestmark = pytest.mark.integration
+
+# ADR 0055 (fail-closed edge provenance): an Ownership *edge* entity is a relationship
+# assertion and must carry provenance, else `write_entities` refuses it. The endpoint
+# Company nodes carry no entity-typed properties (so they yield no relationship batch and
+# are never refused), but the edges must be stamped — stamping only; the degree-centrality
+# / sanction-flag assertions are unaffected by provenance.
+_PROV = Provenance(
+    source_id="src:gds-test",
+    retrieved_at="2026-06-21T00:00:00Z",
+    reliability="A",
+    source_record="s3://landing/gds-test.json",
+)
 
 
 def test_degree_centrality_flags_central_sanctioned_node(
@@ -39,13 +52,16 @@ def test_degree_centrality_flags_central_sanctioned_node(
         for i in range(3)
     ]
     ownerships = [
-        make_entity(
-            {
-                "id": f"own{i}",
-                "schema": "Ownership",
-                "properties": {"owner": ["hub"], "asset": [f"sub{i}"]},
-                "datasets": ["t"],
-            }
+        stamp(
+            make_entity(
+                {
+                    "id": f"own{i}",
+                    "schema": "Ownership",
+                    "properties": {"owner": ["hub"], "asset": [f"sub{i}"]},
+                    "datasets": ["t"],
+                }
+            ),
+            _PROV,
         )
         for i in range(3)
     ]
