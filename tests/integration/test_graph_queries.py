@@ -40,7 +40,11 @@ def test_get_entity_neighbors_and_provenance(clean_graph: Neo4jClient) -> None:
     company = _stamped(
         {"id": "c1", "schema": "Company", "properties": {"name": ["Shell Co"]}, "datasets": ["t"]}
     )
-    ownership = make_entity(
+    # ADR 0055 (fail-closed edge provenance): the Ownership *edge* entity is the assertion
+    # that creates the relationship, so it must carry provenance — route it through the same
+    # `_stamped` helper as its endpoints. Stamping only; the neighbor/provenance assertions
+    # below are unchanged.
+    ownership = _stamped(
         {
             "id": "o1",
             "schema": "Ownership",
