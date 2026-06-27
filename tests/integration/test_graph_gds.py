@@ -13,10 +13,11 @@ from worldmonitor.provenance.model import Provenance, stamp
 pytestmark = pytest.mark.integration
 
 # ADR 0055 (fail-closed edge provenance): an Ownership *edge* entity is a relationship
-# assertion and must carry provenance, else `write_entities` refuses it. The endpoint
-# Company nodes carry no entity-typed properties (so they yield no relationship batch and
-# are never refused), but the edges must be stamped — stamping only; the degree-centrality
-# / sanction-flag assertions are unaffected by provenance.
+# assertion and must carry provenance, else `write_entities` refuses it.
+# ADR 0060 (fail-closed node provenance): a non-edge entity (the Company nodes) reaching
+# Pass 1 with NO provenance is likewise refused (the node half of G1), so the endpoint
+# Company nodes must be stamped too. Stamping only — the degree-centrality / sanction-flag
+# assertions are unaffected by provenance.
 _PROV = Provenance(
     source_id="src:gds-test",
     retrieved_at="2026-06-21T00:00:00Z",
@@ -32,22 +33,28 @@ def test_degree_centrality_flags_central_sanctioned_node(
     client.execute_write("MATCH (n) DETACH DELETE n")
 
     # A sanctioned hub owning three companies => highest degree centrality.
-    hub = make_entity(
-        {
-            "id": "hub",
-            "schema": "Company",
-            "properties": {"name": ["Hub Holdings"], "topics": ["sanction"]},
-            "datasets": ["t"],
-        }
-    )
-    subsidiaries = [
+    hub = stamp(
         make_entity(
             {
-                "id": f"sub{i}",
+                "id": "hub",
                 "schema": "Company",
-                "properties": {"name": [f"Sub {i}"]},
+                "properties": {"name": ["Hub Holdings"], "topics": ["sanction"]},
                 "datasets": ["t"],
             }
+        ),
+        _PROV,
+    )
+    subsidiaries = [
+        stamp(
+            make_entity(
+                {
+                    "id": f"sub{i}",
+                    "schema": "Company",
+                    "properties": {"name": [f"Sub {i}"]},
+                    "datasets": ["t"],
+                }
+            ),
+            _PROV,
         )
         for i in range(3)
     ]

@@ -21,17 +21,33 @@ from worldmonitor.db.engine import create_all, make_engine, session_factory
 from worldmonitor.db.models import ErQueueItem
 from worldmonitor.graph.constraints import ensure_constraints
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.ontology.ftm import make_entity
+from worldmonitor.provenance.model import Provenance, stamp
 from worldmonitor.resolution.pipeline import resolve_pending
 
 pytestmark = pytest.mark.integration
 
 
 def _queue_item(entity: dict[str, object]) -> ErQueueItem:
+    # ADR 0060 (fail-closed node provenance): real ingest stamps every entity before queueing
+    # (run_ingest -> connector.map(provenance=...)), so the queued raw_entity must carry prov_* —
+    # else resolve_pending writes an unprovenanced node and the writer fails closed (node G1).
+    # Stamping only; the batching/merge/quarantine assertions are unaffected by provenance.
+    source_record = f"s3://landing/{entity['id']}.json"
+    stamped = stamp(
+        make_entity(entity),
+        Provenance(
+            source_id="src:batch-test",
+            retrieved_at="2026-06-21T00:00:00Z",
+            reliability="A",
+            source_record=source_record,
+        ),
+    )
     return ErQueueItem(
         id=str(uuid.uuid4()),
         connector_id="opensanctions",
-        raw_entity=entity,
-        source_record=f"s3://landing/{entity['id']}.json",
+        raw_entity=stamped.to_dict(),
+        source_record=source_record,
         status="pending",
     )
 
