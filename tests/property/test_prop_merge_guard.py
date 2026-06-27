@@ -3,8 +3,9 @@
 The whole point of the inversion (ADR 0047) is that a sensitive entity is NEVER waved through. A
 fail-OPEN here lets an individual-affecting merge auto-promote without the human sign-off the
 catastrophic-merge guard exists to force. These properties assert the three sensitive classes are
-ALWAYS flagged with INDEPENDENT oracles (the known RISKS set, a synthesised sub-code, a synthesised
-off-ontology code) so the test can't be passed by weakening it to mirror the implementation.
+ALWAYS flagged with INDEPENDENT oracles (the known RISKS set, REAL in-vocabulary RISKS-parented
+sub-codes, a synthesised off-ontology code) so the test can't be passed by weakening it to
+mirror the implementation.
 """
 
 from __future__ import annotations
@@ -37,17 +38,20 @@ def test_any_risk_topic_is_sensitive(code: str, extra: list[str]) -> None:
     )
 
 
-@given(
-    risk=st.sampled_from(wm.RISK_TOPICS),
-    suffix=st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=6),
-)
+# st.sampled_from raises at collection if RISK_NAMED_SUBCODES is ever empty (a vocabulary
+# regression) — a LOUD failure, never a silent skip of the clause-(b) invariant.
+@given(subcode=st.sampled_from(wm.RISK_NAMED_SUBCODES))
 @_SETTINGS
-def test_dot_subcode_of_risk_is_sensitive(risk: str, suffix: str) -> None:
-    """A dot-SUBCODE of a RISKS ancestor inherits its risk (e.g. ``role.pep.natl`` -> ``role.pep``).
-    Synthesised independently of the implementation's ancestor walk."""
-    subcode = f"{risk}.{suffix}"
+def test_dot_subcode_of_risk_is_sensitive(subcode: str) -> None:
+    """A REAL in-vocabulary dot-sub-code of a RISKS ancestor is sensitive via the clause-(b)
+    dot-ancestor walk (e.g. ``role.pep.natl`` under ``role.pep``, ``crime.traffick.human``).
+
+    Must use codes that ARE in ``registry.topic.names`` — a synthesised ``risk + random-suffix``
+    is an UNKNOWN code caught by clause (c), leaving clause (b) untested. Removing the dot-ancestor
+    walk in ``guard/sensitivity.py`` fails OPEN for these exact PEP/trafficking codes; caught here.
+    """
     assert is_sensitive(_entity_with_topics([subcode])) is True, (
-        f"FAIL OPEN: sub-code {subcode!r} of risk ancestor {risk!r} was NOT flagged sensitive"
+        f"FAIL OPEN (clause b): RISKS-parented sub-code {subcode!r} was NOT flagged sensitive"
     )
 
 

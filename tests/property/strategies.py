@@ -45,6 +45,16 @@ def _has_risk_ancestor(code: str) -> bool:
     return any(code == r or code.startswith(r + ".") for r in registry.topic.RISKS)
 
 
+# Clause-(b) witnesses: REAL FtM topic codes that are IN the registry vocabulary, are NOT themselves
+# a RISKS code, but DO have a RISKS dot-ancestor (e.g. ``role.pep.natl`` under ``role.pep``,
+# ``crime.traffick.human`` under ``crime.traffick``). These are exactly the PEP/sub-codes the
+# guard's dot-ancestor walk (clause b) must flag — and the ONLY inputs that exercise it: a
+# synthesised ``risk + random-suffix`` lands in the unknown-code hinge (clause c) instead. If this
+# tuple is ever empty (a vocabulary change), the property below errors loudly, never skips silently.
+RISK_NAMED_SUBCODES = tuple(
+    sorted(c for c in _KNOWN_NAMES if c not in registry.topic.RISKS and _has_risk_ancestor(c))
+)
+
 # Known topic codes that are NOT sensitive under deny-by-default (in names, not a risk, no risk
 # ancestor) — the only inputs for which ``is_sensitive`` may legitimately be False.
 BENIGN_TOPICS = tuple(
