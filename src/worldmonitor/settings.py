@@ -112,6 +112,22 @@ class Settings(BaseSettings):
     sensitivity_abstain_low: float = Field(default=0.92, ge=0.0, le=1.0)
     sensitivity_abstain_high: float = Field(default=0.92, ge=0.0, le=1.0)
 
+    # --- GeoNames connector: local-path confinement (Gate H-6/H-7 / ADR 0052) ---
+    # The GeoNames connector accepts an optional local ``path`` override (load-bearing for the
+    # VA.txt fixture + offline dev). Left unconstrained it is an arbitrary file read (LFI), so the
+    # runtime confines it to an allowlist DIRECTORY — the security boundary is THIS check, not the
+    # JSON schema (which doubles as the self-service UI-form driver and is bypassable by a direct
+    # caller).
+    #   geonames_allowed_path_dir — allowlist base dir for the local ``path`` override. DEFAULT
+    #     EMPTY ⇒ the ``path`` override is rejected entirely (DEFAULT-DENY); production that never
+    #     sets it cannot be tricked into a local read. Dev/test points it at the fixtures dir. The
+    #     runtime resolves both the allowlist and the candidate via realpath (defeating ``..`` AND
+    #     symlinks) and requires the candidate to be inside the allowlist.
+    #   geonames_max_path_bytes — defense-in-depth size cap (256 MiB) on a confined local read;
+    #     an over-cap file is rejected before it is read.
+    geonames_allowed_path_dir: str = ""
+    geonames_max_path_bytes: int = Field(default=268_435_456, gt=0)
+
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in
     # any environment that persists connector configs; empty default fails fast.
