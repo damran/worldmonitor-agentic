@@ -27,10 +27,12 @@ import importlib
 import json
 import logging
 import pkgutil
+import sys
 import threading
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -42,6 +44,7 @@ from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.plugins.base import Capability
 from worldmonitor.plugins.registry import Registry
 from worldmonitor.resolution.pipeline import resolve_pending
+from worldmonitor.runner.heartbeat import Heartbeat
 from worldmonitor.runner.ingest import run_ingest
 from worldmonitor.settings import Settings, get_settings
 from worldmonitor.storage.landing import LandingStore
@@ -72,6 +75,7 @@ class IngestDriver:
         registry: Registry,
         cipher: ConfigCipher | None = None,
         settings: Settings | None = None,
+        heartbeat: Heartbeat | None = None,
     ) -> None:
         self._sessions = sessions
         self._landing = landing
@@ -79,6 +83,12 @@ class IngestDriver:
         self._registry = registry
         self._settings = settings or get_settings()
         self._cipher = cipher or ConfigCipher.from_settings(self._settings)
+        # Last-tick heartbeat FILE (Gate B-4c / ADR 0051): touched once per loop iteration so a
+        # stalled pipeline is detectable via --healthcheck even while /health still echoes ok.
+        self._heartbeat = heartbeat or Heartbeat(
+            Path(self._settings.driver_heartbeat_path),
+            self._settings.driver_heartbeat_stale_seconds,
+        )
         # Serializes resolution so a slow run never overlaps the next cadence tick.
         self._resolve_lock = threading.Lock()
 
@@ -302,6 +312,9 @@ class IngestDriver:
         while True:
             now = datetime.now(UTC)
             try:
+                # Last-tick heartbeat: every tick, before any work, so an idle driver still
+                # proves it is alive (Gate B-4c). Additive — does not touch cadence/serialization.
+                self._heartbeat.touch(now)
                 await asyncio.to_thread(self.run_due_ingests, now=now)
                 if (
                     last_resolve is None
@@ -346,10 +359,31 @@ def build_driver(settings: Settings | None = None) -> IngestDriver:
     )
 
 
-def main() -> int:  # pragma: no cover - process entry point
-    """Run the ingest driver forever (Ctrl-C to stop). ``python -m worldmonitor.runner.driver``."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+def _run_healthcheck(settings: Settings) -> int:  # pragma: no cover - exercised via subprocess
+    """The container HEALTHCHECK: read ONLY the heartbeat file; exit 0 alive / 1 down.
+
+    Must NOT construct the full driver (no store connections) — a stalled-but-up pipeline must
+    still be reportable, and a healthcheck must stay cheap. Builds the ``Heartbeat`` from
+    settings (``DRIVER_HEARTBEAT_PATH`` / ``DRIVER_HEARTBEAT_STALE_SECONDS``) and checks it.
+    """
+    heartbeat = Heartbeat(
+        Path(settings.driver_heartbeat_path),
+        settings.driver_heartbeat_stale_seconds,
+    )
+    return 0 if heartbeat.is_alive(datetime.now(UTC)) else 1
+
+
+def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process entry point
+    """Run the ingest driver forever (Ctrl-C to stop). ``python -m worldmonitor.runner.driver``.
+
+    With ``--healthcheck`` it instead reads the last-tick heartbeat and exits 0 (alive) /
+    1 (missing-or-stale) — the container HEALTHCHECK; it never connects to any store.
+    """
+    args = sys.argv[1:] if argv is None else argv
     settings = get_settings()
+    if "--healthcheck" in args:
+        return _run_healthcheck(settings)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     driver = build_driver(settings)
     logger.info(
         "ingest driver starting: guard_mode=%s ingest_cadence=%ss resolve_cadence=%ss tick=%ss",

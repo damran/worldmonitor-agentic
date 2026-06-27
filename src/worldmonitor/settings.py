@@ -81,6 +81,19 @@ class Settings(BaseSettings):
     # so the history table does not grow without bound (ADR 0029 follow-up). 0 disables.
     task_run_retention_days: int = Field(default=30, ge=0)
 
+    # --- Driver supervision & containerization (Gate B-4c / ADR 0051) ---
+    # The driver writes a last-tick heartbeat FILE (per-container; not a table) once per loop
+    # iteration; `python -m worldmonitor.runner.driver --healthcheck` reads ONLY this file and
+    # exits 0 (alive) / 1 (missing-or-stale) — the container HEALTHCHECK. A stale heartbeat makes
+    # a stalled pipeline detectable even while /health still echoes ok (the audit's false-confidence
+    # signal). ``driver_heartbeat_stale_seconds`` is a safe multiple of ``driver_tick_seconds``
+    # (default 90s ≈ 3 missed 30s ticks) so a single slow tick does not flap the healthcheck.
+    driver_heartbeat_path: str = "/var/run/worldmonitor/driver.heartbeat"
+    driver_heartbeat_stale_seconds: float = Field(default=90.0, gt=0)
+    # Per-store bound on each /ready probe (Postgres/Neo4j/MinIO) so a hung store cannot hang
+    # the readiness endpoint forever (spec §3.4).
+    readiness_probe_timeout_seconds: float = Field(default=5.0, gt=0)
+
     # --- Fail-closed sensitivity guard (Gate E / ADR 0047) ---
     # The guard's sensitive-topic SET is loaded programmatically from FtM's own
     # ``registry.topic.RISKS`` (never configured — deny-by-default cannot be opened);

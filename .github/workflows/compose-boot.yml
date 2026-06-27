@@ -1,11 +1,16 @@
 name: compose-boot
 
-# Boots the REAL deploy/compose.yaml stack on a runner and waits for the core services
-# (Postgres, Neo4j, MinIO) to pass their healthchecks, then tears down. The other CI jobs
-# use testcontainers, NOT compose, so deploy-config defects are invisible to them — e.g.
-# a bare NEO4J_PASSWORD env var that the Neo4j image maps to an invalid 'password' setting
-# which strict config-validation rejects, crash-looping the container so 7687 never binds.
+# Boots the REAL deploy/compose.yaml stack on a runner and waits for healthchecks, then tears
+# down. The other CI jobs use testcontainers, NOT compose, so deploy-config defects are invisible
+# to them — e.g. a bare NEO4J_PASSWORD env var that the Neo4j image maps to an invalid 'password'
+# setting which strict config-validation rejects, crash-looping the container so 7687 never binds.
 # This job catches that class of defect (ADR 0034).
+#
+# Gate B-4c (ADR 0051) extends it to BUILD the single app image and bring up the supervised
+# `api` + `driver` services and wait for THEIR healthchecks: a healthy `api` proves /ready returns
+# 200 against the real stack (a real store probe, not the /health echo); a healthy `driver` proves
+# the last-tick heartbeat is fresh and `--healthcheck` exits 0. Both start only after the stores are
+# healthy and the one-shot `migrate` + `minio-init` services complete (depends_on). No new job.
 
 on:
   push:
@@ -15,23 +20,29 @@ on:
 jobs:
   compose-boot:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
       - name: Write a .env for the required compose variables
         # Provide only vars used WITHOUT a default: ${VAR:?...} (required) or bare ${VAR}.
-        # Vars with a ${VAR:-default} (e.g. NEO4J_MEM_LIMIT, heap/pagecache sizes) are left
-        # UNSET so their valid default applies — setting them to a placeholder would
+        # Vars with a ${VAR:-default} (e.g. NEO4J_MEM_LIMIT, the mem_limits, heap/pagecache sizes)
+        # are left UNSET so their valid default applies — setting them to a placeholder would
         # override a size default with an invalid value.
         run: |
           python3 - <<'PY'
-          import re, pathlib
+          import re, pathlib, os, base64
           compose = pathlib.Path("deploy/compose.yaml").read_text()
           need = set(re.findall(r"\$\{([A-Z0-9_]+):\?", compose)) | set(
               re.findall(r"\$\{([A-Z0-9_]+)\}", compose)
           )
-          known = {"NEO4J_PASSWORD": "ci-neo4j-password"}
+          # CONFIG_ENCRYPTION_KEY must be a VALID Fernet key — the driver's build_driver builds a
+          # ConfigCipher eagerly and crash-loops on a bad key. A url-safe base64 of 32 random bytes
+          # is exactly the Fernet key format (no cryptography dep needed on the runner).
+          known = {
+              "NEO4J_PASSWORD": "ci-neo4j-password",
+              "CONFIG_ENCRYPTION_KEY": base64.urlsafe_b64encode(os.urandom(32)).decode(),
+          }
           pathlib.Path(".env").write_text(
               "".join(f"{n}={known.get(n, 'ci-unused')}\n" for n in sorted(need))
           )
@@ -41,10 +52,21 @@ jobs:
       - name: Validate compose interpolation
         run: docker compose --env-file .env -f deploy/compose.yaml config >/dev/null
 
+      - name: Build the WorldMonitor app image (api + driver share one image)
+        run: docker compose --env-file .env -f deploy/compose.yaml build api driver
+
       - name: Boot core services + wait for healthchecks (Neo4j must bind Bolt :7687)
         run: |
           docker compose --env-file .env -f deploy/compose.yaml \
             up -d --wait --wait-timeout 300 postgres neo4j minio
+
+      - name: Boot api + driver + wait for THEIR healthchecks (/ready 200 + fresh heartbeat)
+        # Pulls in depends_on: stores service_healthy + migrate/minio-init service_completed.
+        # A healthy `api` => /ready returned 200 against the real stack; a healthy `driver` =>
+        # the last-tick heartbeat is fresh (`--healthcheck` exit 0).
+        run: |
+          docker compose --env-file .env -f deploy/compose.yaml \
+            up -d --wait --wait-timeout 300 api driver
 
       - name: Status
         run: docker compose --env-file .env -f deploy/compose.yaml ps
@@ -52,6 +74,11 @@ jobs:
       - name: Neo4j logs (on failure)
         if: failure()
         run: docker compose --env-file .env -f deploy/compose.yaml logs neo4j
+
+      - name: api + driver + init logs (on failure)
+        if: failure()
+        run: |
+          docker compose --env-file .env -f deploy/compose.yaml logs migrate minio-init api driver
 
       - name: Tear down
         if: always()
