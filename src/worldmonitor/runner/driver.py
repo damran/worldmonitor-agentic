@@ -323,12 +323,46 @@ class IngestDriver:
             if instance_id is not None:
                 instance = session.get(ConnectorInstance, instance_id)
                 if instance is not None:
-                    instance.status = "enabled" if status == "ok" else "error"
+                    # The instance ALWAYS stays retryable ("enabled"), never parked in "error":
+                    # the due-query selects only "enabled", so an "error" instance would be a dead
+                    # end (ADR 0054). A failure stays visible via the task_run row above. On success
+                    # we use the normal cadence; on failure an exponential backoff (resets on the
+                    # next success because the consecutive-error streak is then broken).
+                    instance.status = "enabled"
                     instance.last_run = now
-                    instance.next_run = now + timedelta(
-                        seconds=self._settings.ingest_cadence_seconds
-                    )
+                    if status == "ok":
+                        delay = self._settings.ingest_cadence_seconds
+                    else:
+                        delay = self._failure_backoff_seconds(session, instance_id)
+                    instance.next_run = now + timedelta(seconds=delay)
             session.commit()
+
+    def _failure_backoff_seconds(self, session: Session, instance_id: str) -> int:
+        """Exponential backoff for a just-failed ingest, from the task_run streak (ADR 0054).
+
+        ``consecutive_failures`` = the count of the most-recent consecutive ``kind="ingest"``
+        ``task_run`` rows with ``status="error"`` for this instance, INCLUDING the run just
+        finalized. The current task row's ``status="error"`` is already set on the session above;
+        ``flush`` makes it visible to this query so a first failure counts as 1 (→ base backoff)
+        and a second consecutive failure as 2 (→ base*2), capped at ``ingest_retry_max_seconds``.
+        """
+        session.flush()
+        statuses = session.execute(
+            select(TaskRun.status)
+            .where(
+                TaskRun.kind == "ingest",
+                TaskRun.connector_instance_id == instance_id,
+            )
+            .order_by(TaskRun.started_at.desc(), TaskRun.id.desc())
+        ).scalars()
+        consecutive_failures = 0
+        for row_status in statuses:
+            if row_status != "error":
+                break
+            consecutive_failures += 1
+        consecutive_failures = max(consecutive_failures, 1)
+        backoff = self._settings.ingest_retry_base_seconds * 2 ** (consecutive_failures - 1)
+        return min(backoff, self._settings.ingest_retry_max_seconds)
 
     # -- the loop ------------------------------------------------------------ #
     async def run_forever(self) -> None:  # pragma: no cover - thin asyncio glue

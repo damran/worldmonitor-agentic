@@ -173,9 +173,17 @@ def test_driver_reingest_is_idempotent_no_double_enqueue(
     engine.dispose()
 
 
-def test_driver_records_error_and_does_not_leave_instance_running(
+def test_driver_failed_instance_stays_retryable_with_backoff(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
+    """A failed ingest must NOT park the instance in a dead end (ADR 0054, Phase-B #1).
+
+    The pre-fix bug: ``_finalize`` set a failed instance ``status="error"`` while the
+    due-query selects only ``status=="enabled"`` — so one transient failure parked the
+    connector forever. The corrected contract: a failed instance is left **retryable**
+    (``status=="enabled"``) with ``next_run`` pushed forward by a backoff, while the
+    failure stays visible in run history (the ``task_run`` row is still ``status=="error"``).
+    """
     connector = _FakeConnector("fake-c", raise_on_collect=True)
     engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, connector)
     instance_id = _add_instance(sessions, connector_id="fake-c", cipher=cipher)
@@ -185,14 +193,84 @@ def test_driver_records_error_and_does_not_leave_instance_running(
     with sessions() as session:
         instance = session.get(ConnectorInstance, instance_id)
         assert instance is not None
-        assert instance.status == "error"  # not stuck in "running"
+        assert instance.status != "running"  # not stuck mid-run
+        assert instance.status == "enabled"  # retryable — NOT "error" (the bug)
         assert (
             instance.next_run is not None and instance.next_run > _NOW
-        )  # still retries next cycle
+        )  # still scheduled forward for the next attempt
 
-        task = session.execute(select(TaskRun)).scalar_one()
+        # The failure is NOT hidden: the run-history row stays an error with a reason.
+        task = session.execute(
+            select(TaskRun).where(
+                TaskRun.kind == "ingest",
+                TaskRun.connector_instance_id == instance_id,
+            )
+        ).scalar_one()
         assert task.status == "error"
-        assert "source unreachable" in task.error
+        assert task.error and "source unreachable" in task.error
+    engine.dispose()
+
+
+def test_failed_connector_becomes_due_again_after_backoff(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """The retry loop actually closes: a failed instance comes due again (ADR 0054).
+
+    Proves the core invariant H-8 fixes — a connector that fails is re-selected by the
+    due-query after its backoff elapses (instead of being parked in ``error`` forever).
+    First failure schedules ``next_run == now + ingest_retry_base_seconds``; the instance
+    is NOT re-run while still inside that window, but IS re-run once it has elapsed; a
+    SECOND consecutive failure escalates to a longer backoff (``base*2``, capped at
+    ``ingest_retry_max_seconds``). Backoff bounds are read from settings via the driver,
+    never hardcoded.
+    """
+    connector = _FakeConnector("fake-retry", raise_on_collect=True)
+    engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, connector)
+    instance_id = _add_instance(sessions, connector_id="fake-retry", cipher=cipher)
+
+    base = driver._settings.ingest_retry_base_seconds
+    cap = driver._settings.ingest_retry_max_seconds
+
+    # First tick: the connector fails -> retryable, scheduled at exactly the base backoff.
+    ran1 = driver.run_due_ingests(now=_NOW)
+    assert instance_id in ran1
+    with sessions() as session:
+        instance = session.get(ConnectorInstance, instance_id)
+        assert instance is not None
+        assert instance.status == "enabled"
+        assert instance.next_run == _NOW + timedelta(seconds=base)  # first failure -> base backoff
+
+    # A second tick at the SAME instant: still inside the backoff window -> NOT re-run.
+    ran_same = driver.run_due_ingests(now=_NOW)
+    assert instance_id not in ran_same, "must not re-run while still inside the backoff window"
+
+    # Once the backoff has elapsed: the instance is DUE again and is re-selected (it fails again).
+    now2 = _NOW + timedelta(seconds=base + 1)
+    ran2 = driver.run_due_ingests(now=now2)
+    assert instance_id in ran2, "must re-run once the backoff window elapsed (retry loop closes)"
+
+    # Second consecutive failure -> escalated (longer) backoff, capped at the max.
+    expected_backoff = min(base * 2, cap)
+    assert expected_backoff > base, "the second failure must back off longer than the first"
+    with sessions() as session:
+        instance = session.get(ConnectorInstance, instance_id)
+        assert instance is not None
+        assert instance.status == "enabled"
+        assert instance.next_run == now2 + timedelta(seconds=expected_backoff)
+
+        # Both failures stay visible in run history (failure is never silently swallowed).
+        errors = (
+            session.execute(
+                select(TaskRun).where(
+                    TaskRun.kind == "ingest",
+                    TaskRun.connector_instance_id == instance_id,
+                    TaskRun.status == "error",
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(errors) == 2
     engine.dispose()
 
 
