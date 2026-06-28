@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Integrations — WorldMonitor{% endblock %}
+{% block content %}
+<section class="wm-catalog">
+  <h2>Available plugins</h2>
+  <ul class="wm-plugin-list">
+    {% for m in manifests %}
+    <li class="wm-plugin">
+      <span class="wm-plugin-name">{{ m.name }}</span>
+      <span class="wm-plugin-kind">{{ m.kind }}</span>
+      <span class="wm-plugin-desc">{{ m.description }}</span>
+      <span class="wm-plugin-status">{{ m.status }}</span>
+      <a class="wm-add" href="/integrations/new/{{ m.connector_id }}">Add</a>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="wm-instances">
+  <h2>Configured instances</h2>
+  {% if instances %}
+  <table class="wm-instance-table">
+    <thead>
+      <tr>
+        <th>Plugin</th>
+        <th>Status</th>
+        <th>Last run</th>
+        <th>Next run</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for inst in instances %}
+      <tr>
+        <td>{{ inst.connector_id }}</td>
+        <td class="wm-status">{{ inst.status }}</td>
+        <td>{{ inst.last_run }}</td>
+        <td>{{ inst.next_run }}</td>
+        <td class="wm-actions">
+          <form method="post" action="/integrations/instances/{{ inst.id }}/enable">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button type="submit">Enable</button>
+          </form>
+          <form method="post" action="/integrations/instances/{{ inst.id }}/disable">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button type="submit">Disable</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="wm-empty">No instances configured yet.</p>
+  <form method="post" action="/integrations" class="wm-csrf-anchor">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

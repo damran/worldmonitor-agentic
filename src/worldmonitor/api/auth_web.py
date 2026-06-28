@@ -32,26 +32,28 @@ router = APIRouter(tags=["auth"])
 
 
 def _is_safe_next(nxt: str | None) -> str:
-    """Return ``nxt`` iff it is a safe LOCAL path, else ``"/"`` (no open redirect, ADR 0068).
+    """Return ``nxt`` iff it is a safe LOCAL path, else ``"/"`` (no open redirect, ADR 0068/0069).
 
     A safe ``next`` starts with exactly one ``/`` (a same-origin path), contains no backslash, and
-    contains ONLY visible ASCII (every char ``> 0x20`` and ``!= 0x7F``). This refuses ``//evil.com``
-    (protocol-relative), ``https://evil.com`` / ``javascript:...`` (a scheme — does not start with
-    ``/``), ``\\evil.com`` and ``/\\evil.com`` (backslash, which some browsers normalize to ``/``),
-    and any value carrying an ASCII control char (CR/LF/TAB/NUL/VTAB/FF/DEL) or a raw space.
+    contains ONLY **printable ASCII excluding space** (every char ``0x20 < ord(ch) < 0x7F``). This
+    refuses ``//evil.com`` (protocol-relative), ``https://evil.com`` / ``javascript:...`` (a scheme
+    — does not start with ``/``), ``\\evil.com`` and ``/\\evil.com`` (backslash, which some browsers
+    normalize to ``/``), any value carrying an ASCII control char (CR/LF/TAB/NUL/VTAB/FF), a raw
+    space or DEL, AND — tightened in ADR 0069 — every NON-ASCII char: the C1 control ``\x85`` (NEL),
+    the Unicode line/paragraph separators (U+2028 / U+2029), and any other ``>= 0x80`` codepoint.
 
-    The control-char / space rule makes the guard SELF-SUFFICIENT: it must NOT lean on a downstream
+    The printable-ASCII rule makes the guard SELF-SUFFICIENT: it must NOT lean on a downstream
     ``RedirectResponse`` to percent-quote the value, because the UI slice renders ``next`` straight
-    into an HTML ``href`` — a raw CR/LF or space there is a header-splitting / attribute-injection
-    vector. A legitimate local path ("/integrations", "/me") has no control chars or spaces and
-    passes; anything else falls back to the site root.
+    into an HTML ``href`` — a raw CR/LF, space, or a Unicode separator there is a header-splitting /
+    attribute-injection vector. A legitimate local path ("/integrations", "/me") is all printable
+    ASCII and passes; anything else falls back to the site root.
     """
     if (
         nxt
         and nxt.startswith("/")
         and not nxt.startswith("//")
         and "\\" not in nxt
-        and all(ord(ch) > 0x20 and ord(ch) != 0x7F for ch in nxt)
+        and all(0x20 < ord(ch) < 0x7F for ch in nxt)
     ):
         return nxt
     return "/"

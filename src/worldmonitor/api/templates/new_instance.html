@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Add {{ plugin_id }} — WorldMonitor{% endblock %}
+{% block content %}
+<section class="wm-new">
+  <h2>Configure {{ manifest.name }}</h2>
+  <p class="wm-plugin-desc">{{ manifest.description }}</p>
+
+  <form method="post" action="/integrations" class="wm-config-form">
+    <input type="hidden" name="plugin_id" value="{{ plugin_id }}" />
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+
+    {% for field in fields %}
+    <div class="wm-field">
+      <label for="wm-{{ field.name }}">
+        {{ field.label }}{% if field.required %} <span class="wm-req">*</span>{% endif %}
+      </label>
+      {% if field.kind == "password" %}
+      <input type="password" id="wm-{{ field.name }}" name="{{ field.name }}"
+        autocomplete="new-password"{% if field.required %} required{% endif %} />
+      {% elif field.kind == "select" %}
+      <select id="wm-{{ field.name }}" name="{{ field.name }}"{% if field.required %} required{% endif %}>
+        {% if not field.required %}<option value="">—</option>{% endif %}
+        {% for opt in field.options %}
+        <option value="{{ opt }}">{{ opt }}</option>
+        {% endfor %}
+      </select>
+      {% elif field.kind == "number" %}
+      <input type="number" id="wm-{{ field.name }}" name="{{ field.name }}"
+        {% if field.required %}required{% endif %} />
+      {% elif field.kind == "checkbox" %}
+      <input type="checkbox" id="wm-{{ field.name }}" name="{{ field.name }}" />
+      {% else %}
+      <input type="text" id="wm-{{ field.name }}" name="{{ field.name }}"
+        {% if field.required %}required{% endif %} />
+      {% endif %}
+    </div>
+    {% endfor %}
+
+    <button type="submit">Save</button>
+  </form>
+</section>
+{% endblock %}
