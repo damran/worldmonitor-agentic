@@ -1,0 +1,13 @@
+{
+  "name": "ACME LIMITED",
+  "company_number": "01234567",
+  "jurisdiction_code": "gb",
+  "incorporation_date": "1998-04-01",
+  "dissolution_date": null,
+  "company_type": "Private Limited Company",
+  "current_status": "Active",
+  "registered_address_in_full": "1 High St, London",
+  "opencorporates_url": "https://opencorporates.com/companies/gb/01234567",
+  "registry_url": "https://find-and-update.company-information.service.gov.uk/company/01234567",
+  "inactive": false
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenCorporates connector configuration",
+  "description": "Searches the OpenCorporates v0.4 companies API and imports companies as FtM Company entities anchored on opencorporates_id.",
+  "type": "object",
+  "properties": {
+    "api_token": {
+      "type": "string",
+      "title": "API token",
+      "description": "OpenCorporates API token (a secret; UI password field, vault-encrypted at rest).",
+      "secret": true,
+      "minLength": 1
+    },
+    "q": {
+      "type": "string",
+      "title": "Search term",
+      "description": "Company search query passed to the OpenCorporates companies search.",
+      "minLength": 1
+    },
+    "jurisdiction_code": {
+      "type": "string",
+      "title": "Jurisdiction code",
+      "description": "Optional jurisdiction filter, e.g. 'gb' or 'us_de'."
+    },
+    "per_page": {
+      "type": "integer",
+      "title": "Results per page",
+      "description": "Companies per page (OpenCorporates caps this at 100).",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 30
+    },
+    "max_pages": {
+      "type": "integer",
+      "title": "Maximum pages",
+      "description": "Hard cap on the number of pages fetched per run (bounds the import).",
+      "minimum": 1,
+      "default": 5
+    }
+  },
+  "required": ["api_token", "q"],
+  "additionalProperties": false
+}
