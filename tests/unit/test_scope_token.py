@@ -17,7 +17,7 @@ LOCKED ASSUMPTIONS the builder MUST match so this oracle stays meaningful:
 
   ``from worldmonitor.plugins.scope_token import mint, verify, ScopeTokenError``
   ``mint(connector_id, instance_id, scope: dict, operator: str, *, ttl_seconds=3600,
-        settings=...) -> str`` — Fernet over the JSON claims, key = ConfigCipher's key from settings.
+        settings=...) -> str`` — Fernet over the JSON claims, key = ConfigCipher's key.
   ``verify(token, *, expected_connector_id, expected_instance_id, settings=...) -> dict`` — decrypt;
         raise ``ScopeTokenError`` on tamper / expiry / connector|instance mismatch / malformed; else
         return the claims, which include ``scope`` and ``operator``.
