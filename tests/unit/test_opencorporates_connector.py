@@ -334,14 +334,9 @@ def test_collect_does_not_log_api_token(
         "api_token leaked into the aggregated log text "
         "(the httpx request-URL INFO line carries the token-bearing query string)"
     )
-    leaked = [
-        rec
-        for rec in caplog.records
-        if token in rec.getMessage() or token in str(rec.args)
-    ]
-    assert not leaked, (
-        "api_token leaked into logs via "
-        + "; ".join(f"{r.name}[{r.levelname}]: {r.getMessage()}" for r in leaked)
+    leaked = [rec for rec in caplog.records if token in rec.getMessage() or token in str(rec.args)]
+    assert not leaked, "api_token leaked into logs via " + "; ".join(
+        f"{r.name}[{r.levelname}]: {r.getMessage()}" for r in leaked
     )
 
 
