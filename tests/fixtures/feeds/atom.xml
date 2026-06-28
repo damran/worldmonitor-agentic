@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+  <title>Example Atom Feed</title>
+  <link href="https://feeds.example.org/atom" rel="self"/>
+  <updated>2026-06-21T15:00:00Z</updated>
+  <id>tag:example.org,2026:atom-feed</id>
+  <entry>
+    <title>Cyber advisory released for critical sector</title>
+    <link href="https://feeds.example.org/atom/cyber" rel="alternate"/>
+    <id>tag:example.org,2026:atom-cyber-1</id>
+    <published>2026-06-20T10:00:00Z</published>
+    <updated>2026-06-20T11:00:00Z</updated>
+    <author>
+      <name>Dana Atomwriter</name>
+    </author>
+    <summary>A new advisory describes active exploitation in a critical sector.</summary>
+  </entry>
+  <entry>
+    <title>Sanctions package updated with new entities</title>
+    <link href="https://feeds.example.org/atom/sanctions" rel="alternate"/>
+    <id>tag:example.org,2026:atom-sanctions-2</id>
+    <published>2026-06-21T14:00:00Z</published>
+    <updated>2026-06-21T15:00:00Z</updated>
+    <author>
+      <name>Evan Atomwriter</name>
+    </author>
+    <summary>The sanctions package adds several newly designated entities.</summary>
+  </entry>
+</feed>
