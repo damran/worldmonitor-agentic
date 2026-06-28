@@ -14,6 +14,9 @@ CONTRACT ASSUMED (the builder MUST match these names exactly):
         validate_entity_id(s: str) -> bool  # True iff s matches the id alphabet
                                             # (a BOOLEAN predicate, not a raising
                                             # validator — locked here; builder matches)
+        # ADR 0064 (result-count caps centralized here alongside HOP_CAP):
+        NEIGHBOR_RESULT_LIMIT: int = 500    # positive int; get_neighbors LIMIT
+        PATH_RESULT_LIMIT: int = 50         # moved from queries.py::_PATH_RESULT_LIMIT
 
 RED today: ``worldmonitor.graph.read_guards`` does not exist, so this whole module
 fails to import (ModuleNotFoundError) — the right red for a not-yet-built module.
@@ -27,6 +30,7 @@ import re
 import pytest
 
 from worldmonitor.api.graph import HOP_CAP as API_CAP
+from worldmonitor.graph import read_guards
 from worldmonitor.graph.read_guards import (
     HOP_CAP,
     ID_PATTERN,
@@ -131,4 +135,32 @@ def test_api_graph_imports_hop_cap_from_read_guards_not_local() -> None:
     assert re.search(r"^HOP_CAP\s*=", src, re.MULTILINE) is None, (
         "api/graph.py must not redefine HOP_CAP locally — it must import it from "
         "graph.read_guards so the REST and MCP caps can never diverge"
+    )
+
+
+# ======================================================================================
+# RESULT-COUNT CAPS (ADR 0064) — the two new read-access bounds, centralized here next
+# to HOP_CAP so every read cap (HOP_CAP, NEIGHBOR_RESULT_LIMIT, PATH_RESULT_LIMIT) lives
+# in ONE place with no orphaned literal in queries.py.
+#
+# Accessed FULLY-QUALIFIED (``read_guards.NAME``) inside each test so the module still
+# imports on the current base and ONLY these new cases go red (AttributeError — the
+# constants don't exist yet), leaving every 2a/2b read-guard case above green.
+# ======================================================================================
+def test_neighbor_result_limit_exists_is_positive_int_default_500() -> None:
+    value = read_guards.NEIGHBOR_RESULT_LIMIT  # AttributeError on base (ADR 0064 adds it)
+    assert isinstance(value, int) and not isinstance(value, bool), (
+        "NEIGHBOR_RESULT_LIMIT must be a plain int"
+    )
+    assert value > 0, "NEIGHBOR_RESULT_LIMIT must be a positive result-count bound"
+    assert value == 500, "ADR 0064 fixes the default neighbour result cap at 500"
+
+
+def test_path_result_limit_exists_and_is_50() -> None:
+    value = read_guards.PATH_RESULT_LIMIT  # AttributeError on base (moved from queries.py)
+    assert isinstance(value, int) and not isinstance(value, bool), (
+        "PATH_RESULT_LIMIT must be a plain int"
+    )
+    assert value == 50, (
+        "PATH_RESULT_LIMIT is the existing _PATH_RESULT_LIMIT (50) moved into read_guards"
     )

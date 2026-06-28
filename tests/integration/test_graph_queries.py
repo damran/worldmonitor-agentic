@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from worldmonitor.graph import read_guards
 from worldmonitor.graph.constraints import ensure_constraints
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.queries import get_entity, get_neighbors, get_provenance
@@ -155,3 +156,58 @@ def test_find_paths_is_read_only_and_parameterized(clean_graph: Neo4jClient) -> 
 
     after = clean_graph.execute_read("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, "find_paths must be read-only — the graph was mutated"
+
+
+# ======================================================================================
+# get_neighbors result-count LIMIT (ADR 0064) — end-to-end truncation over a real graph.
+#
+# A genuinely high-degree node must not return its WHOLE neighbourhood: with
+# read_guards.NEIGHBOR_RESULT_LIMIT monkeypatched well below the neighbour count, the cap
+# is observable end-to-end. raising=False so the monkeypatch is RED-correct on the current
+# base (the constant does not exist yet) AND green once the builder adds + reads it.
+#
+# RED today: get_neighbors carries NO LIMIT, so the four neighbours all come back (4 != 2).
+# ======================================================================================
+def test_get_neighbors_truncates_to_result_limit(
+    clean_graph: Neo4jClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(read_guards, "NEIGHBOR_RESULT_LIMIT", 2, raising=False)
+
+    ensure_constraints(clean_graph)
+    hub = _stamped(
+        {"id": "hub", "schema": "Person", "properties": {"name": ["Hub Node"]}, "datasets": ["t"]}
+    )
+    # FOUR distinct one-hop neighbours of `hub` — strictly more than the cap of 2. Each
+    # Ownership is an EDGE-schema entity, so it materializes as a relationship (hub -OWNS-> nN),
+    # NOT an intermediate node: hub therefore has exactly four 1-hop Entity neighbours.
+    neighbours = [
+        _stamped(
+            {
+                "id": f"n{i}",
+                "schema": "Company",
+                "properties": {"name": [f"Neighbour Co {i}"]},
+                "datasets": ["t"],
+            }
+        )
+        for i in range(1, 5)
+    ]
+    edges = [
+        _stamped(
+            {
+                "id": f"o{i}",
+                "schema": "Ownership",
+                "properties": {"owner": ["hub"], "asset": [f"n{i}"]},
+                "datasets": ["t"],
+            }
+        )
+        for i in range(1, 5)
+    ]
+    write_entities(clean_graph, [hub, *neighbours, *edges])
+
+    result = get_neighbors(clean_graph, entity_id="hub", hops=1)
+    # End-to-end truncation: hub has FOUR neighbours but the cap is 2 — exactly the cap
+    # comes back (an arbitrary bounded subset; ADR 0064 ships LIMIT without ORDER BY).
+    assert len(result) == 2, (
+        f"get_neighbors must truncate to read_guards.NEIGHBOR_RESULT_LIMIT (2); "
+        f"got {len(result)} rows (the whole neighbourhood?)"
+    )

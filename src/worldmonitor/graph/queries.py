@@ -25,11 +25,12 @@ def get_entity(client: Neo4jClient, *, entity_id: str) -> dict[str, Any] | None:
 
 def get_neighbors(client: Neo4jClient, *, entity_id: str, hops: int = 1) -> list[dict[str, Any]]:
     """Return entities linked to ``entity_id`` within ``hops``."""
-    depth = max(1, int(hops))
+    depth = max(1, min(int(hops), read_guards.HOP_CAP))
     query = (
         f"MATCH (n:Entity {{id: $entity_id}})"
         f"-[*1..{depth}]-(m:Entity) "
-        "WHERE m.id <> $entity_id RETURN DISTINCT properties(m) AS props"
+        "WHERE m.id <> $entity_id "
+        f"RETURN DISTINCT properties(m) AS props LIMIT {read_guards.NEIGHBOR_RESULT_LIMIT}"
     )
     rows = client.execute_read(query, entity_id=entity_id)
     return [row["props"] for row in rows]
@@ -45,12 +46,6 @@ def get_provenance(client: Neo4jClient, *, entity_id: str) -> dict[str, str]:
     if not rows:
         return {}
     return {str(key): str(value) for key, value in rows[0]["prov"]}
-
-
-# Cap on the number of paths returned, so a result can never blow up unbounded.
-# The path-traversal depth ceiling lives in the shared ``read_guards.HOP_CAP`` (ADR
-# 0063: one cap, one place) — ``find_paths`` clamps against it below.
-_PATH_RESULT_LIMIT = 50
 
 
 def find_paths(
@@ -73,7 +68,7 @@ def find_paths(
         f"(a:Entity {{id: $from_id}})-[*1..{depth}]-(b:Entity {{id: $to_id}})) "
         "RETURN [n IN nodes(p) | n.id] AS nodes, "
         "[r IN relationships(p) | type(r)] AS relationships "
-        f"LIMIT {_PATH_RESULT_LIMIT}"
+        f"LIMIT {read_guards.PATH_RESULT_LIMIT}"
     )
     rows = client.execute_read(query, from_id=from_id, to_id=to_id)
     return [{"nodes": row["nodes"], "relationships": row["relationships"]} for row in rows]
