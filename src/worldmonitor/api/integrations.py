@@ -25,9 +25,10 @@ row. Single-tenant (D1, ADR 0042).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 from uuid import uuid4
 
 import jsonschema
@@ -45,6 +46,8 @@ from worldmonitor.plugins.registry import (
     UnknownConnectorError,
     UnknownNotifierError,
 )
+from worldmonitor.runner.operator_run import run_connector_once
+from worldmonitor.storage.landing import LandingStore
 
 router = APIRouter(tags=["integrations"])
 
@@ -277,6 +280,74 @@ async def _set_status(request: Request, instance_id: str, status: str, db: Sessi
     instance.status = status
     db.commit()
     return RedirectResponse("/integrations", status_code=303)
+
+
+@router.post("/integrations/instances/{instance_id}/run", include_in_schema=False)
+async def run_instance(
+    request: Request,
+    instance_id: str,
+    principal: Annotated[Principal, Depends(get_principal)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Response:
+    """Operator-trigger ONE authorized run of a connector instance (ADR 0071 §4).
+
+    ``get_principal``-gated + CSRF-protected (a state-changing browser POST). An ACTIVE connector
+    runs ONLY through this authed path (never the cadence, never an agent): it REQUIRES a ``scope``
+    (a JSON object in the ``scope`` form field, or a bare ``target`` field) and mints + stores a
+    per-run scope token — without one the run is refused (422). A PASSIVE run-now needs no scope.
+    303 back to ``/integrations`` on success. The run is offloaded to a worker thread so the
+    blocking subprocess/landing work does not run inside the event loop.
+    """
+    form = await request.form()
+    _check_csrf(request, _as_str(form.get("csrf_token")))
+
+    instance = db.get(ConnectorInstance, instance_id)
+    if instance is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    registry: Registry = request.app.state.registry
+    try:
+        connector = registry.get(instance.connector_id)
+    except UnknownConnectorError as exc:
+        raise HTTPException(status_code=404, detail="Unknown connector") from exc
+
+    settings = request.app.state.settings
+    landing = getattr(request.app.state, "landing", None) or LandingStore.from_settings(settings)
+    try:
+        await asyncio.to_thread(
+            run_connector_once,
+            instance,
+            connector,
+            scope=_parse_scope(form),
+            operator=principal.subject,
+            sessions=request.app.state.db_sessions,
+            landing=landing,
+            settings=settings,
+        )
+    except ValueError as exc:
+        # An ACTIVE run without a scope is refused — surface it as 422 (never a 500).
+        raise HTTPException(status_code=422, detail="An ACTIVE run requires a scope") from exc
+    return RedirectResponse("/integrations", status_code=303)
+
+
+def _parse_scope(form: Any) -> dict[str, Any] | None:
+    """Parse the per-run scope from the form: a JSON ``scope`` object, or a bare ``target`` field.
+
+    Returns ``None`` (no scope) when neither is present or the JSON is not an object — an ACTIVE run
+    then refuses (422). Never raises on a malformed value.
+    """
+    raw = _as_str(form.get("scope"))
+    if raw:
+        try:
+            parsed: Any = json.loads(raw)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            return cast("dict[str, Any]", parsed)
+    target = _as_str(form.get("target"))
+    if target:
+        return {"target": target}
+    return None
 
 
 def _as_str(value: Any) -> str | None:

@@ -140,6 +140,12 @@ class TaskRun(Base):
     (Ingest/ResolveStats), and ``error`` carries a bounded summary on failure. A row
     left ``"running"`` after a crash is reset to ``"error"`` on driver startup
     (single-node assumption; the deferred lease replaces it under HA).
+
+    ACTIVE-capability gating audit (ADR 0071): ``run_mode`` distinguishes a cadence-driven run
+    (default ``"cadence"``) from an operator-triggered one (``"operator"``); ``triggered_by`` is the
+    authenticated operator subject; ``scope_token`` is the minted, tamper-evident per-run
+    authorization (the audit proof of *what was authorized, by whom*). For a cadence run the latter
+    two are ``NULL`` and ``run_mode`` stays ``"cadence"`` — purely additive, behaviour-preserving.
     """
 
     __tablename__ = "task_run"
@@ -152,6 +158,10 @@ class TaskRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     stats: Mapped[dict[str, Any] | None] = mapped_column(JSONB, default=None)
     error: Mapped[str] = mapped_column(String, default="")
+    # ACTIVE-capability gating audit (ADR 0071) — additive; cadence runs keep the defaults.
+    run_mode: Mapped[str] = mapped_column(String(16), default="cadence")
+    triggered_by: Mapped[str | None] = mapped_column(String(255), default=None)
+    scope_token: Mapped[str | None] = mapped_column(String, default=None)
 
 
 class ResolverJudgement(Base):
