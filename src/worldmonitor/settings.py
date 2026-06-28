@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     # --- Zitadel / OIDC (auth-gated from day one) ---
     zitadel_domain: str = ""
     zitadel_client_id: str = ""
+    # Confidential-client secret for the browser OIDC authorization-code flow (ADR 0068). Empty
+    # default; fail-closed in prod when auth is configured (validate_production_secrets).
+    zitadel_client_secret: str = ""
+    # Signs the Starlette SessionMiddleware cookie that carries the browser session principal
+    # (ADR 0068). An empty/guessable key would let anyone forge a session — fail-closed in prod.
+    session_secret_key: str = ""
+    # Absolute public base URL (e.g. ``https://wm.example.com``) used to build the absolute OIDC
+    # ``redirect_uri`` (``app_base_url`` + ``/auth/callback``) — NOT a Host-derived URL (ADR 0068).
+    app_base_url: str = ""
 
     # --- Backing services (URLs only; clients land in later phases) ---
     neo4j_uri: str = "bolt://localhost:7687"
@@ -181,6 +190,10 @@ class Settings(BaseSettings):
         is a placeholder/weak value: ``config_encryption_key`` empty or ``change-me``; or
         ``change-me``/``worldmonitor123`` inside ``postgres_dsn``/``redis_url``/``neo4j_password``/
         ``minio_secret_key``. A plain marker check — NO entropy scoring; a real Fernet key passes.
+
+        ADR 0068: ``session_secret_key`` is required UNCONDITIONALLY (the session cookie is signed
+        on every boot, auth wired or not), while ``zitadel_client_secret`` is required only when
+        auth is configured (``auth_configured`` — a confidential client cannot ship without it).
         """
         if self.environment in _LOCAL_ENVIRONMENTS:
             return
@@ -202,6 +215,33 @@ class Settings(BaseSettings):
                         "placeholders, ADR 0061)"
                     )
 
+        # UNCONDITIONAL (ADR 0068 security fix): the SessionMiddleware cookie is signed on EVERY
+        # boot (with ``session_secret_key`` or, in dev/test only, a per-process random fallback),
+        # whether or not OIDC is wired. An empty/guessable ``session_secret_key`` therefore lets
+        # anyone forge a browser session REGARDLESS of ``auth_configured`` — so it is required
+        # outside the local/test environments unconditionally (NOT gated behind auth_configured).
+        if not self.session_secret_key or any(
+            marker in self.session_secret_key for marker in _PLACEHOLDER_SECRET_MARKERS
+        ):
+            raise ValueError(
+                "session_secret_key is a placeholder/empty value; set a real secret "
+                f"(non-development environment={self.environment!r} refuses placeholders, ADR 0068)"
+            )
+
+        # AUTH-GATED (ADR 0068): the confidential-client secret only becomes load-bearing once the
+        # browser OIDC flow is actually wired up (``zitadel_domain`` + ``client_id``) — a
+        # confidential client cannot ship without its secret. With auth unconfigured no OIDC client
+        # is built, so it is never read.
+        if self.auth_configured and (
+            not self.zitadel_client_secret
+            or any(marker in self.zitadel_client_secret for marker in _PLACEHOLDER_SECRET_MARKERS)
+        ):
+            raise ValueError(
+                "zitadel_client_secret is a placeholder/empty value but auth is configured; set a "
+                f"real secret (non-development environment={self.environment!r} refuses "
+                "placeholders, ADR 0068)"
+            )
+
     @property
     def sqlalchemy_dsn(self) -> str:
         """The Postgres DSN with the psycopg (v3) driver SQLAlchemy expects."""
@@ -218,6 +258,15 @@ class Settings(BaseSettings):
     def oidc_jwks_uri(self) -> str:
         """Where to fetch Zitadel's signing keys."""
         return f"https://{self.zitadel_domain}/oauth/v2/keys" if self.zitadel_domain else ""
+
+    @property
+    def oidc_discovery_url(self) -> str:
+        """Zitadel's OIDC discovery document (Authlib registers the client from it, ADR 0068)."""
+        return (
+            f"https://{self.zitadel_domain}/.well-known/openid-configuration"
+            if self.zitadel_domain
+            else ""
+        )
 
     @property
     def auth_configured(self) -> bool:
