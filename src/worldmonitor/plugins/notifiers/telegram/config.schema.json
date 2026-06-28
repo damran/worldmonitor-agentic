@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Telegram notifier configuration",
+  "description": "Delivers a Notification via the Telegram Bot sendMessage API to a chat.",
+  "type": "object",
+  "properties": {
+    "bot_token": {
+      "type": "string",
+      "title": "Bot token",
+      "description": "Telegram bot token (a secret; UI password field, vault-encrypted at rest). Rides in the request URL path and is never logged.",
+      "secret": true,
+      "minLength": 1
+    },
+    "chat_id": {
+      "type": "string",
+      "title": "Chat ID",
+      "description": "Target chat/channel id the message is delivered to.",
+      "minLength": 1
+    },
+    "parse_mode": {
+      "type": "string",
+      "title": "Parse mode",
+      "description": "Optional Telegram text formatting mode.",
+      "enum": ["MarkdownV2", "HTML"]
+    }
+  },
+  "required": ["bot_token", "chat_id"],
+  "additionalProperties": false
+}

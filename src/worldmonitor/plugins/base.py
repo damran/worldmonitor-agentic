@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -63,14 +63,20 @@ class Status(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Manifest:
-    """Static description of a plugin (drives the catalog + Integrations UI)."""
+    """Static description of a plugin (drives the catalog + Integrations UI).
+
+    ``mode`` and ``capability`` are **connector-only** concepts (how a source relates to the graph
+    + whether it touches targets actively). A notifier — a sink, not a source — leaves them
+    ``None``. They keep their field positions so every existing connector still constructs (each
+    passes both by keyword); the ``None`` defaults are backward-compatible.
+    """
 
     connector_id: str
     name: str
     version: str
     kind: Kind
-    mode: Mode
-    capability: Capability
+    mode: Mode | None = None
+    capability: Capability | None = None
     description: str = ""
     status: Status = Status.SCAFFOLDED
 
@@ -108,6 +114,53 @@ class Connector(ABC):
     @abstractmethod
     def map(self, record: RawRecord, *, provenance: Provenance) -> Iterable[FtmEntity]:
         """Transform a raw record into FtM entities, each stamped with provenance."""
+
+    def validate_config(self, config: Mapping[str, Any]) -> None:
+        """Validate an instance config against :attr:`config_schema`.
+
+        Raises :class:`jsonschema.ValidationError` on a bad config.
+        """
+        jsonschema.validate(dict(config), self.config_schema)
+
+
+@dataclass(frozen=True, slots=True)
+class Notification:
+    """A channel-agnostic alert payload a :class:`Notifier` renders + delivers.
+
+    The deterministic "rule fired / run complete" message a future trigger hands to ``send()``.
+    Immutable (frozen) — a payload is fixed once built. ``severity`` is one of info/warning/critical
+    (free-form string, the channel decides how to render it); ``context`` carries optional string
+    key/values (e.g. the firing rule id) and defaults to an empty mapping.
+    """
+
+    title: str
+    body: str
+    severity: str = "info"
+    context: Mapping[str, str] = field(default_factory=dict[str, str])
+
+
+class Notifier(ABC):
+    """Base class for all notifiers: manifest + config schema + ``send`` (a sink — no collect/map).
+
+    A notifier is the mirror of :class:`Connector` on the *output* side: it delivers a
+    :class:`Notification` to an external channel (Telegram, Slack, email, …). It never collects,
+    maps, resolves, or writes the graph. Egress (when a notifier reaches the network) goes through
+    the SSRF guard, exactly like a connector's fetch.
+    """
+
+    @property
+    @abstractmethod
+    def manifest(self) -> Manifest:
+        """Static description of this notifier (``kind=NOTIFIER``; no Mode / Capability)."""
+
+    @property
+    @abstractmethod
+    def config_schema(self) -> dict[str, Any]:
+        """JSON Schema for this notifier's instance config (drives the UI form)."""
+
+    @abstractmethod
+    def send(self, config: Mapping[str, Any], notification: Notification) -> None:
+        """Deliver ``notification`` over the configured channel; raise on delivery failure."""
 
     def validate_config(self, config: Mapping[str, Any]) -> None:
         """Validate an instance config against :attr:`config_schema`.
