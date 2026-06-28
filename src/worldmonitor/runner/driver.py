@@ -41,7 +41,7 @@ from worldmonitor.db.crypto import ConfigCipher
 from worldmonitor.db.engine import engine_from_settings, session_factory
 from worldmonitor.db.models import ConnectorInstance, ErQueueItem, IngestDeadLetter, TaskRun
 from worldmonitor.graph.neo4j_client import Neo4jClient
-from worldmonitor.plugins.base import Capability
+from worldmonitor.plugins.base import Capability, Mode
 from worldmonitor.plugins.registry import Registry
 from worldmonitor.resolution.pipeline import resolve_pending
 from worldmonitor.runner.heartbeat import Heartbeat
@@ -223,18 +223,29 @@ class IngestDriver:
                 instance.connector_id,
                 instance.config_encrypted,
             )
+            # G8 resume (ADR 0070): read the saved stream cursor in the claim txn so it can be
+            # injected before the run. ``None`` for every batch connector — nothing is injected.
+            stream_cursor = instance.stream_cursor
             session.commit()
 
         # 2. Run the connector (its own session; run_ingest commits per window).
         status, error, stats = "ok", "", None
+        # Whether this connector keeps the stream warm (Mode.STREAM -> next_run=now); stays False on
+        # any failure (e.g. an unknown connector) so the unchanged backoff path is used.
+        is_stream = False
         try:
             config = json.loads(self._cipher.decrypt(config_token))
             connector = self._registry.get(connector_id)
+            is_stream = connector.manifest.mode is Mode.STREAM
             if connector.manifest.capability is Capability.ACTIVE:
                 raise ActiveConnectorRefused(
                     f"connector '{connector_id}' is ACTIVE-capability; refused — active plugins "
                     "need an authorized-scope token and are never agent-auto-run"
                 )
+            # INJECT the saved cursor only when one exists (ADR 0070); a stream collect() reads it
+            # via ``config.get("_cursor")``. Absent it, a stream tails live. Batch is untouched.
+            if stream_cursor is not None:
+                config["_cursor"] = stream_cursor
             with self._sessions() as work:
                 result = run_ingest(
                     connector,
@@ -247,9 +258,16 @@ class IngestDriver:
             status, error = "error", f"{type(exc).__name__}: {exc}"[:_ERROR_SUMMARY_MAX]
             logger.warning("ingest task failed [%s]: %s", connector_id, exc)
 
-        # 3. Finalize task + instance (status, cadence).
+        # 3. Finalize task + instance (status, cadence, stream cursor).
         self._finalize(
-            task_id, instance_id, status=status, error=error, stats=stats, now=now, kind="ingest"
+            task_id,
+            instance_id,
+            status=status,
+            error=error,
+            stats=stats,
+            now=now,
+            kind="ingest",
+            stream=is_stream,
         )
 
     # -- resolution pass ----------------------------------------------------- #
@@ -312,6 +330,7 @@ class IngestDriver:
         stats: dict[str, object] | None,
         now: datetime,
         kind: str,
+        stream: bool = False,
     ) -> None:
         with self._sessions() as session:
             task = session.get(TaskRun, task_id)
@@ -330,11 +349,23 @@ class IngestDriver:
                     # next success because the consecutive-error streak is then broken).
                     instance.status = "enabled"
                     instance.last_run = now
+                    # PERSIST the G8 stream cursor (ADR 0070) transactionally, only when the run
+                    # reported one. A batch run reports last_cursor=None -> a no-op for batch.
+                    last_cursor = stats.get("last_cursor") if stats is not None else None
+                    if isinstance(last_cursor, str):
+                        instance.stream_cursor = last_cursor
                     if status == "ok":
-                        delay = self._settings.ingest_cadence_seconds
+                        # KEEP STREAMS WARM: a Mode.STREAM instance re-runs immediately (continuous
+                        # windowed consumption); a batch instance keeps the normal cadence.
+                        if stream:
+                            instance.next_run = now
+                        else:
+                            instance.next_run = now + timedelta(
+                                seconds=self._settings.ingest_cadence_seconds
+                            )
                     else:
                         delay = self._failure_backoff_seconds(session, instance_id)
-                    instance.next_run = now + timedelta(seconds=delay)
+                        instance.next_run = now + timedelta(seconds=delay)
             session.commit()
 
     def _failure_backoff_seconds(self, session: Session, instance_id: str) -> int:

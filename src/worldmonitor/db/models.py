@@ -32,6 +32,10 @@ class ConnectorInstance(Base):
     status: Mapped[str] = mapped_column(String(32), default="disabled")
     last_run: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     next_run: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    # G8 resume cursor (ADR 0070): the saved source position for a STREAM connector. NULL for every
+    # batch connector (additive, backward-compatible); the driver injects it into the run config's
+    # ``_cursor`` before a run and persists ``IngestStats.last_cursor`` back onto it after.
+    stream_cursor: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -70,6 +70,12 @@ class IngestStats:
     """Number of committed windows (ADR 0027)."""
     stopped_reason: str
     """Why collection stopped: ``"exhausted"`` | ``"max_records"`` | ``"timeout"``."""
+    last_cursor: str | None = None
+    """Cursor of the last record in the last COMMITTED window (G8 resume, ADR 0070).
+
+    Only the cursor of a record that survived a window commit is reported, so a crash mid-window
+    re-reads from the last durable cursor (at-least-once, no silent gap). A batch run whose records
+    carry no cursor reports ``None`` — the batch path is unaffected."""
 
 
 def _record_dead_letter(
@@ -133,17 +139,24 @@ def run_ingest(
     since_commit = 0
     stopped_reason = "exhausted"
     start = time.monotonic()
+    # G8 cursor tracking (ADR 0070): ``pending_cursor`` follows the last record processed;
+    # ``committed_cursor`` is promoted to it on every window commit, so only a cursor that
+    # survived a commit is reported (at-least-once). Both stay ``None`` for a batch run.
+    pending_cursor: str | None = None
+    committed_cursor: str | None = None
 
     def _commit_window() -> None:
-        nonlocal windows, since_commit
+        nonlocal windows, since_commit, committed_cursor
         if since_commit:
             session.commit()
             windows += 1
             since_commit = 0
+            committed_cursor = pending_cursor
 
     for record in connector.collect(config):
         collected += 1
         since_commit += 1
+        pending_cursor = record.cursor
         key = "/".join(
             filter(
                 None,
@@ -237,4 +250,5 @@ def run_ingest(
         dead_lettered=dead_lettered,
         windows=windows,
         stopped_reason=stopped_reason,
+        last_cursor=committed_cursor,
     )
