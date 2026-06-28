@@ -374,6 +374,121 @@ def test_driver_resolution_pass_resolves_and_does_not_overlap(
     engine.dispose()
 
 
+# -- H-8a: auto-hard-disable after N consecutive failures (ADR 0074, extends ADR 0054) ---------- #
+
+
+def test_instance_hard_disabled_after_max_consecutive_failures(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """INV-1: after exactly ``ingest_max_consecutive_failures`` consecutive ingest failures the
+    instance is hard-disabled (``status=="error"``) and is NEVER re-selected by the due-query —
+    closing ADR 0054's 'retry forever' tail. Failures ``1..N-1`` stay ``enabled`` + backoff (INV-2);
+    every attempt stays visible as an error ``task_run`` (INV-5)."""
+    connector = _FakeConnector("fake-hd", raise_on_collect=True)
+    engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, connector)
+    max_failures = 3
+    driver._settings = driver._settings.model_copy(
+        update={"ingest_max_consecutive_failures": max_failures}
+    )
+    instance_id = _add_instance(sessions, connector_id="fake-hd", cipher=cipher)
+
+    now = _NOW
+    for k in range(1, max_failures + 1):
+        ran = driver.run_due_ingests(now=now)
+        assert instance_id in ran, f"instance must be due on attempt {k}"
+        with sessions() as session:
+            instance = session.get(ConnectorInstance, instance_id)
+            assert instance is not None
+            if k < max_failures:
+                assert instance.status == "enabled", f"attempt {k} (< N) stays retryable (ADR 0054)"
+            else:
+                assert instance.status == "error", "the Nth consecutive failure hard-disables"
+            nxt = instance.next_run
+        now = (nxt + timedelta(seconds=1)) if nxt is not None else now
+
+    # INV-1: a hard-disabled instance is never re-selected, even far in the future.
+    far_future = _NOW + timedelta(days=365)
+    assert instance_id not in driver.run_due_ingests(now=far_future), (
+        "a hard-disabled instance must not be re-selected by the due-query"
+    )
+
+    # INV-5: every attempt stays visible in run history as an error (failure never swallowed).
+    with sessions() as session:
+        n_errors = session.execute(
+            select(func.count())
+            .select_from(TaskRun)
+            .where(
+                TaskRun.kind == "ingest",
+                TaskRun.connector_instance_id == instance_id,
+                TaskRun.status == "error",
+            )
+        ).scalar_one()
+    assert n_errors == max_failures
+    engine.dispose()
+
+
+def test_max_failures_zero_disables_hard_disable(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """INV-3 opt-out: ``ingest_max_consecutive_failures == 0`` never hard-disables; the instance
+    stays retryable (the exact ADR-0054 retry-forever behaviour) however often it fails."""
+    connector = _FakeConnector("fake-forever", raise_on_collect=True)
+    engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, connector)
+    driver._settings = driver._settings.model_copy(update={"ingest_max_consecutive_failures": 0})
+    instance_id = _add_instance(sessions, connector_id="fake-forever", cipher=cipher)
+
+    now = _NOW
+    for _ in range(6):  # well past any plausible default threshold
+        driver.run_due_ingests(now=now)
+        with sessions() as session:
+            instance = session.get(ConnectorInstance, instance_id)
+            assert instance is not None
+            assert instance.status == "enabled", "max=0 must never hard-disable"
+            nxt = instance.next_run
+        now = (nxt + timedelta(seconds=1)) if nxt is not None else now
+    engine.dispose()
+
+
+def test_success_resets_streak_before_hard_disable(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """INV-4: a SUCCESS breaks the consecutive-failure streak, so an instance that fails ``N-1``
+    times then succeeds is NOT one failure from death — a later failure restarts the streak at 1."""
+    connector = _FakeConnector("fake-recover", raise_on_collect=True)
+    engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, connector)
+    max_failures = 3
+    driver._settings = driver._settings.model_copy(
+        update={"ingest_max_consecutive_failures": max_failures}
+    )
+    instance_id = _add_instance(sessions, connector_id="fake-recover", cipher=cipher)
+
+    now = _NOW
+    # Fail N-1 times (one short of hard-disable).
+    for _ in range(max_failures - 1):
+        driver.run_due_ingests(now=now)
+        with sessions() as session:
+            nxt = session.get(ConnectorInstance, instance_id).next_run  # type: ignore[union-attr]
+        now = nxt + timedelta(seconds=1) if nxt is not None else now
+
+    # Succeed once: the streak resets to 0.
+    connector._raise = False
+    driver.run_due_ingests(now=now)
+    with sessions() as session:
+        instance = session.get(ConnectorInstance, instance_id)
+        assert instance is not None and instance.status == "enabled"
+        nxt = instance.next_run
+    now = nxt + timedelta(seconds=1) if nxt is not None else now
+
+    # A single failure AFTER the success must NOT hard-disable (streak is 1, not N).
+    connector._raise = True
+    driver.run_due_ingests(now=now)
+    with sessions() as session:
+        instance = session.get(ConnectorInstance, instance_id)
+        assert instance is not None
+        assert instance.status == "enabled", "one failure after a success must not hard-disable"
+    engine.dispose()
+
+
 def test_prune_task_runs_removes_old_finished_only(
     postgres_dsn: str, clean_graph: Neo4jClient
 ) -> None:
