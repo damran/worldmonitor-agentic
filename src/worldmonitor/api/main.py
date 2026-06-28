@@ -14,9 +14,11 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 
 from worldmonitor.api.deps import get_principal
+from worldmonitor.api.graph import router as graph_router
 from worldmonitor.api.middleware import AuthMiddleware
 from worldmonitor.api.readiness import ReadinessResult, build_default_readiness
 from worldmonitor.authz.oidc import Principal, TokenVerifier, ZitadelTokenVerifier
+from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.settings import Settings, get_settings
 
 
@@ -36,6 +38,7 @@ def create_app(
     settings: Settings | None = None,
     verifier: TokenVerifier | None = None,
     readiness: Callable[[], ReadinessResult] | None = None,
+    neo4j_client: Neo4jClient | None = None,
 ) -> FastAPI:
     """Construct the WorldMonitor API.
 
@@ -43,6 +46,9 @@ def create_app(
     from ``settings`` when Zitadel is configured. ``readiness`` (the zero-arg
     store-reachability sweep behind ``/ready``) can be injected with fakes in
     tests; otherwise it is built from ``settings`` + the real store clients.
+    ``neo4j_client`` (the read client behind the graph routes, ADR 0062) can be
+    injected with a fake / testcontainer client; when injected it is used verbatim
+    (no real connection is opened). Otherwise it is built lazily from ``settings``.
     """
     settings = settings or get_settings()
     # Fail closed: a non-development boot with a placeholder secret halts loud here, before any
@@ -52,9 +58,12 @@ def create_app(
         verifier = _build_verifier(settings)
     if readiness is None:
         readiness = build_default_readiness(settings)
+    if neo4j_client is None:
+        neo4j_client = Neo4jClient.from_settings(settings)
     check_readiness = readiness
 
     app = FastAPI(title="WorldMonitor API", version="0.0.1")
+    app.state.neo4j_client = neo4j_client
     app.add_middleware(AuthMiddleware, verifier=verifier)
 
     @app.get("/health", tags=["system"])
@@ -82,4 +91,5 @@ def create_app(
         """Echo the authenticated principal — auth-gated."""
         return {"subject": principal.subject}
 
+    app.include_router(graph_router)
     return app
