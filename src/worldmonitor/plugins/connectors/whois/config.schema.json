@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "whois connector configuration",
+  "description": "ACTIVE registration lookup (whois). The query target is supplied per-run via the authorized scope, not the stored config; this config only carries optional instance-level limits.",
+  "type": "object",
+  "properties": {
+    "dataset": {
+      "type": "string",
+      "title": "Dataset",
+      "description": "Optional dataset label used in the provenance source_id."
+    },
+    "timeout": {
+      "type": "integer",
+      "title": "Timeout (seconds)",
+      "description": "Optional hard wall-clock bound on the whois subprocess, in seconds.",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false
+}
