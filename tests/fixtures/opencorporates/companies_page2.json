@@ -1,0 +1,41 @@
+{
+  "api_version": "0.4",
+  "results": {
+    "companies": [
+      {
+        "company": {
+          "name": "GAMMA HOLDINGS LIMITED",
+          "company_number": "03456789",
+          "jurisdiction_code": "gb",
+          "incorporation_date": "2010-01-20",
+          "dissolution_date": null,
+          "company_type": "Private Limited Company",
+          "current_status": "Active",
+          "registered_address_in_full": "3 Dock Rd, Bristol",
+          "opencorporates_url": "https://opencorporates.com/companies/gb/03456789",
+          "registry_url": "https://find-and-update.company-information.service.gov.uk/company/03456789",
+          "inactive": false
+        }
+      },
+      {
+        "company": {
+          "name": "DELTA SERVICES LIMITED",
+          "company_number": "04567890",
+          "jurisdiction_code": "gb",
+          "incorporation_date": "2015-06-30",
+          "dissolution_date": "2022-11-01",
+          "company_type": "Private Limited Company",
+          "current_status": "Dissolved",
+          "registered_address_in_full": "4 Hill Ln, Cardiff",
+          "opencorporates_url": "https://opencorporates.com/companies/gb/04567890",
+          "registry_url": "https://find-and-update.company-information.service.gov.uk/company/04567890",
+          "inactive": true
+        }
+      }
+    ],
+    "page": 2,
+    "per_page": 2,
+    "total_count": 4,
+    "total_pages": 2
+  }
+}

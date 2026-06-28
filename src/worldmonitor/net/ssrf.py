@@ -18,12 +18,30 @@ from __future__ import annotations
 
 import contextlib
 import ipaddress
+import logging
 import socket
 from collections.abc import Generator
 
 import httpx
 
 _DEFAULT_TIMEOUT = 120.0
+
+
+def _quiet_http_request_logging() -> None:
+    """Stop ``httpx``/``httpcore`` from logging full request URLs (which can carry secrets).
+
+    A request URL can legitimately carry a secret in a query param — e.g. OpenCorporates requires
+    ``?api_token=<secret>`` (no header auth). ``httpx`` logs the FULL request URL at INFO
+    (``logging.getLogger("httpx")``, ``"HTTP Request: GET <url> ..."``), so with the driver's root
+    logger at INFO that secret would leak in plaintext to the driver log on every page fetch,
+    defeating the connector's ``"secret": true`` flag + encryption-at-rest. Raising these loggers to
+    WARNING suppresses the URL-bearing request line platform-wide, for every connector present or
+    future, while still letting real WARNING+ errors surface. ``setLevel`` is idempotent, so calling
+    this per-fetch (before the first request httpx issues) is harmless.
+    """
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 
 # Carrier-grade NAT (RFC 6598). Python's ``ipaddress`` does NOT flag it ``is_private``, but it is a
 # shared internal range used for cloud/k8s/CGNAT internal services — a redirect to a literal
@@ -117,6 +135,10 @@ def guarded_stream(
     ``iter_lines`` / ``read``). A redirect with no ``Location``, or exceeding ``max_redirects``,
     raises. ``transport`` is injectable for ``httpx.MockTransport`` unit tests.
     """
+    # Quiet httpx/httpcore request-URL logging BEFORE the first request issues — a request URL can
+    # carry a secret query param (e.g. OpenCorporates ``?api_token=``) and httpx logs the full URL
+    # at INFO. Idempotent; see ``_quiet_http_request_logging``.
+    _quiet_http_request_logging()
     # When a transport is injected (unit tests with ``httpx.MockTransport``) we drive an explicit
     # ``httpx.Client`` so the transport is honoured. In production (``transport is None``) we use
     # the module-level ``httpx.stream`` per hop — the seam connectors' tests monkeypatch — which

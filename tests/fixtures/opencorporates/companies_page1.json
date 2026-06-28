@@ -1,0 +1,41 @@
+{
+  "api_version": "0.4",
+  "results": {
+    "companies": [
+      {
+        "company": {
+          "name": "ACME LIMITED",
+          "company_number": "01234567",
+          "jurisdiction_code": "gb",
+          "incorporation_date": "1998-04-01",
+          "dissolution_date": null,
+          "company_type": "Private Limited Company",
+          "current_status": "Active",
+          "registered_address_in_full": "1 High St, London",
+          "opencorporates_url": "https://opencorporates.com/companies/gb/01234567",
+          "registry_url": "https://find-and-update.company-information.service.gov.uk/company/01234567",
+          "inactive": false
+        }
+      },
+      {
+        "company": {
+          "name": "BETA TRADING LIMITED",
+          "company_number": "02345678",
+          "jurisdiction_code": "gb",
+          "incorporation_date": "2003-09-15",
+          "dissolution_date": null,
+          "company_type": "Private Limited Company",
+          "current_status": "Active",
+          "registered_address_in_full": "2 Market Sq, Leeds",
+          "opencorporates_url": "https://opencorporates.com/companies/gb/02345678",
+          "registry_url": "https://find-and-update.company-information.service.gov.uk/company/02345678",
+          "inactive": false
+        }
+      }
+    ],
+    "page": 1,
+    "per_page": 2,
+    "total_count": 4,
+    "total_pages": 2
+  }
+}
