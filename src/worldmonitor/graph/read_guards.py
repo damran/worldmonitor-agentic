@@ -19,6 +19,16 @@ import re
 # re-declaring a literal ``4``.
 HOP_CAP: int = 4
 
+# Hard ceiling on the neighbour count returned by ``get_neighbors`` (ADR 0064): a
+# high-degree hub node can never return its whole N-hop neighbourhood — bounded payload,
+# bounded Neo4j expansion. Generous enough not to truncate ordinary queries.
+NEIGHBOR_RESULT_LIMIT: int = 500
+
+# Hard ceiling on the paths returned by ``find_paths`` (ADR 0064): centralised here next
+# to the other read caps (moved from ``queries.py::_PATH_RESULT_LIMIT``) so every read cap
+# lives in one place.
+PATH_RESULT_LIMIT: int = 50
+
 # Shape allowed for an entity id (canonical-id alphabets: Q-numbers, LEI, GeoNames,
 # ISO codes, prefixed ids like ``opensanctions:...``). Anchored to the whole string;
 # rejects injection-shaped input (whitespace, quotes, braces, ``$``, newlines, ``;``).
