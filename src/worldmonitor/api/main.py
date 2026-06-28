@@ -7,27 +7,39 @@ gated by Zitadel OIDC (see :mod:`.middleware`). The platform is single-tenant
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
 import secrets
 from collections.abc import Callable
+from pathlib import Path
 from typing import Annotated
 
 from authlib.integrations.starlette_client import OAuth
 from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.sessions import SessionMiddleware
 
 from worldmonitor.api import auth_web
 from worldmonitor.api.auth_web import build_oauth
 from worldmonitor.api.deps import get_principal
 from worldmonitor.api.graph import router as graph_router
+from worldmonitor.api.integrations import router as integrations_router
 from worldmonitor.api.middleware import DEFAULT_PUBLIC_PATHS, AuthMiddleware
 from worldmonitor.api.readiness import ReadinessResult, build_default_readiness
 from worldmonitor.authz.oidc import Principal, TokenVerifier, ZitadelTokenVerifier
+from worldmonitor.db.engine import engine_from_settings, session_factory
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.plugins.registry import Registry
 from worldmonitor.settings import Settings, get_settings
 
 # Browser OIDC routes are PUBLIC so an unauthenticated browser can complete the login flow.
 _AUTH_WEB_PUBLIC_PATHS: frozenset[str] = frozenset({"/login", "/auth/callback", "/logout"})
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+_STATIC_DIR = Path(__file__).parent / "static"
 
 
 def _build_verifier(settings: Settings) -> TokenVerifier | None:
@@ -41,6 +53,20 @@ def _build_verifier(settings: Settings) -> TokenVerifier | None:
     )
 
 
+def _discover_registry() -> Registry:
+    """A registry of every connector AND notifier (the Integrations catalog, ADR 0069).
+
+    Mirrors ``runner.driver.discover_connectors`` but also walks the notifier package — plugins
+    live two levels down (``<family>/<name>/<impl>.py``), so walk each package recursively.
+    """
+    registry = Registry()
+    for pkg_name in ("worldmonitor.plugins.connectors", "worldmonitor.plugins.notifiers"):
+        package = importlib.import_module(pkg_name)
+        for info in pkgutil.walk_packages(package.__path__, prefix=f"{package.__name__}."):
+            registry.discover_module(importlib.import_module(info.name))
+    return registry
+
+
 def create_app(
     *,
     settings: Settings | None = None,
@@ -48,6 +74,8 @@ def create_app(
     readiness: Callable[[], ReadinessResult] | None = None,
     neo4j_client: Neo4jClient | None = None,
     oauth: OAuth | None = None,
+    db_sessions: sessionmaker[Session] | None = None,
+    registry: Registry | None = None,
 ) -> FastAPI:
     """Construct the WorldMonitor API.
 
@@ -61,7 +89,10 @@ def create_app(
     ``oauth`` (the Authlib registry behind the browser OIDC routes, ADR 0068) can
     be injected with a fake (no live Zitadel / no network); when ``None`` it is
     built from ``settings`` once auth is configured (else left unset and the login
-    routes 503).
+    routes 503). ``db_sessions`` (the Postgres ``sessionmaker`` behind the
+    Integrations UI, ADR 0069) and ``registry`` (the plugin catalog) can be
+    injected with a testcontainer factory + a fake registry; when ``None`` they are
+    built from ``settings`` + a discovered Registry (connectors + notifiers).
     """
     settings = settings or get_settings()
     # Fail closed: a non-development boot with a placeholder secret halts loud here, before any
@@ -75,12 +106,19 @@ def create_app(
         neo4j_client = Neo4jClient.from_settings(settings)
     if oauth is None and settings.auth_configured:
         oauth = build_oauth(settings)
+    if db_sessions is None:
+        db_sessions = session_factory(engine_from_settings(settings))
+    if registry is None:
+        registry = _discover_registry()
     check_readiness = readiness
 
     app = FastAPI(title="WorldMonitor API", version="0.0.1")
     app.state.settings = settings
     app.state.neo4j_client = neo4j_client
     app.state.oauth = oauth
+    app.state.db_sessions = db_sessions
+    app.state.registry = registry
+    app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
     # Middleware order is load-bearing (ADR 0068 §3): Starlette runs the LAST-ADDED middleware
     # OUTERMOST, so SessionMiddleware (added AFTER AuthMiddleware) wraps it and populates
@@ -127,6 +165,9 @@ def create_app(
         """Echo the authenticated principal — auth-gated."""
         return {"subject": principal.subject}
 
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
     app.include_router(auth_web.router)
     app.include_router(graph_router)
+    app.include_router(integrations_router)
     return app

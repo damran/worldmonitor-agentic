@@ -1,0 +1,88 @@
+:root {
+  --wm-fg: #1c1f24;
+  --wm-bg: #f7f8fa;
+  --wm-accent: #2d5bff;
+  --wm-border: #d0d4da;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--wm-fg);
+  background: var(--wm-bg);
+  margin: 0;
+}
+
+.wm-header {
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--wm-border);
+  background: #fff;
+}
+
+.wm-header a {
+  color: var(--wm-fg);
+  text-decoration: none;
+}
+
+.wm-main {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.wm-plugin-list {
+  list-style: none;
+  padding: 0;
+}
+
+.wm-plugin {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--wm-border);
+}
+
+.wm-plugin-name {
+  font-weight: 600;
+}
+
+.wm-plugin-kind {
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+
+.wm-add {
+  margin-left: auto;
+  color: var(--wm-accent);
+}
+
+.wm-instance-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.wm-instance-table th,
+.wm-instance-table td {
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--wm-border);
+}
+
+.wm-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.wm-field {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0.75rem;
+}
+
+.wm-req {
+  color: #d23;
+}
+
+button {
+  cursor: pointer;
+}

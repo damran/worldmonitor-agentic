@@ -2,10 +2,27 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
+from sqlalchemy.orm import Session
 from starlette.requests import Request
 
 from worldmonitor.authz.oidc import Principal
 from worldmonitor.graph.neo4j_client import Neo4jClient
+
+
+def get_db(request: Request) -> Iterator[Session]:
+    """Yield a SQLAlchemy session from the injected ``app.state.db_sessions`` factory.
+
+    ``create_app`` stores a ``sessionmaker`` on ``app.state.db_sessions`` (ADR 0069
+    DI-for-testability; tests inject a testcontainer factory). A request gets its own
+    session which is closed after the response — a standard generator dependency.
+    """
+    db: Session = request.app.state.db_sessions()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def get_neo4j(request: Request) -> Neo4jClient:
