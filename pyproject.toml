@@ -26,6 +26,8 @@ dependencies = [
     "alembic>=1.18.4",
     "mcp>=1.28",
     "feedparser>=6.0.12",
+    "authlib>=1.7.2",
+    "itsdangerous>=2.2.0",
 ]
 
 [project.urls]

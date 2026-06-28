@@ -39,6 +39,10 @@ _STRONG_KEY = ConfigCipher.generate_key()
 # A non-placeholder, non-guessable DSN/URL for the strong-secret path.
 _STRONG_DSN = "postgresql://wm_app:Sapphire-Kestrel-92af-Quartz@db.internal:5432/worldmonitor"
 _STRONG_REDIS = "redis://:Tundra-Marble-71cd-Lantern@cache.internal:6379/0"
+# A non-placeholder session-cookie signing key. ADR 0068 makes ``session_secret_key`` required
+# UNCONDITIONALLY in non-dev/test, so the strong-secrets prod boot must carry a real one too (a real
+# deployment always sets it). Supplied explicitly by the strong-secrets case below.
+_STRONG_SESSION_KEY = "Aventurine-Session-Signing-Key-44f1-Obsidian"
 
 
 def _settings(**overrides: object) -> Settings:
@@ -141,9 +145,124 @@ def test_unknown_environment_fails_closed() -> None:
 
 
 def test_production_with_strong_secrets_does_not_raise() -> None:
-    """Non-dev + real Fernet key + non-placeholder DSN/URL/passwords: no raise."""
-    settings = _settings(environment="production")
+    """Non-dev + real Fernet key + non-placeholder DSN/URL/passwords + a real session key: no raise.
+
+    ``session_secret_key`` is supplied here because ADR 0068 requires it unconditionally in non-dev/
+    test (the session cookie is signed on every boot); a real strong-secrets deployment always sets
+    one.
+    """
+    settings = _settings(environment="production", session_secret_key=_STRONG_SESSION_KEY)
     assert settings.validate_production_secrets() is None
+
+
+# --------------------------------------------------------------------------- #
+# Gate 3d (ADR 0068) — session_secret_key / zitadel_client_secret fail-closed.
+#
+# ADDITIVE + AUTH-GATED: the new check only fires when auth is configured
+# (``zitadel_domain`` + ``zitadel_client_id`` set) AND the environment is non-dev/test, so the
+# existing cases above (which leave auth unconfigured) stay green. RED on the base tree because
+# ``Settings`` has no ``session_secret_key`` / ``zitadel_client_secret`` fields and
+# ``validate_production_secrets`` does not yet check them.
+# --------------------------------------------------------------------------- #
+
+# A configured-auth deployment (so the new browser-session secret checks engage).
+_AUTH_CONFIGURED = {"zitadel_domain": "auth.example.test", "zitadel_client_id": "wm-client"}
+
+
+@pytest.mark.parametrize("bad", ["", "change-me"])
+def test_placeholder_session_secret_key_fails_closed_in_prod(bad: str) -> None:
+    """Non-dev + auth configured + empty/placeholder ``session_secret_key`` must fail closed (an
+    unsigned/guessable session cookie key would let anyone forge a browser session)."""
+    settings = _settings(
+        environment="production",
+        session_secret_key=bad,
+        zitadel_client_secret="a strong client secret 9c3f",  # type: ignore[arg-type]
+        **_AUTH_CONFIGURED,  # type: ignore[arg-type]
+    )
+    with pytest.raises(ValueError):
+        settings.validate_production_secrets()
+
+
+@pytest.mark.parametrize("bad", ["", "change-me"])
+def test_placeholder_zitadel_client_secret_fails_closed_in_prod(bad: str) -> None:
+    """Non-dev + auth configured + empty/placeholder ``zitadel_client_secret`` must fail closed (a
+    confidential client cannot ship without its secret)."""
+    settings = _settings(
+        environment="production",
+        session_secret_key="a-strong-session-secret-7b21",  # type: ignore[arg-type]
+        zitadel_client_secret=bad,
+        **_AUTH_CONFIGURED,  # type: ignore[arg-type]
+    )
+    with pytest.raises(ValueError):
+        settings.validate_production_secrets()
+
+
+@pytest.mark.parametrize("env", ["development", "test"])
+def test_empty_session_secret_key_exempt_in_local_envs(env: str) -> None:
+    """LOCAL environments are exempt: an empty ``session_secret_key`` does not raise (the unit suite
+    boots with ``environment="test"`` and no real secrets)."""
+    settings = _settings(
+        environment=env,
+        session_secret_key="",  # type: ignore[arg-type]
+        zitadel_client_secret="",  # type: ignore[arg-type]
+        **_AUTH_CONFIGURED,  # type: ignore[arg-type]
+    )
+    assert settings.validate_production_secrets() is None
+
+
+def test_session_secret_check_fires_even_when_auth_unconfigured() -> None:
+    """RECONCILED for the ADR-0068 security fix (was ``_check_not_fired_when_auth_unconfigured``).
+
+    This case previously asserted the VULNERABLE behaviour: prod + auth UNconfigured + empty
+    ``session_secret_key`` must NOT raise (the session-key check used to be gated behind
+    ``auth_configured``). That masked the bug — the SessionMiddleware cookie is signed on every boot
+    whether or not OIDC is wired, so an empty key is forgeable REGARDLESS of ``auth_configured``.
+    The check is now UNCONDITIONAL, so this same scenario MUST fail closed. This is an INTENDED
+    behaviour change (the security fix), not a weakening; the ``zitadel_client_secret`` half stays
+    auth-gated and is exercised empty-and-passing here.
+    """
+    settings = _settings(
+        environment="production",
+        session_secret_key="",  # type: ignore[arg-type]
+        zitadel_client_secret="",  # type: ignore[arg-type] — auth-gated half: empty is fine here
+    )
+    assert not settings.auth_configured, "precondition: auth is NOT configured"
+    with pytest.raises(ValueError):
+        settings.validate_production_secrets()
+
+
+# --------------------------------------------------------------------------- #
+# FINDING 1 (ungated session-key check) — ADVERSARIAL REGRESSION, RED on the current tree.
+#
+# The SessionMiddleware cookie is signed in EVERY boot (`session_secret_key` or a published
+# fallback) whether or not OIDC is wired, so an empty `session_secret_key` in prod must fail
+# closed REGARDLESS of `auth_configured`. RED now: the session_secret_key check lives behind
+# `if self.auth_configured`, so an auth-UNconfigured prod boot with an empty key passes today.
+#
+# NOTE: the prior `test_session_secret_check_not_fired_when_auth_unconfigured` (above) encoded the
+# *vulnerable* behaviour (it asserted the SAME scenario must NOT raise). It has been RECONCILED to
+# `test_session_secret_check_fires_even_when_auth_unconfigured` (now asserts it MUST raise) as part
+# of the ADR-0068 security fix — it was masking exactly this gap. This is the positive lock.
+# --------------------------------------------------------------------------- #
+
+
+def test_session_secret_key_required_even_when_auth_not_configured() -> None:
+    """Non-dev + empty ``session_secret_key`` must fail closed even when auth is unconfigured.
+
+    The session cookie is signed in every boot, so an empty key means the app falls back to the
+    published dev signing key — anyone can forge a session. That risk does not depend on whether
+    Zitadel is wired, so the check must NOT be gated behind ``auth_configured``.
+    """
+    settings = _settings(
+        environment="production",
+        zitadel_domain="",  # type: ignore[arg-type]
+        zitadel_client_id="",  # type: ignore[arg-type]
+        session_secret_key="",  # type: ignore[arg-type]
+        config_encryption_key="a-valid-encryption-key-xyz",
+    )
+    assert not settings.auth_configured, "precondition: auth is NOT configured (the gated path)"
+    with pytest.raises(ValueError):
+        settings.validate_production_secrets()
 
 
 # --------------------------------------------------------------------------- #
