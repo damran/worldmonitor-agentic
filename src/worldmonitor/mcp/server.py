@@ -1,0 +1,162 @@
+"""Graph-read FastMCP **stdio** server (ADR 0063, slice 2b).
+
+The MCP twin of slice 2a's REST routes: it re-exposes the resolved graph over a
+FastMCP stdio server with exactly four structured, read-only, bounded, parameterized
+tools — ``get_entity`` / ``get_neighbors`` / ``get_provenance`` / ``find_paths`` —
+each wrapping the SAME ``graph/queries.py`` helper and the SAME shared
+``graph/read_guards`` (hop clamp + id validation) as REST. There is **no** raw-Cypher
+tool (same call as ADR 0062).
+
+HARD INVARIANTS
+- **STDOUT PURITY.** Over stdio, stdout is the JSON-RPC frame channel; any non-frame
+  byte corrupts it. So all logging is routed to **stderr only** (an explicit
+  ``StreamHandler(sys.stderr)`` on the ``worldmonitor`` logger AND the root logger), and
+  this package never calls ``print()``. Holds on the error/exception path too: a tool
+  that logs-and-raises writes its diagnostic to stderr and surfaces a JSON-RPC error
+  frame on stdout (never a traceback).
+- **READ-ONLY.** Every tool calls ``client.execute_read`` only (via the query helpers);
+  no write/MERGE/SET/DELETE, no write session.
+- **NO INJECTION.** Each id is validated by shape (``read_guards.validate_entity_id``)
+  BEFORE any ``execute_read``; a valid id is passed as a BOUND parameter, never spliced
+  into the Cypher string.
+- **BOUNDED.** ``hops``/``max_hops`` clamp to the SHARED ``read_guards.HOP_CAP`` (never a
+  re-implemented literal); ``find_paths`` carries an inherited result ``LIMIT``.
+
+Auth/transport (ADR 0063): stdio v1 (no network port); the trust boundary is who may
+spawn the process inside the single-tenant deployment (D1, ADR 0042) — no per-call token.
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+from typing import Any
+
+from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+
+from worldmonitor.graph import queries, read_guards
+from worldmonitor.graph.neo4j_client import Neo4jClient
+
+logger = logging.getLogger("worldmonitor.mcp.server")
+
+# Marker on the handler this module installs, so re-running ``configure_stderr_logging``
+# is idempotent (never stacks a second handler).
+_WM_STDERR_HANDLER = "_wm_mcp_stderr_handler"
+
+
+def _ensure_stderr_handler(target: logging.Logger) -> None:
+    """Attach exactly one stderr ``StreamHandler`` to ``target`` (idempotent)."""
+    for handler in target.handlers:
+        if getattr(handler, _WM_STDERR_HANDLER, False):
+            return
+    handler = logging.StreamHandler(sys.stderr)
+    setattr(handler, _WM_STDERR_HANDLER, True)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    target.addHandler(handler)
+
+
+def configure_stderr_logging() -> None:
+    """Route ALL logging to stderr only — idempotent; never stdout (STDOUT PURITY).
+
+    Installs a single ``StreamHandler(sys.stderr)`` on both the ``worldmonitor`` logger
+    (our own diagnostics) and the root logger (so a chatty dependency / the mcp SDK can't
+    leak to stdout either). Never calls ``logging.basicConfig`` (which could target
+    stdout) and the ``mcp`` package never ``print()``s. Calling this twice does NOT add a
+    duplicate handler.
+    """
+    wm_logger = logging.getLogger("worldmonitor")
+    wm_logger.setLevel(logging.INFO)
+    _ensure_stderr_handler(wm_logger)
+    _ensure_stderr_handler(logging.getLogger())
+
+
+def _require_valid_id(entity_id: str) -> None:
+    """Reject an injection-/malformed-shaped id BEFORE any query (logs to stderr, raises)."""
+    if not read_guards.validate_entity_id(entity_id):
+        # Log-on-rejection lands on stderr (never stdout); the raise surfaces as a
+        # JSON-RPC error frame.
+        logger.warning("rejected malformed entity id (failed ID_PATTERN): %r", entity_id)
+        raise ToolError("invalid entity id")
+
+
+# ----------------------------------------------------------------------------------------
+# Thin, module-level tool functions — take the client explicitly so unit/property tests can
+# drive them directly (no JSON-RPC loop). Each validates id-shape, clamps hops, and wraps
+# the matching ``graph.queries`` helper verbatim (read-only).
+# ----------------------------------------------------------------------------------------
+def tool_get_entity(client: Neo4jClient, entity_id: str) -> dict[str, Any]:
+    """Return a resolved entity's node properties (incl. its ``prov_*``); absent -> error."""
+    _require_valid_id(entity_id)
+    entity = queries.get_entity(client, entity_id=entity_id)
+    if entity is None:
+        raise ToolError("entity not found")
+    return entity
+
+
+def tool_get_neighbors(client: Neo4jClient, entity_id: str, hops: int = 1) -> list[dict[str, Any]]:
+    """Return entities linked to ``entity_id`` within ``hops`` (clamped to the shared cap)."""
+    _require_valid_id(entity_id)
+    return queries.get_neighbors(client, entity_id=entity_id, hops=read_guards.clamp_hops(hops))
+
+
+def tool_get_provenance(client: Neo4jClient, entity_id: str) -> dict[str, str]:
+    """Return the node's ``prov_*`` map; absent -> error (parity with 2a's 404, ADR 0060)."""
+    _require_valid_id(entity_id)
+    prov = queries.get_provenance(client, entity_id=entity_id)
+    if not prov:
+        raise ToolError("entity not found")
+    return prov
+
+
+def tool_find_paths(
+    client: Neo4jClient, from_id: str, to_id: str, max_hops: int = 1
+) -> list[dict[str, Any]]:
+    """Return bounded paths between two entities (``max_hops`` clamped to the shared cap)."""
+    _require_valid_id(from_id)
+    _require_valid_id(to_id)
+    return queries.find_paths(
+        client, from_id=from_id, to_id=to_id, max_hops=read_guards.clamp_hops(max_hops)
+    )
+
+
+def build_server(*, neo4j_client: Neo4jClient | None = None) -> FastMCP:
+    """Build the FastMCP server, registering exactly the four read tools (ADR 0063).
+
+    The Neo4j client is INJECTABLE for testability (mirrors ``create_app``, ADR 0062):
+    an injected client is used verbatim and NO connection is opened here; only when
+    ``neo4j_client is None`` is the default ``Neo4jClient.from_settings()`` constructed.
+    Tool handlers close over the client and delegate to the thin module-level functions.
+    """
+    configure_stderr_logging()
+    client = neo4j_client if neo4j_client is not None else Neo4jClient.from_settings()
+
+    server: FastMCP = FastMCP(name="worldmonitor-graph-read")
+
+    def get_entity(entity_id: str) -> dict[str, Any]:
+        """Return a resolved entity's properties (incl. provenance); error if absent."""
+        return tool_get_entity(client, entity_id)
+
+    def get_neighbors(entity_id: str, hops: int = 1) -> list[dict[str, Any]]:
+        """Return entities linked to an entity within ``hops`` (clamped to the cap)."""
+        return tool_get_neighbors(client, entity_id, hops)
+
+    def get_provenance(entity_id: str) -> dict[str, str]:
+        """Return an entity's provenance (``prov_*``) map; error if absent."""
+        return tool_get_provenance(client, entity_id)
+
+    def find_paths(from_id: str, to_id: str, max_hops: int = 1) -> list[dict[str, Any]]:
+        """Return bounded paths between two entities (``max_hops`` clamped to the cap)."""
+        return tool_find_paths(client, from_id, to_id, max_hops)
+
+    server.add_tool(get_entity, name="get_entity")
+    server.add_tool(get_neighbors, name="get_neighbors")
+    server.add_tool(get_provenance, name="get_provenance")
+    server.add_tool(find_paths, name="find_paths")
+    return server
+
+
+def main() -> None:
+    """Console entrypoint — run the stdio MCP server (spawned by Hermes / an operator)."""
+    configure_stderr_logging()
+    build_server().run(transport="stdio")

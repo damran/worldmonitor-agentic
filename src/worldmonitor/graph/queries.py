@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from worldmonitor.graph import read_guards
 from worldmonitor.graph.neo4j_client import Neo4jClient
 
 
@@ -46,9 +47,9 @@ def get_provenance(client: Neo4jClient, *, entity_id: str) -> dict[str, str]:
     return {str(key): str(value) for key, value in rows[0]["prov"]}
 
 
-# Hard ceiling on path-traversal depth (ADR 0062): no unbounded traversal.
-_MAX_HOPS_CAP = 4
 # Cap on the number of paths returned, so a result can never blow up unbounded.
+# The path-traversal depth ceiling lives in the shared ``read_guards.HOP_CAP`` (ADR
+# 0063: one cap, one place) — ``find_paths`` clamps against it below.
 _PATH_RESULT_LIMIT = 50
 
 
@@ -66,7 +67,7 @@ def find_paths(
 
     Each path is ``{"nodes": [id, ...], "relationships": [rel_type, ...]}``.
     """
-    depth = max(1, min(int(max_hops), _MAX_HOPS_CAP))
+    depth = max(1, min(int(max_hops), read_guards.HOP_CAP))
     query = (
         "MATCH p = shortestPath("
         f"(a:Entity {{id: $from_id}})-[*1..{depth}]-(b:Entity {{id: $to_id}})) "
