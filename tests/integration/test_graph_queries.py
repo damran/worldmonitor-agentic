@@ -71,3 +71,87 @@ def test_get_entity_neighbors_and_provenance(clean_graph: Neo4jClient) -> None:
 
     # A missing id returns nothing.
     assert get_entity(clean_graph, entity_id="does-not-exist") is None
+
+
+# ======================================================================================
+# find_paths (ADR 0062, slice 2a) — bounded relationship paths between two entities.
+# `find_paths` is imported locally so this module still collects (RED via AttributeError)
+# while the existing get_entity/get_neighbors/get_provenance test above stays green.
+# ======================================================================================
+def _seed_owns_chain(client: Neo4jClient) -> None:
+    """p1 -OWNS-> c1 -OWNS-> c2: p1..c1 is one hop, p1..c2 is two."""
+    ensure_constraints(client)
+    person = _stamped(
+        {"id": "p1", "schema": "Person", "properties": {"name": ["Jane Target"]}, "datasets": ["t"]}
+    )
+    company1 = _stamped(
+        {"id": "c1", "schema": "Company", "properties": {"name": ["Shell Co"]}, "datasets": ["t"]}
+    )
+    company2 = _stamped(
+        {"id": "c2", "schema": "Company", "properties": {"name": ["Sub Co"]}, "datasets": ["t"]}
+    )
+    own1 = _stamped(
+        {
+            "id": "o1",
+            "schema": "Ownership",
+            "properties": {"owner": ["p1"], "asset": ["c1"]},
+            "datasets": ["t"],
+        }
+    )
+    own2 = _stamped(
+        {
+            "id": "o2",
+            "schema": "Ownership",
+            "properties": {"owner": ["c1"], "asset": ["c2"]},
+            "datasets": ["t"],
+        }
+    )
+    write_entities(client, [person, company1, company2, own1, own2])
+
+
+def test_find_paths_returns_bounded_node_ids_and_rel_types(clean_graph: Neo4jClient) -> None:
+    from worldmonitor.graph.queries import find_paths
+
+    _seed_owns_chain(clean_graph)
+    paths = find_paths(clean_graph, from_id="p1", to_id="c2", max_hops=3)
+    assert paths, "expected at least one path from p1 to c2 within 3 hops"
+
+    path = paths[0]
+    # Each path carries the node ids it traverses + the relationship types between them.
+    assert path["nodes"][0] == "p1"
+    assert path["nodes"][-1] == "c2"
+    assert "c1" in path["nodes"]
+    assert path["relationships"], "a path must list its relationship types"
+    assert all(rel == "OWNS" for rel in path["relationships"])
+    # node-count == rel-count + 1 for a simple path.
+    assert len(path["nodes"]) == len(path["relationships"]) + 1
+
+
+def test_find_paths_respects_max_hops(clean_graph: Neo4jClient) -> None:
+    from worldmonitor.graph.queries import find_paths
+
+    _seed_owns_chain(clean_graph)
+    # p1..c1 is one hop -> reachable at max_hops=1.
+    near = find_paths(clean_graph, from_id="p1", to_id="c1", max_hops=1)
+    assert near, "p1 -> c1 is a single hop and must be found at max_hops=1"
+    assert near[0]["nodes"][0] == "p1"
+    assert near[0]["nodes"][-1] == "c1"
+
+    # p1..c2 is two hops -> NOT reachable when bounded to a single hop.
+    far = find_paths(clean_graph, from_id="p1", to_id="c2", max_hops=1)
+    assert far == [], "p1 -> c2 is two hops and must not be returned at max_hops=1"
+
+
+def test_find_paths_is_read_only_and_parameterized(clean_graph: Neo4jClient) -> None:
+    from worldmonitor.graph.queries import find_paths
+
+    _seed_owns_chain(clean_graph)
+    before = clean_graph.execute_read("MATCH (n) RETURN count(n) AS n")[0]["n"]
+
+    # An injection-shaped id is a bound parameter, not interpolated Cypher: it simply
+    # matches nothing (no path, no error, no mutation).
+    hostile = find_paths(clean_graph, from_id='p1") DETACH DELETE n //', to_id="c2", max_hops=3)
+    assert hostile == []
+
+    after = clean_graph.execute_read("MATCH (n) RETURN count(n) AS n")[0]["n"]
+    assert after == before, "find_paths must be read-only — the graph was mutated"

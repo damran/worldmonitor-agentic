@@ -44,3 +44,35 @@ def get_provenance(client: Neo4jClient, *, entity_id: str) -> dict[str, str]:
     if not rows:
         return {}
     return {str(key): str(value) for key, value in rows[0]["prov"]}
+
+
+# Hard ceiling on path-traversal depth (ADR 0062): no unbounded traversal.
+_MAX_HOPS_CAP = 4
+# Cap on the number of paths returned, so a result can never blow up unbounded.
+_PATH_RESULT_LIMIT = 50
+
+
+def find_paths(
+    client: Neo4jClient, *, from_id: str, to_id: str, max_hops: int
+) -> list[dict[str, Any]]:
+    """Return bounded relationship paths between two entities (ADR 0062, slice 2a).
+
+    Read-only ``shortestPath`` between ``from_id`` and ``to_id``, undirected and
+    anchored so each returned path starts at ``from_id`` and ends at ``to_id``.
+    ``max_hops`` is clamped to a hard ceiling (the variable-length bound is a
+    literal in the Cypher string — Cypher cannot parameterize it); ``from_id`` /
+    ``to_id`` are BOUND parameters, never string-interpolated, so an
+    injection-shaped id simply matches nothing and returns ``[]`` (no mutation).
+
+    Each path is ``{"nodes": [id, ...], "relationships": [rel_type, ...]}``.
+    """
+    depth = max(1, min(int(max_hops), _MAX_HOPS_CAP))
+    query = (
+        "MATCH p = shortestPath("
+        f"(a:Entity {{id: $from_id}})-[*1..{depth}]-(b:Entity {{id: $to_id}})) "
+        "RETURN [n IN nodes(p) | n.id] AS nodes, "
+        "[r IN relationships(p) | type(r)] AS relationships "
+        f"LIMIT {_PATH_RESULT_LIMIT}"
+    )
+    rows = client.execute_read(query, from_id=from_id, to_id=to_id)
+    return [{"nodes": row["nodes"], "relationships": row["relationships"]} for row in rows]
