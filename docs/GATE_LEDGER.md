@@ -82,5 +82,31 @@ are gated on a named real-time consumer / explicit incremental-ER decision).
   (G3 CLOSED by Gate D / ADR 0046; G6 CLOSED by Gate E / ADR 0047 (topics-first → k-hop → Chow band);
   G1/G2/G8 + audit B-1/B-2/B-3/H-1/H-2/H-3 CLOSED; G4 superseded by single-tenancy.)
   Several are re-confirmed with fresh file:line evidence in `ARCHITECTURE_REVIEW.md` §7.
-- **Deferred (locked):** Gate B / Gate C / S4 / X1 — none built; each gated on
+- **Deferred (locked):** Gate B / Gate C / S4 — none built; each gated on
   an explicit decision. (X2 / X3 were single-tenant-conditioned forks, now moot under D1 — ADR 0042.)
+  (**X1 / STREAM cursor is now CLOSED** — see §5, ADR 0070.)
+
+---
+
+## 5. Phase-2 gates (ADRs 0060–0072) — **the API/MCP read surface + Integrations UI + live/stream/active connectors**
+
+Phase 2 is **COMPLETE** (2026-06-28, master `ae50874`). Each gate: failing-test-first → build →
+adversarial verification → green CI → self-merge. The adversarial fleet caught a real security bug
+on every sensitive slice (token-in-URL log leak; source-visible-key auth bypass; PKCE-off-in-prod;
+CSRF 500) — each fixed before merge.
+
+| Gate | What | ADR | PR | Status |
+|---|---|---|---|---|
+| M-3 / M-1 / M-2 | Stage-0 safety: fail-closed `MERGE_GUARD_MODE`; node-provenance integrity; loopback-bind stores + placeholder-secret validator | —/0060/0061 | #114/#115/#116 | **CLOSED** |
+| Stage-1 decisions | ADR 0019 (periodic re-batch) ACCEPTED · H-8 transport = Prometheus `/metrics` · G7 blocker recorded | 0019/0054 | #118 | **CLOSED** |
+| 2a / 2b | graph-read **REST** + **FastMCP stdio** over a shared bounded/parameterized guard layer | 0062/0063 | #119/#120 | **CLOSED** |
+| 0064 | `get_neighbors` result LIMIT + self-clamp (read-surface hardening) | 0064 | #121 | **CLOSED** |
+| 3a / 3b | **RestApiConnector** + **OpenCorporates**; **FeedConnector** (RSS/Atom → FtM `Article`) | 0065/0066 | #122/#123 | **CLOSED** |
+| 3c | **Notifier** plugin type + **TelegramNotifier** | 0067 | #124 | **CLOSED** |
+| 4a / 4b | Browser **session auth** (Zitadel OIDC + dual-path middleware); **Integrations UI** (HTMX/Jinja2 catalog + schema forms + save/enable/status + Run) | 0068/0069 | #125/#126 | **CLOSED** |
+| 5 | **StreamConnector** (Bluesky Jetstream) + the **G8** cursor/resume protocol (closes audit **X1**) | 0070 | #127 | **CLOSED** |
+| 6a / 6b | **Active-capability gating**: scope token + operator-run + audit + `CliToolConnector` + **whois/dig** (run) + **nmap** (execution-gated until a container sandbox) | 0071/0072 | #128/#129 | **CLOSED** |
+
+**Open after Phase 2 (Stage-4 backlog; see `docs/40_ROADMAP.md` "Next"):** H-4 Abjad ER (own ADR + `@given`),
+H-8 remaining halves + `/metrics`, the container/egress sandbox (unlocks nmap), the MEDIUM/LOW sweep
+(#105, M-5, M-6, wikidata-via-`guarded_stream`, …), and **G7** promotion (**BLOCKED** on ground-truth labels).

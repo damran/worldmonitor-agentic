@@ -41,15 +41,25 @@ layer has tools; **Hermes** connects after that; self-improvement is unlocked la
 
 ---
 
-## Phase 2 — API/MCP surface + Integrations page + first live/stream connectors ★ CURRENT MILESTONE
-**Goal:** expose the graph outward, and the flagship self-service surface.
-- [ ] **API + MCP (`60`):** GraphQL/REST reads + a FastMCP server with `query_graph`/`get_entity`/`find_paths`/`enrich`; auth + tenancy + provenance-in-responses; guarded reads.
-- [ ] **Integrations page (UI):** catalog from the registry (filterable), **schema-driven config forms**, save→vault→validate→enable, status/health. Seeded from the 67-sheet inventory.
-- [ ] First **`RestApiConnector`** (e.g. OpenCorporates) + first **`StreamConnector`** (**Bluesky Jetstream**, `wantedDids` watchlist) + first **`FeedConnector`** (RSS+full-text → `wm:Article`/`wm:Event`).
-- [ ] **`TelegramNotifier`** plugin (deterministic system alerts).
-- [ ] Active-capability gating proven on one `CliToolConnector` (scope token + separate logging + sandbox).
+## Phase 2 — API/MCP surface + Integrations page + first live/stream connectors ✅ COMPLETE (2026-06-28)
+**Goal:** expose the graph outward, and the flagship self-service surface. _16 gates, ADRs 0060–0072, PRs #114–#129; each failing-test-first → build → adversarial verify → green CI → self-merge._
+- [x] **API + MCP (`60`):** auth-gated REST reads (`/entities`,`/entities/{id}/neighbors`,`/provenance`,`/paths`) + a **FastMCP stdio** server over the same bounded/parameterized helpers; provenance-in-responses; guarded reads (hop-cap + result LIMIT). GraphQL + raw `query_graph` deferred to trusted/admin. — ADR 0062/0063/0064 (#119/#120/#121).
+- [x] **Integrations page (UI):** **HTMX+Jinja2** catalog from the registry + **schema-driven config forms** → save (vault-encrypted) → enable → status/health → **Run**. Browser auth = **Zitadel OIDC** session (dual-path middleware). — ADR 0068/0069 (#125/#126).
+- [x] **`RestApiConnector`** base + **OpenCorporates** (0065, #122); **`StreamConnector`** = **Bluesky Jetstream** + the **G8 cursor/resume** protocol (0070, #127); **`FeedConnector`** RSS/Atom → FtM `Article` (0066, #123; full-text → a Phase-4 enricher).
+- [x] **`TelegramNotifier`** + the Notifier plugin type (0067, #124).
+- [x] Active-capability gating proven: scope token + operator-run + audit + `CliToolConnector` + **whois/dig** (run, subprocess) + **nmap** (execution-gated until a container sandbox) (0071/0072, #128/#129).
 
-**Done when:** you can add a source from the UI by filling a form and watch it collect into the graph; external workflows can query via MCP/GraphQL.
+**Done when (✅ MET):** add a source from the UI by filling a form and watch it collect into the graph; external workflows can query via MCP/REST.
+
+---
+
+## Next — Stage-4 hardening backlog (interleaved) ★ CURRENT, then Phase 3 (Hermes, now unblocked)
+_Pay down the deferred hardening before/alongside Phase 3. (Full notes: the forward plan + the `phase-2-complete-stage-4-next` memory.)_
+- [ ] **H-4 Abjad/Arabic-Persian ER** — own ADR + mandatory `@given` tests + Arabic/Persian fixtures (`splink_model.py::_name_fingerprint` lossy-skeleton gap). Invariant-touching.
+- [ ] **H-8 remaining halves** — periodic in-loop maintenance cadence · resolve wall-clock timeout + lock-skip escalation · auto-hard-disable after N failures · Prometheus `/metrics` transport (decided, ADR 0054).
+- [ ] **Container/egress sandbox** — flips `container_sandbox_enabled`; unlocks nmap execution (ADR 0072 follow-up).
+- [ ] **MEDIUM/LOW sweep** — #105 (edge-prov skip+dead-letter), M-5 (online-migration safety), M-6 (landing GC), wikidata enricher via `guarded_stream`, dig/nmap richer FtM map, suffix-match allowlist.
+- [ ] **G7 threshold promotion** — **BLOCKED** on real ground-truth labels (person-affecting; ADR 0043 harness exists). Stays parked.
 
 ---
 
