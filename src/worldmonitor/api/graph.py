@@ -24,21 +24,16 @@ from worldmonitor.authz.oidc import Principal
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.queries import find_paths, get_entity, get_neighbors, get_provenance
 
-# Hard ceiling on traversal depth (ADR 0062): no unbounded traversal.
-HOP_CAP = 4
+# Read guards (hop cap / hop clamp / id alphabet) live in one shared module so the REST
+# and MCP read surfaces can never drift (ADR 0063: one cap, one place). ``HOP_CAP`` is
+# re-exported here for callers/tests that read ``api.graph.HOP_CAP``.
+from worldmonitor.graph.read_guards import HOP_CAP, ID_PATTERN, clamp_hops
 
-# Shape allowed for an entity id (canonical-id alphabets: Q-numbers, LEI, GeoNames,
-# ISO codes, prefixed ids like ``opensanctions:...``). Rejects injection-shaped input.
-_ID_PATTERN = r"^[A-Za-z0-9:._-]+$"
+__all__ = ["HOP_CAP", "router"]
 
 router = APIRouter(tags=["graph"])
 
-EntityId = Annotated[str, Path(pattern=_ID_PATTERN)]
-
-
-def _clamp_hops(value: int) -> int:
-    """Clamp a requested hop count to ``[1, HOP_CAP]`` before it reaches the query."""
-    return max(1, min(int(value), HOP_CAP))
+EntityId = Annotated[str, Path(pattern=ID_PATTERN)]
 
 
 @router.get("/entities/{entity_id}")
@@ -62,7 +57,7 @@ def read_neighbors(
     hops: Annotated[int, Query(ge=1)] = 1,
 ) -> dict[str, list[dict[str, Any]]]:
     """Return entities linked to ``entity_id`` within ``hops`` (clamped to the cap)."""
-    neighbors = get_neighbors(client, entity_id=entity_id, hops=_clamp_hops(hops))
+    neighbors = get_neighbors(client, entity_id=entity_id, hops=clamp_hops(hops))
     return {"neighbors": neighbors}
 
 
@@ -89,10 +84,10 @@ def read_provenance(
 def read_paths(
     _principal: Annotated[Principal, Depends(get_principal)],
     client: Annotated[Neo4jClient, Depends(get_neo4j)],
-    from_id: Annotated[str, Query(alias="from", min_length=1, pattern=_ID_PATTERN)],
-    to_id: Annotated[str, Query(alias="to", min_length=1, pattern=_ID_PATTERN)],
+    from_id: Annotated[str, Query(alias="from", min_length=1, pattern=ID_PATTERN)],
+    to_id: Annotated[str, Query(alias="to", min_length=1, pattern=ID_PATTERN)],
     max_hops: Annotated[int, Query(ge=1)] = 1,
 ) -> dict[str, list[dict[str, Any]]]:
     """Return bounded paths between two entities (``max_hops`` clamped to the cap)."""
-    paths = find_paths(client, from_id=from_id, to_id=to_id, max_hops=_clamp_hops(max_hops))
+    paths = find_paths(client, from_id=from_id, to_id=to_id, max_hops=clamp_hops(max_hops))
     return {"paths": paths}
