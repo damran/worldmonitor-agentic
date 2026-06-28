@@ -92,6 +92,14 @@ class RawRecord:
     retrieved_at: str
     """ISO-8601 timestamp of collection."""
     content_type: str = "application/json"
+    cursor: str | None = None
+    """Source position *after* this record (G8 resume protocol, ADR 0070).
+
+    A STREAM connector sets it so ``run_ingest`` can report the last committed cursor and the
+    driver can resume from it; a batch connector never sets it (default ``None``), so the batch
+    path is wholly unaffected — this is the LAST field, after ``content_type``, to keep every
+    existing positional/keyword construction valid.
+    """
 
 
 class Connector(ABC):

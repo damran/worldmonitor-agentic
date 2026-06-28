@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bluesky Jetstream connector configuration",
+  "description": "Consumes the public Bluesky Jetstream firehose (no API key) and imports each post as an FtM Article (metadata only) with provenance. A one-way PULL into the landing zone + ER queue.",
+  "type": "object",
+  "properties": {
+    "wanted_collections": {
+      "type": "array",
+      "title": "Wanted collections",
+      "description": "Jetstream lexicon collections to subscribe to (only post-create commits map to an Article).",
+      "items": {
+        "type": "string"
+      },
+      "default": ["app.bsky.feed.post"]
+    },
+    "window_seconds": {
+      "type": "integer",
+      "title": "Window (seconds)",
+      "description": "Wall-clock length of one bounded consumption window before the run returns and re-runs.",
+      "minimum": 1,
+      "default": 20
+    },
+    "max_events": {
+      "type": "integer",
+      "title": "Maximum events",
+      "description": "Hard cap on the number of events consumed per window (bounds each run).",
+      "minimum": 1,
+      "default": 500
+    },
+    "endpoint": {
+      "type": "string",
+      "title": "Jetstream endpoint",
+      "description": "Optional override of the public Jetstream WebSocket host (defaults to the public firehose)."
+    }
+  },
+  "additionalProperties": false
+}
