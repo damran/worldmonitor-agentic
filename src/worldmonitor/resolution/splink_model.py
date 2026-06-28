@@ -282,6 +282,41 @@ def _anchor_clash_comparison() -> dict[str, Any]:
     }
 
 
+# Arabic combining marks (harakat/tashkeel) + tatweel/kashida that `fingerprints` transliterates
+# into spurious Latin vowels, so the SAME abjad name written with vs. without them projects a
+# DIFFERENT key (ADR 0073). These are STRIPPED before `fingerprints.generate`. The ranges are the
+# ADR-0073 contract VERBATIM — short-vowel/annotation marks + dagger alif + tatweel, and NOTHING
+# else (base abjad letters are never touched). Built as an explicit deletion table so the "pure
+# deletion of exactly these codepoints" property is obvious by construction.
+_ARABIC_MARK_RANGES: tuple[tuple[int, int], ...] = (
+    (0x0610, 0x061A),  # Arabic signs
+    (0x064B, 0x065F),  # harakat + extended marks
+    (0x0670, 0x0670),  # superscript alef / dagger alif
+    (0x06D6, 0x06DC),  # Qur'anic annotation marks
+    (0x06DF, 0x06E4),  # Qur'anic annotation marks
+    (0x06E7, 0x06E8),  # Qur'anic annotation marks
+    (0x06EA, 0x06ED),  # Qur'anic annotation marks
+    (0x0640, 0x0640),  # tatweel / kashida
+)
+_ARABIC_MARK_DELETION = {cp: None for lo, hi in _ARABIC_MARK_RANGES for cp in range(lo, hi + 1)}
+
+
+def _strip_arabic_marks(text: str) -> str:
+    """Delete Arabic combining harakat/tashkeel + tatweel from ``text`` (ADR 0073).
+
+    PURE DELETION of exactly the ADR-0073 mark codepoints (``U+0610-U+061A``, ``U+064B-U+065F``,
+    ``U+0670``, ``U+06D6-U+06DC``, ``U+06DF-U+06E4``, ``U+06E7-U+06E8``, ``U+06EA-U+06ED`` and the
+    ``U+0640`` tatweel) and nothing else: the output is the input with only those codepoints removed
+    — a marks-filtered SUBSEQUENCE of the input. Two consequences fall out by construction: (1) it
+    introduces NO over-merge (any two names differing in a base/non-mark character still differ
+    after stripping); (2) it is a strict NO-OP on text carrying none of these codepoints
+    (Latin/Cyrillic/CJK + Latin diacritics are returned byte-for-byte identical). It only removes
+    the spurious divergence the marks caused — the SAME abjad name written with vs. without tashkeel
+    then projects the SAME ``fingerprints`` key (closes the deferred ADR-0035 abjad gap).
+    """
+    return text.translate(_ARABIC_MARK_DELETION)
+
+
 def _name_fingerprint(entity: FtmEntity) -> str | None:
     """Script-stable name key for matching, or ``None`` for a no-name entity.
 
@@ -296,14 +331,19 @@ def _name_fingerprint(entity: FtmEntity) -> str | None:
     guarded on a real ``name`` value so a no-name entity (e.g. ``Sanction``, whose caption
     falls back to a programme code) stays ``None`` and never matches on an empty name.
 
-    KNOWN GAP (deferred, ADR 0035): ``fingerprints`` renders abjad scripts (Arabic/Persian)
-    as lossy consonant skeletons, so it is not a reliable *sole* key for those. The robust
-    follow-up is nomenklatura ``LogicV2`` as a post-blocking re-scorer (its own ADR); it is
-    a row-wise Python matcher that does not vectorise in DuckDB, so it is out of scope here.
+    ABJAD NORMALIZATION (ADR 0073): ``fingerprints`` transliterates Arabic short-vowel marks
+    (harakat/tashkeel) into Latin vowels, so the SAME abjad name written with vs. without those
+    marks projected DIFFERENT keys (e.g. ``مُحَمَّد`` -> 'muhamad' vs ``محمد`` -> 'mhmd') — a recall
+    hole on exactly the (often sanctioned) people we most need to resolve. ``_strip_arabic_marks``
+    deletes those mark codepoints (a pure deletion) BEFORE ``generate``, closing that sub-case.
+
+    KNOWN GAP (still deferred, ADR 0073 / 0035): the general abjad re-scorer nomenklatura
+    ``LogicV2`` (a row-wise Python matcher that does not vectorise in DuckDB — its own ADR) and the
+    ʿayn (``ع``) token-splitting transliteration artifact REMAIN out of scope here.
     """
     if not entity.first("name", quiet=True):
         return None
-    fingerprint = fingerprints.generate(entity.caption)
+    fingerprint = fingerprints.generate(_strip_arabic_marks(entity.caption))
     if not fingerprint:
         return None
     stripped = fingerprints.remove_types(fingerprint)

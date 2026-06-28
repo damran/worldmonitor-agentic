@@ -107,6 +107,21 @@ CSRF 500) — each fixed before merge.
 | 5 | **StreamConnector** (Bluesky Jetstream) + the **G8** cursor/resume protocol (closes audit **X1**) | 0070 | #127 | **CLOSED** |
 | 6a / 6b | **Active-capability gating**: scope token + operator-run + audit + `CliToolConnector` + **whois/dig** (run) + **nmap** (execution-gated until a container sandbox) | 0071/0072 | #128/#129 | **CLOSED** |
 
-**Open after Phase 2 (Stage-4 backlog; see `docs/40_ROADMAP.md` "Next"):** H-4 Abjad ER (own ADR + `@given`),
+**Open after Phase 2 (Stage-4 backlog; see `docs/40_ROADMAP.md` "Next"):** ~~H-4 Abjad ER~~ (**CLOSED** §6),
 H-8 remaining halves + `/metrics`, the container/egress sandbox (unlocks nmap), the MEDIUM/LOW sweep
 (#105, M-5, M-6, wikidata-via-`guarded_stream`, …), and **G7** promotion (**BLOCKED** on ground-truth labels).
+
+---
+
+## 6. Stage-4 hardening gates (ADRs 0073+) — **paying down the deferred hardening**
+
+Same gate discipline as Phase 2: failing-test-first → build → adversarial verification → green CI →
+self-merge. Invariant-touching gates carry a mandatory `@given` property test in `tests/property/`.
+
+| Gate | What | ADR | PR | Status |
+|---|---|---|---|---|
+| H-4 | **Abjad (Arabic/Persian) name normalization** — strip harakat/tashkeel + tatweel before `fingerprints.generate` in `_name_fingerprint`, so the SAME abjad name with vs. without short-vowel marks projects the SAME `name_fp` ER key (closes the deferred ADR-0035 abjad sub-case). 0.92 threshold + catastrophic-merge guard + sensitive-park **UNCHANGED**; pure deletion ⇒ no over-merge + strict no-op on non-abjad. `LogicV2` re-scorer + ʿayn-splitting **still deferred**. | 0073 | #131 | **CLOSED** |
+
+**Still open (Stage-4):** H-8 remaining halves + Prometheus `/metrics`, the container/egress sandbox
+(unlocks nmap), the MEDIUM/LOW sweep (#105, M-5, M-6, wikidata-via-`guarded_stream`, dig/nmap richer
+FtM map, suffix-match allowlist), and **G7** threshold promotion (**BLOCKED** on ground-truth labels).

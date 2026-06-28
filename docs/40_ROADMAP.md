@@ -55,7 +55,7 @@ layer has tools; **Hermes** connects after that; self-improvement is unlocked la
 
 ## Next — Stage-4 hardening backlog (interleaved) ★ CURRENT, then Phase 3 (Hermes, now unblocked)
 _Pay down the deferred hardening before/alongside Phase 3. (Full notes: the forward plan + the `phase-2-complete-stage-4-next` memory.)_
-- [ ] **H-4 Abjad/Arabic-Persian ER** — own ADR + mandatory `@given` tests + Arabic/Persian fixtures (`splink_model.py::_name_fingerprint` lossy-skeleton gap). Invariant-touching.
+- [x] **H-4 Abjad/Arabic-Persian ER** ✅ (ADR 0073, PR #131) — strip harakat/tashkeel + tatweel before `fingerprints.generate` in `splink_model.py::_name_fingerprint`, so the same abjad name written with/without short-vowel marks projects the same `name_fp`. `@given` recall/precision/no-op properties + Arabic/Persian fixtures; threshold + merge-guard + sensitive-park unchanged. `LogicV2` re-scorer still deferred.
 - [ ] **H-8 remaining halves** — periodic in-loop maintenance cadence · resolve wall-clock timeout + lock-skip escalation · auto-hard-disable after N failures · Prometheus `/metrics` transport (decided, ADR 0054).
 - [ ] **Container/egress sandbox** — flips `container_sandbox_enabled`; unlocks nmap execution (ADR 0072 follow-up).
 - [ ] **MEDIUM/LOW sweep** — #105 (edge-prov skip+dead-letter), M-5 (online-migration safety), M-6 (landing GC), wikidata enricher via `guarded_stream`, dig/nmap richer FtM map, suffix-match allowlist.
