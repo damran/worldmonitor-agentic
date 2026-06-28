@@ -4,9 +4,10 @@ whois is the active-execution security boundary, so this connector is deliberate
 one threat that matters: a hostile scope target must NEVER reach the subprocess as a flag or a shell
 command.
 
-* :meth:`_validate_target` accepts only a plain domain / IP (``^[A-Za-z0-9.:-]+$`` AND no leading
-  ``-``), rejecting whitespace, shell metachars (``;`` ``$()`` backticks), traversal (``..``),
-  newlines, a leading dash (a flag), and the empty string;
+* the SHARED, hardened :meth:`CliToolConnector._validate_target` (inherited, ADR 0072 §3) accepts
+  only a plain domain / IP (``^[A-Za-z0-9.:-]+$``, no leading ``-``, ``<= 253`` chars, no ``..``),
+  rejecting whitespace, shell metachars (``;`` ``$()`` backticks), traversal, newlines, a leading
+  dash (a flag), an over-length string, and the empty string;
 * :meth:`_build_argv` is EXACTLY ``["whois", "--", target]`` — a list, with the ``--`` flag
   terminator so even a bypassed validation can't turn the target into a flag;
 * :meth:`map` is fail-soft: a real whois block → one FtM ``Organization`` (the registrant) with
@@ -30,10 +31,6 @@ from worldmonitor.ontology.validation import InvalidEntity, validate_or_raise
 from worldmonitor.plugins.base import Capability, Kind, Manifest, Mode, RawRecord, Status
 from worldmonitor.plugins.cli_tool import CliToolConnector
 from worldmonitor.provenance.model import Provenance, stamp
-
-# Strict target shape: a domain or IP — alphanumerics + dot/colon/hyphen only (no whitespace, no
-# shell metachar, no path separator). A leading '-' is additionally rejected (it would be a flag).
-_TARGET_RE = re.compile(r"[A-Za-z0-9.:-]+")
 
 # Minimal, fail-soft whois-text parse (the gate is the boundary, not a full whois parser).
 _REGISTRANT_RE = re.compile(r"Registrant\s+Organization:\s*(.+)", re.IGNORECASE)
@@ -62,15 +59,6 @@ class WhoisConnector(CliToolConnector):
         schema_text = resources.files(__package__).joinpath("config.schema.json").read_text("utf-8")
         result: dict[str, Any] = json.loads(schema_text)
         return result
-
-    def _validate_target(self, target: Any) -> None:
-        """Reject any target that is not a plain domain / IP (the arg-injection boundary)."""
-        if not isinstance(target, str) or not target:
-            raise ValueError(f"whois target must be a non-empty string: {target!r}")
-        if target.startswith("-"):
-            raise ValueError(f"whois target may not start with '-' (flag injection): {target!r}")
-        if _TARGET_RE.fullmatch(target) is None:
-            raise ValueError(f"whois target has an illegal character: {target!r}")
 
     def _build_argv(self, scope: Mapping[str, Any]) -> list[str]:
         """``["whois", "--", target]`` — list form, ``--`` terminator, target one element."""
