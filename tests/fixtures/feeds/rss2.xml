@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Example News</title>
+    <link>https://news.example.com/</link>
+    <description>Breaking geopolitical and security news for testing.</description>
+    <language>en-us</language>
+    <pubDate>Wed, 25 Jun 2026 08:30:00 GMT</pubDate>
+    <item>
+      <title>Magnitude 5 quake hits border region</title>
+      <link>https://news.example.com/articles/quake</link>
+      <guid isPermaLink="false">urn:example:quake-1</guid>
+      <pubDate>Mon, 23 Jun 2026 09:00:00 GMT</pubDate>
+      <dc:creator>Alice Reporter</dc:creator>
+      <description>A magnitude 5 earthquake struck the border region early Monday.</description>
+    </item>
+    <item>
+      <title>Election results certified after recount</title>
+      <link>https://news.example.com/articles/election</link>
+      <guid isPermaLink="false">urn:example:election-2</guid>
+      <pubDate>Tue, 24 Jun 2026 12:30:00 GMT</pubDate>
+      <dc:creator>Bob Writer</dc:creator>
+      <description>Final tallies were certified following a contested recount.</description>
+    </item>
+    <item>
+      <title>Markets rally on supply-chain news</title>
+      <link>https://news.example.com/articles/markets</link>
+      <guid isPermaLink="false">urn:example:markets-3</guid>
+      <pubDate>Wed, 25 Jun 2026 08:15:00 GMT</pubDate>
+      <dc:creator>Carol Analyst</dc:creator>
+      <description>Equities rose sharply after easing supply-chain pressures.</description>
+    </item>
+  </channel>
+</rss>

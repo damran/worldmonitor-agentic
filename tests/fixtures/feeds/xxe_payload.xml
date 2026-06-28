@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rss [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+  <!ENTITY lol "lol">
+  <!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol2 "&lol1;&lol1;&lol1;&lol1;&lol1;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;">
+]>
+<rss version="2.0">
+  <channel>
+    <title>Hostile Feed &lol3;</title>
+    <link>https://attacker.example.net/</link>
+    <description>External entity exfiltration attempt.</description>
+    <item>
+      <title>Leak &xxe;</title>
+      <link>https://attacker.example.net/articles/leak</link>
+      <guid isPermaLink="false">urn:attacker:leak-1</guid>
+      <pubDate>Mon, 23 Jun 2026 09:00:00 GMT</pubDate>
+      <description>Contents follow: &xxe;</description>
+    </item>
+  </channel>
+</rss>
