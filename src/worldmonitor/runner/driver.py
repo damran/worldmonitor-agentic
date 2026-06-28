@@ -342,11 +342,12 @@ class IngestDriver:
             if instance_id is not None:
                 instance = session.get(ConnectorInstance, instance_id)
                 if instance is not None:
-                    # The instance ALWAYS stays retryable ("enabled"), never parked in "error":
-                    # the due-query selects only "enabled", so an "error" instance would be a dead
-                    # end (ADR 0054). A failure stays visible via the task_run row above. On success
-                    # we use the normal cadence; on failure an exponential backoff (resets on the
-                    # next success because the consecutive-error streak is then broken).
+                    # Default: keep the instance retryable ("enabled"). The due-query selects only
+                    # "enabled", so on success we reschedule on the normal cadence and on a
+                    # transient failure an exponential backoff (ADR 0054; resets on the next
+                    # success, when the consecutive-error streak breaks). A failure ALWAYS stays
+                    # visible via the task_run row above. The one exception is a SUSTAINED streak:
+                    # the failure branch below hard-disables to "error" after N fails (ADR 0074).
                     instance.status = "enabled"
                     instance.last_run = now
                     # PERSIST the G8 stream cursor (ADR 0070) transactionally, only when the run
@@ -364,18 +365,34 @@ class IngestDriver:
                                 seconds=self._settings.ingest_cadence_seconds
                             )
                     else:
-                        delay = self._failure_backoff_seconds(session, instance_id)
-                        instance.next_run = now + timedelta(seconds=delay)
+                        failures = self._consecutive_ingest_failures(session, instance_id)
+                        max_failures = self._settings.ingest_max_consecutive_failures
+                        if max_failures and failures >= max_failures:
+                            # HARD-DISABLE (ADR 0074): a terminal "error" status — the due-query
+                            # selects only "enabled", so the instance stops retrying rather than
+                            # backing off forever (ADR 0054's named follow-up). The failure stays
+                            # visible (the task_run row above); an operator re-enables it from the
+                            # Integrations UI (status → "enabled"), and a success resets the streak.
+                            instance.status = "error"
+                            logger.error(
+                                "instance %s hard-disabled after %d consecutive ingest failures",
+                                instance_id,
+                                failures,
+                            )
+                        else:
+                            delay = self._backoff_seconds(failures)
+                            instance.next_run = now + timedelta(seconds=delay)
             session.commit()
 
-    def _failure_backoff_seconds(self, session: Session, instance_id: str) -> int:
-        """Exponential backoff for a just-failed ingest, from the task_run streak (ADR 0054).
+    def _consecutive_ingest_failures(self, session: Session, instance_id: str) -> int:
+        """Count the most-recent CONSECUTIVE ``kind="ingest"`` ``task_run`` errors for this instance
+        (ADR 0054), INCLUDING the run just finalized. The current task row's ``status="error"`` is
+        already set on the session above; ``flush`` makes it visible so a first failure counts as 1.
 
-        ``consecutive_failures`` = the count of the most-recent consecutive ``kind="ingest"``
-        ``task_run`` rows with ``status="error"`` for this instance, INCLUDING the run just
-        finalized. The current task row's ``status="error"`` is already set on the session above;
-        ``flush`` makes it visible to this query so a first failure counts as 1 (→ base backoff)
-        and a second consecutive failure as 2 (→ base*2), capped at ``ingest_retry_max_seconds``.
+        One source of truth drives BOTH the ADR-0054 backoff and the ADR-0074 hard-disable threshold
+        — the streak is losslessly encoded in run history, so neither needs a schema change. A
+        success (a non-error row) breaks the streak, so a recovered instance is never hard-disabled
+        off stale failures.
         """
         session.flush()
         statuses = session.execute(
@@ -386,11 +403,16 @@ class IngestDriver:
             )
             .order_by(TaskRun.started_at.desc(), TaskRun.id.desc())
         ).scalars()
-        consecutive_failures = 0
+        failures = 0
         for row_status in statuses:
             if row_status != "error":
                 break
-            consecutive_failures += 1
+            failures += 1
+        return failures
+
+    def _backoff_seconds(self, consecutive_failures: int) -> int:
+        """Exponential backoff for a just-failed ingest streak (ADR 0054): a first failure backs off
+        ``base``, a second ``base*2``, …, capped at ``ingest_retry_max_seconds``."""
         consecutive_failures = max(consecutive_failures, 1)
         backoff = self._settings.ingest_retry_base_seconds * 2 ** (consecutive_failures - 1)
         return min(backoff, self._settings.ingest_retry_max_seconds)

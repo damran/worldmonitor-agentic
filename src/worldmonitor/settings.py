@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     # success resets the streak (back to ``ingest_cadence_seconds``). Connector SCHEDULING only.
     ingest_retry_base_seconds: int = Field(default=60, gt=0)
     ingest_retry_max_seconds: int = Field(default=3600, gt=0)
+    # After this many CONSECUTIVE ingest failures an instance is hard-disabled (status="error",
+    # terminal — the due-query selects only "enabled"), instead of retrying forever (ADR 0074
+    # extends ADR 0054). A success resets the streak. ``0`` disables hard-disable (retry-forever).
+    ingest_max_consecutive_failures: int = Field(default=10, ge=0)
     # Finished (ok/error) task_run rows older than this are pruned on driver startup
     # so the history table does not grow without bound (ADR 0029 follow-up). 0 disables.
     task_run_retention_days: int = Field(default=30, ge=0)
