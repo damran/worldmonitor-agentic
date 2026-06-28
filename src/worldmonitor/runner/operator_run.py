@@ -43,6 +43,17 @@ active_logger = logging.getLogger("worldmonitor.active")
 _ERROR_SUMMARY_MAX = 2000
 
 
+class SandboxUnavailableError(RuntimeError):
+    """An ACTIVE connector requires a sandbox that is not enabled (ADR 0072 §1).
+
+    Raised by :func:`run_connector_once` BEFORE any runner/landing when a connector declares
+    ``sandbox == "container"`` and ``settings.container_sandbox_enabled`` is False — the heavy-tool
+    gate (nmap is refused un-sandboxed in v1). It is deliberately a ``RuntimeError`` (NOT a
+    ``ValueError``): the REST route maps it to **409** (a refused capability), distinct from the
+    ``ValueError`` -> **422** an invalid scope / out-of-allowlist target gets.
+    """
+
+
 def run_connector_once(
     instance: ConnectorInstance,
     connector: Connector,
@@ -87,6 +98,17 @@ def run_connector_once(
         )
         config = {**config, "_scope": dict(scope)}
 
+    # Heavy-tool sandbox gate (ADR 0072 §1): a connector that requires a container sandbox is
+    # REFUSED until one is enabled — raised BEFORE any runner/landing/audit row, so a heavy tool
+    # (nmap) can never run un-sandboxed in v1. The REST route maps this to 409 (refused capability).
+    if (
+        getattr(connector, "sandbox", "subprocess") == "container"
+        and not settings.container_sandbox_enabled
+    ):
+        raise SandboxUnavailableError(
+            f"connector '{manifest.connector_id}' requires a container sandbox which is not enabled"
+        )
+
     task_id = str(uuid.uuid4())
     with sessions() as session:
         session.add(
@@ -113,10 +135,19 @@ def run_connector_once(
         )
 
     status, error, stats = "ok", "", None
+    # A connector pre-flight refusal (the SHARED target validator / the enforced allowlist, ADR 0072
+    # §2/§3) raises ``ValueError`` from ``collect`` BEFORE any landing — record it as a failed run
+    # AND re-raise so the REST route maps it to 422 (a refused scope/target, distinct from a generic
+    # run error which stays a recorded ``error`` status). The success/PASSIVE flow is unchanged.
+    refusal: ValueError | None = None
     try:
         with sessions() as work:
             result = run_ingest(connector, config, landing=landing, session=work)
         stats = asdict(result)
+    except ValueError as exc:
+        status = "error"
+        error = f"{type(exc).__name__}: {exc}"[:_ERROR_SUMMARY_MAX]
+        refusal = exc
     except Exception as exc:
         status = "error"
         error = f"{type(exc).__name__}: {exc}"[:_ERROR_SUMMARY_MAX]
@@ -130,4 +161,6 @@ def run_connector_once(
             task.stats = stats
             task.finished_at = datetime.now(UTC)
         session.commit()
+    if refusal is not None:
+        raise refusal
     return task_id

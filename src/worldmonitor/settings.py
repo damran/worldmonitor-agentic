@@ -156,6 +156,17 @@ class Settings(BaseSettings):
     geonames_allowed_path_dir: str = ""
     geonames_max_path_bytes: int = Field(default=268_435_456, gt=0)
 
+    # --- ACTIVE heavy-tool sandbox gate (ADR 0072 §1) ---
+    # A CliTool connector declares a ``sandbox`` level ("subprocess" | "container"). A
+    # ``sandbox=="container"`` connector (e.g. nmap — an un-sandboxed network scanner from the host
+    # violates "heavy CLI tools in containers") is REFUSED by the operator-run path until a real
+    # container/egress sandbox exists. This flag is that gate; DEFAULT ``False`` (no container
+    # runtime in v1) means every container-level tool's EXECUTION is refused
+    # (SandboxUnavailableError -> REST 409) BEFORE any subprocess/landing. Subprocess-level tools
+    # (whois/dig) are unaffected. When the Stage-4 container sandbox lands, flipping this True lets
+    # those tools run — no connector change. Not person-affecting; single-tenant.
+    container_sandbox_enabled: bool = False
+
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in
     # any environment that persists connector configs; empty default fails fast.

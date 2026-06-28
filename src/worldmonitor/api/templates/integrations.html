@@ -32,19 +32,31 @@
     <tbody>
       {% for inst in instances %}
       <tr>
-        <td>{{ inst.connector_id }}</td>
-        <td class="wm-status">{{ inst.status }}</td>
-        <td>{{ inst.last_run }}</td>
-        <td>{{ inst.next_run }}</td>
+        <td>{{ inst.instance.connector_id }}</td>
+        <td class="wm-status">{{ inst.instance.status }}</td>
+        <td>{{ inst.instance.last_run }}</td>
+        <td>{{ inst.instance.next_run }}</td>
         <td class="wm-actions">
-          <form method="post" action="/integrations/instances/{{ inst.id }}/enable">
+          <form method="post" action="/integrations/instances/{{ inst.instance.id }}/enable">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <button type="submit">Enable</button>
           </form>
-          <form method="post" action="/integrations/instances/{{ inst.id }}/disable">
+          <form method="post" action="/integrations/instances/{{ inst.instance.id }}/disable">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <button type="submit">Disable</button>
           </form>
+          {% if inst.is_active %}
+          <form method="post" action="/integrations/instances/{{ inst.instance.id }}/run" class="wm-run wm-run-active">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <input type="text" name="target" placeholder="target (e.g. example.com)" />
+            <button type="submit">Run (active)</button>
+          </form>
+          {% else %}
+          <form method="post" action="/integrations/instances/{{ inst.instance.id }}/run" class="wm-run wm-run-now">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button type="submit">Run now</button>
+          </form>
+          {% endif %}
         </td>
       </tr>
       {% endfor %}

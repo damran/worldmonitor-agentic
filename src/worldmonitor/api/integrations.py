@@ -41,12 +41,13 @@ from worldmonitor.api.deps import get_db, get_principal
 from worldmonitor.authz.oidc import Principal
 from worldmonitor.db.crypto import ConfigCipher
 from worldmonitor.db.models import ConnectorInstance
+from worldmonitor.plugins.base import Capability
 from worldmonitor.plugins.registry import (
     Registry,
     UnknownConnectorError,
     UnknownNotifierError,
 )
-from worldmonitor.runner.operator_run import run_connector_once
+from worldmonitor.runner.operator_run import SandboxUnavailableError, run_connector_once
 from worldmonitor.storage.landing import LandingStore
 
 router = APIRouter(tags=["integrations"])
@@ -94,6 +95,32 @@ def _resolve_plugin(registry: Registry, plugin_id: str) -> Any:
         return registry.get_notifier(plugin_id)
     except UnknownNotifierError as exc:
         raise HTTPException(status_code=404, detail="Unknown plugin") from exc
+
+
+def _instance_view(registry: Registry, instance: ConnectorInstance) -> dict[str, Any]:
+    """Annotate a stored instance with its connector's capability + sandbox (ADR 0072 §6).
+
+    The instances table renders a Run control per capability: an ACTIVE instance gets a Run-active
+    form (a scope ``target`` input + CSRF); a PASSIVE one a "Run now" button. Resolve the connector
+    (or notifier) from the registry; an unknown id (a stale row whose plugin is gone) degrades to
+    ``capability=None`` (rendered as a non-active "Run now" — the run route then 404s) rather than
+    erroring the whole catalog.
+    """
+    plugin: Any = None
+    try:
+        plugin = registry.get(instance.connector_id)
+    except UnknownConnectorError:
+        try:
+            plugin = registry.get_notifier(instance.connector_id)
+        except UnknownNotifierError:
+            plugin = None
+    capability = plugin.manifest.capability if plugin is not None else None
+    return {
+        "instance": instance,
+        "capability": capability,
+        "is_active": capability is Capability.ACTIVE,
+        "sandbox": getattr(plugin, "sandbox", None),
+    }
 
 
 def _form_fields(schema: dict[str, Any]) -> list[dict[str, Any]]:
@@ -187,7 +214,7 @@ def catalog(
     instances = list(db.execute(select(ConnectorInstance)).scalars().all())
     context = {
         "manifests": registry.all_manifests(),
-        "instances": instances,
+        "instances": [_instance_view(registry, inst) for inst in instances],
         "csrf_token": _csrf_token(request),
     }
     templates = request.app.state.templates
@@ -324,9 +351,16 @@ async def run_instance(
             landing=landing,
             settings=settings,
         )
+    except SandboxUnavailableError as exc:
+        # A container-gated heavy tool (nmap) whose sandbox is not enabled — refuse with 409 (ADR
+        # 0072 §1). The runner is never reached, so nothing ran and nothing landed.
+        raise HTTPException(
+            status_code=409, detail="This connector requires a container sandbox (not enabled)"
+        ) from exc
     except ValueError as exc:
-        # An ACTIVE run without a scope is refused — surface it as 422 (never a 500).
-        raise HTTPException(status_code=422, detail="An ACTIVE run requires a scope") from exc
+        # An ACTIVE run without a scope, or an out-of-allowlist / hostile target, is refused —
+        # surface it as 422 (never a 500), before the tool runs.
+        raise HTTPException(status_code=422, detail="The active run was refused") from exc
     return RedirectResponse("/integrations", status_code=303)
 
 
