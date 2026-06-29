@@ -620,3 +620,193 @@ def test_prune_dead_letters_removes_old_only(postgres_dsn: str, clean_graph: Neo
         survived = session.get(IngestDeadLetter, "dl-ancient-disabled")
     assert survived is not None, "with retention disabled even an ancient row survives"
     engine.dispose()
+
+
+# -- H-8b: periodic maintenance cadence + resolve liveness (ADR 0075) -------------------------- #
+
+
+def test_maintenance_due_gate_fires_on_cadence(clean_graph: Neo4jClient, postgres_dsn: str) -> None:
+    """INV-1 (the pure cadence gate): ``_maintenance_due`` is True when nothing has run yet
+    (``last_maintenance is None`` — so the FIRST tick fires and the boot-time prune is preserved),
+    False while still inside the cadence window, and True once the cadence has elapsed. RED today:
+    ``_maintenance_due`` / ``maintenance_cadence_seconds`` do not exist."""
+    engine, sessions, driver, _ = _harness(postgres_dsn, clean_graph, _FakeConnector("stub"))
+    cadence = driver._settings.maintenance_cadence_seconds
+
+    assert driver._maintenance_due(_NOW, None) is True  # never run -> the first tick fires
+    inside = _NOW - timedelta(seconds=cadence - 1)
+    assert driver._maintenance_due(_NOW, inside) is False  # still inside the window -> skip
+    at_edge = _NOW - timedelta(seconds=cadence)
+    assert driver._maintenance_due(_NOW, at_edge) is True  # cadence elapsed -> due
+    engine.dispose()
+
+
+def test_run_maintenance_prunes_old_rows_but_leaves_running_untouched(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """INV-1 + INV-2 (the load-bearing adversarial assertion of this gate): one
+    ``run_maintenance(now=_NOW)`` prunes BOTH an old finished ``task_run`` AND an old
+    ``ingest_dead_letter`` (the two prunes, run on the cadence), yet leaves a ``running``
+    ``task_run`` completely untouched — proving ``recover_stale`` is NOT wrapped by
+    ``run_maintenance``. If a future impl folded ``recover_stale`` into the periodic
+    maintenance, the ``running`` row would be reset to ``status="error"`` (clobbering a
+    live/abandoned resolve worker, ADR 0075 D1) and this test MUST fail. RED today:
+    ``run_maintenance`` does not exist."""
+    from worldmonitor.db.models import IngestDeadLetter
+
+    engine, sessions, driver, _ = _harness(postgres_dsn, clean_graph, _FakeConnector("stub"))
+    old = _NOW - timedelta(days=60)  # well past the default 30d retention windows
+    with sessions() as session:
+        session.add(TaskRun(id="m8b-old-ok", kind="ingest", status="ok", finished_at=old))
+        session.add(TaskRun(id="m8b-running", kind="resolve", status="running"))
+        session.add(
+            IngestDeadLetter(
+                id="m8b-dl-old",
+                connector_id="stub",
+                source_key="k",
+                stage="map",
+                error="boom",
+                created_at=old,
+            )
+        )
+        session.commit()
+
+    driver.run_maintenance(now=_NOW)
+
+    with sessions() as session:
+        task_ids = {row.id for row in session.execute(select(TaskRun)).scalars()}
+        dl_ids = {row.id for row in session.execute(select(IngestDeadLetter)).scalars()}
+        running = session.get(TaskRun, "m8b-running")
+
+    assert "m8b-old-ok" not in task_ids, "run_maintenance prunes the old finished task_run"
+    assert "m8b-dl-old" not in dl_ids, "run_maintenance prunes the old dead-letter"
+    # INV-2: recover_stale is NOT wrapped — the running row is left byte-for-byte untouched.
+    assert running is not None, "the running task_run must survive maintenance"
+    assert running.status == "running", (
+        "run_maintenance must NOT reset a running task_run to error "
+        "(recover_stale stays startup-only — ADR 0075 D1)"
+    )
+    # TaskRun.error is NOT NULL with a model-level default="" (db/models.py), so an UNTOUCHED
+    # freshly-inserted running row reads back "" (never None). recover_stale would overwrite it with
+    # a non-empty reset reason ("reset on driver startup …"), which "" still rejects — the oracle's
+    # discriminating power is preserved (and status/finished_at independently catch the clobber).
+    assert running.error == ""  # recover_stale would have written a reset reason here
+    assert running.finished_at is None  # recover_stale would have stamped finished_at here
+    engine.dispose()
+
+
+def test_run_maintenance_does_not_reset_a_stale_running_instance(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """INV-2 (second angle): a ``ConnectorInstance`` left ``running`` is NOT flipped back to
+    ``enabled`` by ``run_maintenance`` — only the startup-only ``recover_stale`` does that. This
+    pins that the periodic maintenance path drives neither the task nor the instance recovery."""
+    engine, sessions, driver, cipher = _harness(postgres_dsn, clean_graph, _FakeConnector("stub"))
+    instance_id = _add_instance(sessions, connector_id="stub", cipher=cipher)
+    with sessions() as session:
+        session.get(ConnectorInstance, instance_id).status = "running"  # type: ignore[union-attr]
+        session.commit()
+
+    driver.run_maintenance(now=_NOW)
+
+    with sessions() as session:
+        instance = session.get(ConnectorInstance, instance_id)
+        assert instance is not None
+        assert instance.status == "running", (
+            "run_maintenance must not run recover_stale's instance reset (startup-only, ADR 0075)"
+        )
+    engine.dispose()
+
+
+def test_lock_skip_escalates_after_threshold_then_resets_on_success(
+    clean_graph: Neo4jClient, postgres_dsn: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """INV-6: a held ``_resolve_lock`` still SKIPS the tick (the no-overlap serialization is
+    unchanged), but each consecutive skip increments ``_consecutive_resolve_skips`` and the log
+    escalates info->WARNING once the streak reaches ``resolve_lock_skip_alert_threshold``. A later
+    SUCCESSFUL acquire resets the counter to 0 (escalation fires only on REPEATED contention).
+    RED today: ``_consecutive_resolve_skips`` does not exist."""
+    import logging
+
+    engine, sessions, driver, _cipher = _harness(
+        postgres_dsn, clean_graph, _FakeConnector("fake-skip")
+    )
+    threshold = 3
+    driver._settings = driver._settings.model_copy(
+        update={"resolve_lock_skip_alert_threshold": threshold}
+    )
+
+    assert driver._consecutive_resolve_skips == 0  # fresh in-memory counter
+
+    # Hold the lock so EVERY run_resolution finds it taken and skips this tick.
+    assert driver._resolve_lock.acquire(blocking=False)
+    try:
+        for k in range(1, threshold + 1):
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="worldmonitor.runner.driver"):
+                assert driver.run_resolution(now=_NOW) == [], (
+                    "a held lock must still SKIP the tick (no-overlap serialization unchanged)"
+                )
+            assert driver._consecutive_resolve_skips == k, "each consecutive skip increments by 1"
+            warnings = [
+                rec
+                for rec in caplog.records
+                if rec.name == "worldmonitor.runner.driver" and rec.levelno >= logging.WARNING
+            ]
+            if k < threshold:
+                assert not warnings, f"no WARNING escalation before the threshold (skip {k})"
+            else:
+                assert warnings, "the threshold-th consecutive skip escalates info->WARNING"
+    finally:
+        driver._resolve_lock.release()
+
+    # A SUCCESSFUL acquire (with a real backlog to drain) resets the counter to 0.
+    def _candidate(entity_id: str, name: str, jurisdiction: str) -> ErQueueItem:
+        entity = stamp(
+            make_entity(
+                {
+                    "id": entity_id,
+                    "schema": "Company",
+                    "properties": {"name": [name], "jurisdiction": [jurisdiction]},
+                }
+            ),
+            Provenance("src", "2026-06-21T00:00:00Z", "A", f"s3://landing/{entity_id}.json"),
+        )
+        return ErQueueItem(
+            id=str(uuid.uuid4()),
+            connector_id="fake-skip",
+            entity_id=entity_id,
+            raw_entity=entity.to_dict(),
+            source_record=f"s3://landing/{entity_id}.json",
+            status="pending",
+        )
+
+    with sessions() as session:
+        session.add_all(
+            [_candidate("sk1", "Gamma Systems", "us"), _candidate("sk2", "Delta Works", "gb")]
+        )
+        session.commit()
+
+    assert driver.run_resolution(now=_NOW) == [driver._RESOLVED_MARKER]
+    assert driver._consecutive_resolve_skips == 0, "a successful acquire resets the skip counter"
+    engine.dispose()
+
+
+def test_resolve_wait_timeout_backstop_is_looser_than_the_deadline(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """INV-7 (pure): ``_resolve_wait_timeout`` is ``None`` when ``resolve_timeout_seconds <= 0``
+    (no backstop — today's awaited behaviour), else ``resolve_timeout_seconds +
+    driver_tick_seconds`` — strictly looser than the D2 cooperative deadline, so D2 breaks
+    cleanly between batches in the normal case and no thread is abandoned. RED today:
+    ``_resolve_wait_timeout`` / ``resolve_timeout_seconds`` do not exist."""
+    engine, sessions, driver, _ = _harness(postgres_dsn, clean_graph, _FakeConnector("stub"))
+
+    driver._settings = driver._settings.model_copy(update={"resolve_timeout_seconds": 0})
+    assert driver._resolve_wait_timeout() is None  # disabled -> no backstop
+
+    driver._settings = driver._settings.model_copy(
+        update={"resolve_timeout_seconds": 600.0, "driver_tick_seconds": 30.0}
+    )
+    assert driver._resolve_wait_timeout() == 630.0  # deadline + exactly one tick of grace
+    engine.dispose()

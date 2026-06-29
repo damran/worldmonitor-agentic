@@ -23,6 +23,7 @@ The guard *evaluation* (``resolution/review.py``) is unconditional; only the
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Sequence
@@ -72,6 +73,10 @@ class ResolveStats:
     """Flagged clusters merged anyway under ``MERGE_GUARD_MODE="alert"``."""
     batches: int
     """Number of bounded batches drained from the queue (ADR 0026)."""
+    stopped_reason: str = "exhausted"
+    """Why the drain stopped: ``"exhausted"`` (queue emptied) or ``"timeout"`` (the wall-clock
+    deadline tripped between batches, ADR 0075 D2). Mirrors ``IngestStats.stopped_reason``; a
+    timed-out pass loses no committed work and the remainder resumes on the next cadence tick."""
 
 
 def resolve_pending(
@@ -82,6 +87,7 @@ def resolve_pending(
     enrich: Callable[[FtmEntity], FtmEntity] | None = None,
     guard_mode: str | None = None,
     batch_size: int | None = None,
+    timeout: float | None = None,
 ) -> ResolveStats:
     """Resolve pending ER-queue candidates, draining in batches.
 
@@ -96,17 +102,29 @@ def resolve_pending(
     it (e.g. the Wikidata anchor enricher) before being written to the graph.
     ``guard_mode`` (``"alert"`` / ``"block"``) overrides ``MERGE_GUARD_MODE`` from
     settings; it controls only the *action* on a flagged cluster (ADR 0024).
+
+    ``timeout`` overrides ``RESOLVE_TIMEOUT_SECONDS`` (ADR 0075 D2): a cooperative
+    wall-clock deadline checked **between batches**, mirroring ``ingest_timeout_seconds``.
+    ``<= 0`` disables it (drain to exhaustion). Because every batch is committed before
+    the next loads, a timed-out pass loses no committed work and the remaining backlog
+    stays ``pending`` to resume on the next cadence tick — the bound never changes *what*
+    merges, only *how far* one pass drains. ``ResolveStats.stopped_reason`` reports the outcome.
     """
     settings = get_settings()
     mode = guard_mode if guard_mode is not None else settings.merge_guard_mode
     size = batch_size if batch_size is not None else settings.resolve_batch_size
     if size <= 0:
         raise ValueError(f"batch_size must be a positive integer, got {size}")
+    deadline_s = timeout if timeout is not None else settings.resolve_timeout_seconds
 
     # Durable sign-off judgements (ADR 0031) — loaded once, seeded into every batch's
     # ephemeral resolver so a reviewed cluster never re-parks.
     judgements = _load_judgements(session)
     pending = clusters = promoted = review = alerts = batches = 0
+    stopped_reason = "exhausted"
+    # Sample the monotonic clock EXACTLY once before the drain (ADR 0075 D2 / ingest mirror); the
+    # only other reads are the per-batch deadline checks below.
+    start = time.monotonic()
     while True:
         items = list(
             session.execute(
@@ -134,7 +152,19 @@ def resolve_pending(
         review += stats.review
         alerts += stats.alerts
         batches += 1
+        # Cooperative wall-clock bound (ADR 0075 D2): after committing this batch, stop draining if
+        # the deadline has elapsed. The remaining ``pending`` rows resume on the next cadence tick —
+        # no committed work is lost (per-batch commit, ADR 0026).
+        if deadline_s > 0 and (time.monotonic() - start) >= deadline_s:
+            stopped_reason = "timeout"
+            break
 
+    if stopped_reason != "exhausted":
+        logger.warning(
+            "resolve stopped early: %s after %d batch(es); remaining backlog resumes next tick",
+            stopped_reason,
+            batches,
+        )
     return ResolveStats(
         pending=pending,
         clusters=clusters,
@@ -142,6 +172,7 @@ def resolve_pending(
         review=review,
         alerts=alerts,
         batches=batches,
+        stopped_reason=stopped_reason,
     )
 
 

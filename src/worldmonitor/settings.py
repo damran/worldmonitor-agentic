@@ -112,6 +112,21 @@ class Settings(BaseSettings):
     # Dead-letter (``ingest_dead_letter``) rows older than this are pruned on driver startup so the
     # replayable error-audit table does not grow without bound (Gate B-4d / ADR 0053). 0 disables.
     dead_letter_retention_days: int = Field(default=30, ge=0)
+    # The driver now runs its two prunes (``prune_task_runs`` + ``prune_dead_letters``) on a
+    # PERIODIC cadence INSIDE the loop instead of only at startup (ADR 0075 D1), so a driver up for
+    # weeks keeps ``task_run`` / ``ingest_dead_letter`` bounded mid-uptime. The first tick fires
+    # (``last_maintenance is None``) so the boot-time prune is preserved; ``recover_stale`` stays
+    # startup-only (NOT wrapped). The prunes' DELETE semantics are unchanged — only WHEN they run.
+    maintenance_cadence_seconds: int = Field(default=3600, gt=0)
+    # Wall-clock deadline on one resolve pass (ADR 0075 D2), mirroring ``ingest_timeout_seconds``
+    # — ``<= 0`` disables it (drain to exhaustion exactly as today). ``resolve_pending`` checks it
+    # BETWEEN batches; each batch is committed first (ADR 0026), so a timed-out pass loses no work
+    # and the remaining backlog resumes on the next cadence tick.
+    resolve_timeout_seconds: float = Field(default=600.0, ge=0)
+    # After this many CONSECUTIVE non-blocking ``_resolve_lock`` skips (a prior pass still holds the
+    # lock) the driver escalates the skip log from info to WARNING (ADR 0075 D3), so a wedged
+    # resolve pass surfaces instead of silently starving resolution. A successful acquire resets it.
+    resolve_lock_skip_alert_threshold: int = Field(default=3, gt=0)
 
     # --- Driver supervision & containerization (Gate B-4c / ADR 0051) ---
     # The driver writes a last-tick heartbeat FILE (per-container; not a table) once per loop

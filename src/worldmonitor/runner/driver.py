@@ -91,6 +91,10 @@ class IngestDriver:
         )
         # Serializes resolution so a slow run never overlaps the next cadence tick.
         self._resolve_lock = threading.Lock()
+        # Consecutive non-blocking lock-skips (ADR 0075 D3): incremented when a tick finds the
+        # resolve lock held, reset to 0 on a successful acquire. Escalates info->WARNING at the
+        # configured threshold so a wedged pass surfaces instead of silently starving resolution.
+        self._consecutive_resolve_skips = 0
 
     # -- startup recovery ---------------------------------------------------- #
     def recover_stale(self) -> int:
@@ -177,6 +181,32 @@ class IngestDriver:
         if deleted:
             logger.info("pruned %d dead_letter row(s) older than %dd", deleted, retention)
         return deleted
+
+    # -- periodic maintenance (ADR 0075 D1) ---------------------------------- #
+    def run_maintenance(self, *, now: datetime) -> None:
+        """Run the two retention prunes on the maintenance cadence.
+
+        Wraps ``prune_task_runs`` + ``prune_dead_letters`` and ONLY those — it deliberately does
+        NOT call ``recover_stale`` (ADR 0075 D1): the prunes only touch old, finished/terminal rows
+        a live row never matches, so they are safe to run mid-uptime; ``recover_stale`` blindly
+        resets every ``running`` row and would clobber a live/abandoned resolve worker, so it stays
+        the startup-only preamble call. The prunes' DELETE semantics are unchanged — only WHEN they
+        run (B-4d / ADR 0053 frozen).
+        """
+        self.prune_task_runs(now=now)
+        self.prune_dead_letters(now=now)
+
+    def _maintenance_due(self, now: datetime, last_maintenance: datetime | None) -> bool:
+        """True when the maintenance cadence has elapsed (or has never run).
+
+        ``last_maintenance is None`` makes the FIRST tick fire, so the boot-time prune is preserved
+        and the cadence is a strict superset of today's startup-only behaviour (ADR 0075 D1).
+        """
+        return (
+            last_maintenance is None
+            or (now - last_maintenance).total_seconds()
+            >= self._settings.maintenance_cadence_seconds
+        )
 
     # -- ingest pass --------------------------------------------------------- #
     def run_due_ingests(self, *, now: datetime) -> list[str]:
@@ -286,9 +316,21 @@ class IngestDriver:
         skipped (single-tenant, D1 / ADR 0042).
         """
         if not self._resolve_lock.acquire(blocking=False):
-            logger.info("resolution already in progress; skipping this tick")
+            # Skip-rather-than-overlap is unchanged; D3 only ADDS escalation on REPEATED contention.
+            self._consecutive_resolve_skips += 1
+            if self._consecutive_resolve_skips >= self._settings.resolve_lock_skip_alert_threshold:
+                logger.warning(
+                    "resolution wedged: %d consecutive lock-skips — a prior pass still holds the "
+                    "lock (resolution starving; ADR 0075 D3)",
+                    self._consecutive_resolve_skips,
+                )
+            else:
+                logger.info("resolution already in progress; skipping this tick")
             return []
         try:
+            # A successful acquire breaks any skip streak, so escalation fires only on genuinely
+            # repeated contention (ADR 0075 D3).
+            self._consecutive_resolve_skips = 0
             with self._sessions() as session:
                 has_backlog = session.execute(
                     select(ErQueueItem.id).where(ErQueueItem.status == "pending").limit(1)
@@ -309,7 +351,11 @@ class IngestDriver:
         status, error, stats = "ok", "", None
         try:
             with self._sessions() as work:
-                result = resolve_pending(session=work, neo4j=self._neo4j)
+                result = resolve_pending(
+                    session=work,
+                    neo4j=self._neo4j,
+                    timeout=self._settings.resolve_timeout_seconds,
+                )
             stats = asdict(result)
         except Exception as exc:
             status, error = "error", f"{type(exc).__name__}: {exc}"[:_ERROR_SUMMARY_MAX]
@@ -318,6 +364,20 @@ class IngestDriver:
         self._finalize(
             task_id, None, status=status, error=error, stats=stats, now=now, kind="resolve"
         )
+
+    def _resolve_wait_timeout(self) -> float | None:
+        """The loop-liveness backstop bound for the resolve ``to_thread`` await (ADR 0075 D3).
+
+        ``None`` when ``resolve_timeout_seconds <= 0`` (disabled → today's awaited behaviour: a
+        wedged pass is caught coarsely by the heartbeat-staleness healthcheck), else
+        ``resolve_timeout_seconds + driver_tick_seconds`` — strictly LOOSER than the D2 cooperative
+        deadline (one tick of grace), so in the normal multi-batch case D2 breaks cleanly between
+        batches and no thread is abandoned; the backstop only engages for a single batch that hangs
+        *inside* DuckDB/Neo4j (never reaching the between-batch check).
+        """
+        if self._settings.resolve_timeout_seconds <= 0:
+            return None
+        return self._settings.resolve_timeout_seconds + self._settings.driver_tick_seconds
 
     # -- shared finalize ----------------------------------------------------- #
     def _finalize(
@@ -420,10 +480,11 @@ class IngestDriver:
     # -- the loop ------------------------------------------------------------ #
     async def run_forever(self) -> None:  # pragma: no cover - thin asyncio glue
         """Drive ingests + resolution on cadence until cancelled."""
+        # recover_stale STAYS startup-only (ADR 0075 D1) — the prunes moved into the periodic
+        # maintenance cadence below (the first tick fires, so the boot-time prune is preserved).
         self.recover_stale()
-        self.prune_task_runs()
-        self.prune_dead_letters()
         last_resolve: datetime | None = None
+        last_maintenance: datetime | None = None
         while True:
             now = datetime.now(UTC)
             try:
@@ -431,12 +492,32 @@ class IngestDriver:
                 # proves it is alive (Gate B-4c). Additive — does not touch cadence/serialization.
                 self._heartbeat.touch(now)
                 await asyncio.to_thread(self.run_due_ingests, now=now)
+                # Periodic maintenance (ADR 0075 D1): prune on cadence, not only at startup.
+                if self._maintenance_due(now, last_maintenance):
+                    await asyncio.to_thread(self.run_maintenance, now=now)
+                    last_maintenance = now
                 if (
                     last_resolve is None
                     or (now - last_resolve).total_seconds()
                     >= self._settings.resolve_cadence_seconds
                 ):
-                    await asyncio.to_thread(self.run_resolution, now=now)
+                    # Loop-liveness backstop (ADR 0075 D3): bound the resolve await so a single
+                    # batch that hangs INSIDE DuckDB/Neo4j (never reaching the D2 between-batch
+                    # check) cannot wedge the whole loop. On timeout the worker is abandoned (not
+                    # killed — a pooled thread cannot be force-cancelled) and the loop continues;
+                    # ingest + heartbeat stay alive and the lock-skip escalation surfaces it.
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(self.run_resolution, now=now),
+                            timeout=self._resolve_wait_timeout(),
+                        )
+                    except TimeoutError:
+                        # asyncio.TimeoutError IS TimeoutError on 3.11+ (the wait_for raise).
+                        logger.error(
+                            "resolve pass exceeded the loop-liveness backstop (%ss); abandoning "
+                            "the worker and continuing — ingest/heartbeat stay alive (ADR 0075 D3)",
+                            self._resolve_wait_timeout(),
+                        )
                     last_resolve = now
             except Exception:
                 # A tick failure (transient DB error, etc.) must never kill the loop.
