@@ -240,3 +240,114 @@ def test_unresolvable_id_row_is_quarantined_not_looped_forever(
         assert pending == 0  # queue fully drained, nothing left to loop on
 
     engine.dispose()
+
+
+# -- H-8b: cooperative resolve wall-clock timeout (ADR 0075 D2) -------------------------------- #
+
+
+def test_resolve_timeout_stops_drain_between_batches_loses_no_work(
+    clean_graph: Neo4jClient, postgres_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """INV-4 + INV-5: with a wall-clock deadline that trips after the first committed batch,
+    ``resolve_pending`` stops BETWEEN batches (``stopped_reason == "timeout"``), the FIRST batch's
+    entities are written to the graph (committed, ADR 0026), and the remaining ErQueueItems stay
+    ``status == "pending"`` so the next tick resumes them — no committed work is lost and nothing
+    is merged that the committed batch did not produce. The deadline is driven by a
+    *pipeline-scoped* fake ``time.monotonic`` (no real sleep): the ``start`` sample reads 0.0 and
+    every between-batch sample reads far past the 600s deadline, so the drain halts after batch 1.
+    Scoping the patch to the pipeline module leaves the DB/Neo4j drivers' own timing untouched.
+    RED today: ``resolve_pending`` has no ``timeout`` kwarg and ``ResolveStats`` has no
+    ``stopped_reason``."""
+    import types
+
+    from worldmonitor.resolution import pipeline as pipeline_mod
+
+    engine = make_engine(postgres_dsn)
+    create_all(engine)
+    sessions = session_factory(engine)
+    ensure_constraints(clean_graph)
+
+    # 4 distinct candidates, batch_size=2 -> two batches of 2; the deadline trips after batch 1.
+    _seed(
+        sessions,
+        [
+            _company("t1", "Acme Corporation", "us"),
+            _company("t2", "Globex", "gb"),
+            _company("t3", "Initech", "de"),
+            _company("t4", "Umbrella", "fr"),
+        ],
+    )
+
+    samples = {"n": 0}
+
+    def _fake_monotonic() -> float:
+        # Call 1 is the `start` sample -> 0.0; every later call (the between-batch deadline check)
+        # reads far past the 600s deadline, so the drain stops after the first committed batch.
+        samples["n"] += 1
+        return 0.0 if samples["n"] == 1 else 1_000_000.0
+
+    monkeypatch.setattr(
+        pipeline_mod, "time", types.SimpleNamespace(monotonic=_fake_monotonic), raising=False
+    )
+
+    with sessions() as session:
+        stats = resolve_pending(session=session, neo4j=clean_graph, batch_size=2, timeout=600.0)
+
+    assert stats.stopped_reason == "timeout", "the deadline must stop the drain between batches"
+    assert stats.batches == 1, "exactly the first batch ran before the deadline tripped"
+    assert stats.promoted == 2, "the first batch's two distinct candidates were promoted"
+
+    # INV-4: the first batch is committed to the graph (no work lost on timeout).
+    nodes = clean_graph.execute_read("MATCH (n:Company) RETURN count(n) AS n")[0]["n"]
+    assert nodes == 2, "the first batch's entities are committed before the timeout break"
+
+    with sessions() as session:
+        pending = session.execute(
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "pending")
+        ).scalar_one()
+        resolved = session.execute(
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "resolved")
+        ).scalar_one()
+    assert pending == 2, "the un-drained batch stays pending and resumes on the next tick"
+    assert resolved == 2, "only the committed batch's rows are marked resolved"
+
+    engine.dispose()
+
+
+def test_resolve_timeout_zero_drains_to_exhaustion(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """INV-4 disable sentinel: ``timeout=0`` disables the wall-clock bound, so the pass drains the
+    whole queue across batches exactly as today and reports ``stopped_reason == "exhausted"``.
+    RED today: ``resolve_pending`` has no ``timeout`` kwarg and ``ResolveStats`` has no
+    ``stopped_reason``."""
+    engine = make_engine(postgres_dsn)
+    create_all(engine)
+    sessions = session_factory(engine)
+    ensure_constraints(clean_graph)
+
+    _seed(
+        sessions,
+        [
+            _company("x1", "Acme Corporation", "us"),
+            _company("x2", "Globex", "gb"),
+            _company("x3", "Initech", "de"),
+        ],
+    )
+
+    with sessions() as session:
+        stats = resolve_pending(session=session, neo4j=clean_graph, batch_size=2, timeout=0)
+
+    assert stats.stopped_reason == "exhausted"
+    assert stats.batches == 2  # [2, 1] — fully drained, deadline disabled
+    assert stats.promoted == 3
+
+    with sessions() as session:
+        pending = session.execute(
+            select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "pending")
+        ).scalar_one()
+    assert pending == 0, "timeout=0 disables the bound; the queue is fully drained"
+
+    nodes = clean_graph.execute_read("MATCH (n:Company) RETURN count(n) AS n")[0]["n"]
+    assert nodes == 3
+    engine.dispose()

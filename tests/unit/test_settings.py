@@ -77,3 +77,62 @@ def test_driver_cadence_rejects_non_positive() -> None:
         Settings(resolve_cadence_seconds=0)
     with pytest.raises(ValidationError):
         Settings(driver_tick_seconds=0)
+
+
+# -- H-8b: periodic maintenance cadence + resolve liveness (ADR 0075) -------------------------- #
+
+
+def test_maintenance_cadence_defaults_to_3600() -> None:
+    """ADR 0075 D1: the driver runs prune_task_runs + prune_dead_letters on this cadence
+    (default hourly) instead of only at startup."""
+    assert Settings(_env_file=None).maintenance_cadence_seconds == 3600  # type: ignore[call-arg]
+
+
+def test_maintenance_cadence_accepts_override() -> None:
+    assert Settings(maintenance_cadence_seconds=900).maintenance_cadence_seconds == 900
+
+
+def test_maintenance_cadence_rejects_non_positive() -> None:
+    """gt=0: a zero/negative cadence is nonsensical (it would prune every tick / never)."""
+    with pytest.raises(ValidationError):
+        Settings(maintenance_cadence_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(maintenance_cadence_seconds=-1)
+
+
+def test_resolve_timeout_defaults_to_600() -> None:
+    """ADR 0075 D2: a resolve pass is wall-clock-bounded (default 600s), mirroring
+    ingest_timeout_seconds (ge=0, <=0 disables)."""
+    assert Settings(_env_file=None).resolve_timeout_seconds == 600.0  # type: ignore[call-arg]
+
+
+def test_resolve_timeout_accepts_override() -> None:
+    assert Settings(resolve_timeout_seconds=120.0).resolve_timeout_seconds == 120.0
+
+
+def test_resolve_timeout_allows_zero_to_disable() -> None:
+    """ge=0 / <=0 disables the bound (drain to exhaustion exactly as today) — mirrors
+    ingest_timeout_seconds."""
+    assert Settings(resolve_timeout_seconds=0).resolve_timeout_seconds == 0
+
+
+def test_resolve_timeout_rejects_negative() -> None:
+    with pytest.raises(ValidationError):
+        Settings(resolve_timeout_seconds=-1)
+
+
+def test_resolve_lock_skip_alert_threshold_defaults_to_3() -> None:
+    """ADR 0075 D3: escalate info->WARNING after this many CONSECUTIVE non-blocking lock-skips."""
+    assert Settings(_env_file=None).resolve_lock_skip_alert_threshold == 3  # type: ignore[call-arg]
+
+
+def test_resolve_lock_skip_alert_threshold_accepts_override() -> None:
+    assert Settings(resolve_lock_skip_alert_threshold=5).resolve_lock_skip_alert_threshold == 5
+
+
+def test_resolve_lock_skip_alert_threshold_rejects_non_positive() -> None:
+    """gt=0: a zero/negative threshold would escalate on the first skip / never."""
+    with pytest.raises(ValidationError):
+        Settings(resolve_lock_skip_alert_threshold=0)
+    with pytest.raises(ValidationError):
+        Settings(resolve_lock_skip_alert_threshold=-2)
