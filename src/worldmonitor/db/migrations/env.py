@@ -15,6 +15,7 @@ from __future__ import annotations
 from alembic import context
 from sqlalchemy import Connection, create_engine, pool
 
+from worldmonitor.db._migration_guard import apply_migration_timeouts
 from worldmonitor.db.models import Base
 from worldmonitor.settings import get_settings
 
@@ -34,6 +35,11 @@ def _run(connection: Connection) -> None:
     # pass a `compare_type=<callback>` here to teach the comparison about it.
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
+        # Apply lock_timeout (and optionally statement_timeout) on Postgres BEFORE any DDL so a
+        # migration that cannot acquire its ACCESS EXCLUSIVE lock FAILS FAST instead of stalling the
+        # driver's enqueue path (ADR 0084, M-5). Uses SET LOCAL → scoped to this transaction only,
+        # safe on the shared app connection. Silently skipped on non-Postgres dialects (SQLite).
+        apply_migration_timeouts(connection)
         context.run_migrations()
 
 

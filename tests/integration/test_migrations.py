@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import uuid
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, create_engine, inspect, make_url, text
 
+from worldmonitor.db._migration_guard import apply_migration_timeouts
 from worldmonitor.db.engine import _alembic_config, create_all, make_engine, migrate_to_head
 
 pytestmark = pytest.mark.integration
@@ -165,6 +167,99 @@ def test_no_autogenerate_drift(postgres_dsn: str) -> None:
     engine = make_engine(_create_fresh_database(postgres_dsn))
     migrate_to_head(engine)
     command.check(_alembic_config(engine))  # raises on any model/migration drift
+    engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# ADR 0084 / M-5: dialect-aware lock_timeout integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_lock_timeout_applied_on_real_postgres_connection(postgres_dsn: str) -> None:
+    """apply_migration_timeouts issues SET LOCAL lock_timeout on a real Postgres connection.
+
+    Uses a distinctive, non-whole-second value (2500 ms) so Postgres cannot normalize
+    it to seconds — ``SHOW lock_timeout`` must return exactly ``'2500ms'``.
+    The value is visible inside the same transaction (SET LOCAL semantics).
+    """
+    engine = make_engine(postgres_dsn)
+    mock_settings = MagicMock()
+    mock_settings.migration_lock_timeout_ms = 2500
+    mock_settings.migration_statement_timeout_ms = 0
+
+    with engine.begin() as conn:
+        with patch("worldmonitor.db._migration_guard.get_settings", return_value=mock_settings):
+            apply_migration_timeouts(conn)
+        # SET LOCAL → visible inside this transaction
+        result = conn.execute(text("SHOW lock_timeout")).scalar_one()
+        assert result == "2500ms", (
+            f"expected lock_timeout='2500ms' inside the transaction, got {result!r}"
+        )
+    # After the transaction the value reverts (SET LOCAL semantics — no session bleed)
+    engine.dispose()
+
+
+def test_lock_timeout_reverts_after_transaction(postgres_dsn: str) -> None:
+    """SET LOCAL lock_timeout reverts to the session default after the transaction ends.
+
+    Confirms the guard does NOT bleed onto subsequent app queries that use the same
+    shared connection (the most important safety property for the shared-conn path).
+    """
+    engine = make_engine(postgres_dsn)
+
+    # Capture the session-level default (Postgres default = '0' = no timeout)
+    with engine.connect() as conn:
+        default_timeout = conn.execute(text("SHOW lock_timeout")).scalar_one()
+
+    mock_settings = MagicMock()
+    mock_settings.migration_lock_timeout_ms = 1750  # non-whole-second
+    mock_settings.migration_statement_timeout_ms = 0
+
+    with engine.begin() as conn:
+        with patch("worldmonitor.db._migration_guard.get_settings", return_value=mock_settings):
+            apply_migration_timeouts(conn)
+        # Verify it was set during the transaction
+        mid_tx = conn.execute(text("SHOW lock_timeout")).scalar_one()
+        assert mid_tx == "1750ms"
+    # After commit, SET LOCAL reverts — open a new connection to verify
+    with engine.connect() as conn:
+        post_tx = conn.execute(text("SHOW lock_timeout")).scalar_one()
+    assert post_tx == default_timeout, (
+        f"SET LOCAL must not bleed to subsequent connections; expected {default_timeout!r}, "
+        f"got {post_tx!r}"
+    )
+    engine.dispose()
+
+
+def test_lock_timeout_zero_leaves_postgres_default(postgres_dsn: str) -> None:
+    """migration_lock_timeout_ms=0 (opt-out) → lock_timeout is unchanged (Postgres default '0')."""
+    engine = make_engine(postgres_dsn)
+    mock_settings = MagicMock()
+    mock_settings.migration_lock_timeout_ms = 0
+    mock_settings.migration_statement_timeout_ms = 0
+
+    with engine.begin() as conn:
+        before = conn.execute(text("SHOW lock_timeout")).scalar_one()
+        with patch("worldmonitor.db._migration_guard.get_settings", return_value=mock_settings):
+            apply_migration_timeouts(conn)
+        after = conn.execute(text("SHOW lock_timeout")).scalar_one()
+    assert before == after, (
+        f"migration_lock_timeout_ms=0 must not change lock_timeout; was {before!r}, now {after!r}"
+    )
+    engine.dispose()
+
+
+def test_migrate_to_head_succeeds_with_lock_timeout_configured(
+    postgres_dsn: str, reference_schema: dict[str, Any]
+) -> None:
+    """migrate_to_head completes successfully even when migration_lock_timeout_ms is active.
+
+    No lock contention in isolation → the timeout is never triggered; the guard just adds
+    the fast-abort safety net without affecting the normal migration path.
+    """
+    engine = make_engine(_create_fresh_database(postgres_dsn))
+    migrate_to_head(engine)
+    assert _snapshot(engine) == reference_schema
     engine.dispose()
 
 
