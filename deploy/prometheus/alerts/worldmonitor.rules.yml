@@ -1,0 +1,137 @@
+# WorldMonitor alert rules (ADR 0078 D2).
+#
+# One group, 7 alerts: 2 critical (page immediately) + 5 warning (operator ticket).
+# Every alert carries:
+#   labels.severity in {critical, warning}
+#   annotations.summary  — one-line human label
+#   annotations.description — owning ADR + remediation hint
+#
+# Metric names reference ONLY what DriverMetricsCollector emits (INV-PARITY, ADR 0078 D5).
+# The parity test in tests/unit/test_prometheus_alerts.py derives the valid set dynamically
+# from src/worldmonitor/metrics/collector.py — a rename/removal breaks the test immediately.
+#
+# Prometheus synthetics used: up{job="worldmonitor-driver"} (standard Prometheus target health).
+
+groups:
+  - name: worldmonitor
+    rules:
+
+      # -----------------------------------------------------------------------
+      # CRITICAL — page immediately; pipeline down or resolution silently stopped
+      # -----------------------------------------------------------------------
+
+      - alert: DriverDown
+        # The standard Prometheus synthetic: 1 when the scrape target is reachable, 0 when not.
+        # If this fires, every other worldmonitor_* gauge is stale.
+        expr: up{job="worldmonitor-driver"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "WorldMonitor driver scrape target is down (ADR 0076)"
+          description: >
+            The worldmonitor-driver Prometheus scrape target has been unreachable for 2 minutes.
+            Every worldmonitor_* gauge is now stale. Verify that the driver process is running
+            and that DRIVER_METRICS_PORT (default 9108, ADR 0076 §4) is reachable from the
+            Prometheus container on the shared `default` compose network. ADR 0076 / ADR 0078.
+
+      - alert: ResolutionWedged
+        # COUPLING: the threshold literal (3) must equal resolve_lock_skip_alert_threshold in
+        # Settings.py (default 3, ADR 0075 D3). The driver escalates to a WARNING log at exactly
+        # this count. The parity test (test_resolution_wedged_threshold_matches_settings) asserts
+        # this equality so the alert and the driver log cannot drift independently.
+        expr: worldmonitor_resolve_consecutive_lock_skips >= 3
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Entity resolution is wedged — consecutive lock-skips >= 3 (ADR 0075 D3)"
+          description: >
+            A prior resolve pass still holds the resolve lock; new passes cannot start.
+            Threshold = resolve_lock_skip_alert_threshold (3), also the driver WARNING-log
+            escalation count (ADR 0075 D3). Sustained for 10m means resolution is silently
+            stopped — the ER backlog grows without bound. Check driver logs for the stuck
+            resolve pass and consider restarting the driver. ADR 0075 D3 / ADR 0078.
+
+      # -----------------------------------------------------------------------
+      # WARNING — operator attention required; ticket / scheduled remediation
+      # -----------------------------------------------------------------------
+
+      - alert: ConnectorInstanceHardDisabled
+        # A connector was auto-hard-disabled after ingest_max_consecutive_failures (10, ADR 0074)
+        # consecutive failures. The instance status is 'error' and will NOT run again until an
+        # operator re-enables it from the Integrations UI.
+        expr: worldmonitor_instances_in_error > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "One or more connector instances are hard-disabled (ADR 0074)"
+          description: >
+            A connector auto-hard-disabled after ingest_max_consecutive_failures (10) consecutive
+            ingest failures. The instance is in status='error' and will not run again until an
+            operator explicitly re-enables it from the Integrations UI. Check the connector logs
+            for the root cause before re-enabling. ADR 0074.
+
+      - alert: ResolvePassTimingOut
+        # The stopped_reason gauge emits a single active label (reason = the latest reason);
+        # value is always 1 for the active reason (ADR 0075 D2).
+        expr: worldmonitor_resolve_last_stopped_reason{reason="timeout"} == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Resolve pass timed out — backlog not draining in one pass (ADR 0075 D2)"
+          description: >
+            The latest finished resolve pass hit resolve_timeout_seconds (600s) and stopped
+            early. Sustained for 30m means the ER backlog never fully drains within a single
+            resolve tick. Per-batch commits ensure no work is lost; the remainder is picked up
+            on the next tick. If combined with ErQueueBacklogHigh, consider tuning
+            resolve_timeout_seconds or resolve_cadence_seconds. ADR 0075 D2 / ADR 0078.
+
+      - alert: ErQueueBacklogHigh
+        # Threshold (10 000) is operator-tunable — no Settings entry backs it.
+        # Adjust this value for your deployment's expected ingestion rate.
+        # Pair with ResolutionWedged and ResolvePassTimingOut to diagnose the bottleneck.
+        expr: worldmonitor_er_queue_pending > 10000
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "ER queue backlog is high (> 10 000 pending for 1h)"
+          description: >
+            The ER queue has more than 10 000 pending candidates sustained for over 1 hour.
+            Resolution is not keeping up with ingestion. Threshold is operator-tunable (no
+            Settings entry backs it — adjust the expr for your deployment). Check for
+            ResolutionWedged or ResolvePassTimingOut as the root cause. ADR 0078.
+
+      - alert: IngestDeadLettersPresent
+        # Dead-letter rows are quarantined ingest/resolution failures that exhausted all retries.
+        # The gauge is an absolute count (always >= 0). Using > 0 for the trigger and a 15m
+        # window avoids noise from a single transient failure that self-clears.
+        expr: worldmonitor_dead_letters > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dead-letter rows present — triage required (ADR 0027/0053)"
+          description: >
+            Quarantined ingest/resolution dead-letter rows have been accumulating for 15 minutes.
+            These rows failed permanently after all retries and were quarantined so the pipeline
+            could continue. An operator must triage: inspect the rows, decide whether to retry,
+            discard, or escalate as a data-quality issue. ADR 0027 / ADR 0053.
+
+      - alert: MergesParkedForReview
+        # The catastrophic-merge guard (ADR 0024/0031) parks high-impact merges in
+        # 'pending_review'. These are NOT auto-applied; human sign-off is required.
+        expr: worldmonitor_parked_merges > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Merges parked for human review by catastrophic-merge guard (ADR 0024/0031)"
+          description: >
+            The catastrophic-merge guard has parked one or more entity merges in 'pending_review'
+            state. These merges require human sign-off before being applied (the guard fires when
+            a merge crosses the sensitivity/size threshold). Review and approve or reject from the
+            Integrations UI. ADR 0024 / ADR 0031.

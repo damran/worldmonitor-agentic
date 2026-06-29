@@ -1,0 +1,261 @@
+# promtool unit tests for worldmonitor.rules.yml (ADR 0078 D3).
+#
+# Run manually (promtool not wired to CI — out of scope per ADR 0078 §Consequences):
+#   promtool test rules deploy/prometheus/tests/worldmonitor.rules.test.yml
+#
+# Covers all 7 alerts (DriverDown, ResolutionWedged, ConnectorInstanceHardDisabled,
+# ResolvePassTimingOut, ErQueueBacklogHigh, IngestDeadLettersPresent, MergesParkedForReview)
+# with fire + no-fire cases. exp_alerts assert the FULL alert (labels AND annotations) — promtool
+# compares both, so the rendered summary/description here must match the rule verbatim. The folded
+# (`>`) annotation blocks render identically to the rule (lines joined by spaces + one trailing \n).
+#
+# Value notation: space-separated sample values at each evaluation_interval step.
+# '_' = stale marker (no sample). '0+0x3' = 0 repeated 4 times. 'a+bxN' = a, a+b, a+2b, ...
+
+rule_files:
+  - ../alerts/worldmonitor.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # -----------------------------------------------------------------------
+  # DriverDown — fires when up{job="worldmonitor-driver"} == 0 for 2m
+  # -----------------------------------------------------------------------
+  - name: "DriverDown fires after 2 consecutive minutes of target being down"
+    interval: 1m
+    input_series:
+      - series: 'up{job="worldmonitor-driver"}'
+        # t=0m: down, t=1m: down, t=2m: down, t=3m: down
+        values: "0 0 0 0"
+    alert_rule_test:
+      # At t=2m the condition has been true for exactly 2m — alert fires.
+      - eval_time: 2m
+        alertname: DriverDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              # `up` carries the target's job label through to the alert.
+              job: worldmonitor-driver
+            exp_annotations:
+              summary: "WorldMonitor driver scrape target is down (ADR 0076)"
+              description: >
+                The worldmonitor-driver Prometheus scrape target has been unreachable for 2 minutes.
+                Every worldmonitor_* gauge is now stale. Verify that the driver process is running
+                and that DRIVER_METRICS_PORT (default 9108, ADR 0076 §4) is reachable from the
+                Prometheus container on the shared `default` compose network. ADR 0076 / ADR 0078.
+
+  - name: "DriverDown does NOT fire when target recovers within 2m"
+    interval: 1m
+    input_series:
+      - series: 'up{job="worldmonitor-driver"}'
+        # t=0m: down, t=1m: up (recovered before 2m threshold)
+        values: "0 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DriverDown
+        exp_alerts: []
+
+  # -----------------------------------------------------------------------
+  # ResolutionWedged — fires when lock_skips >= 3 for 10m
+  # -----------------------------------------------------------------------
+  - name: "ResolutionWedged fires after lock-skip count >= 3 for 10m"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_resolve_consecutive_lock_skips"
+        # Value 5 (>= 3) held for 11 minutes: indices 0..10
+        values: "5 5 5 5 5 5 5 5 5 5 5"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ResolutionWedged
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "Entity resolution is wedged — consecutive lock-skips >= 3 (ADR 0075 D3)"
+              description: >
+                A prior resolve pass still holds the resolve lock; new passes cannot start.
+                Threshold = resolve_lock_skip_alert_threshold (3), also the driver WARNING-log
+                escalation count (ADR 0075 D3). Sustained for 10m means resolution is silently
+                stopped — the ER backlog grows without bound. Check driver logs for the stuck
+                resolve pass and consider restarting the driver. ADR 0075 D3 / ADR 0078.
+
+  - name: "ResolutionWedged does NOT fire when lock-skip count is below threshold"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_resolve_consecutive_lock_skips"
+        # Value 2 (< 3) — below threshold, never fires
+        values: "2 2 2 2 2 2 2 2 2 2 2"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ResolutionWedged
+        exp_alerts: []
+
+  # -----------------------------------------------------------------------
+  # ConnectorInstanceHardDisabled — fires when instances_in_error > 0 for 5m
+  # -----------------------------------------------------------------------
+  - name: "ConnectorInstanceHardDisabled fires after one instance hard-disabled for 5m"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_instances_in_error"
+        # One instance hard-disabled, sustained for 6 minutes
+        values: "1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ConnectorInstanceHardDisabled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "One or more connector instances are hard-disabled (ADR 0074)"
+              description: >
+                A connector auto-hard-disabled after ingest_max_consecutive_failures (10) consecutive
+                ingest failures. The instance is in status='error' and will not run again until an
+                operator explicitly re-enables it from the Integrations UI. Check the connector logs
+                for the root cause before re-enabling. ADR 0074.
+
+  - name: "ConnectorInstanceHardDisabled does NOT fire when no instances in error"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_instances_in_error"
+        values: "0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ConnectorInstanceHardDisabled
+        exp_alerts: []
+
+  # -----------------------------------------------------------------------
+  # ResolvePassTimingOut — fires when reason=timeout for 30m
+  # -----------------------------------------------------------------------
+  - name: "ResolvePassTimingOut fires after timeout reason sustained for 30m"
+    interval: 1m
+    input_series:
+      - series: 'worldmonitor_resolve_last_stopped_reason{reason="timeout"}'
+        # Value 1 (active) for 31 minutes
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ResolvePassTimingOut
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: timeout
+            exp_annotations:
+              summary: "Resolve pass timed out — backlog not draining in one pass (ADR 0075 D2)"
+              description: >
+                The latest finished resolve pass hit resolve_timeout_seconds (600s) and stopped
+                early. Sustained for 30m means the ER backlog never fully drains within a single
+                resolve tick. Per-batch commits ensure no work is lost; the remainder is picked up
+                on the next tick. If combined with ErQueueBacklogHigh, consider tuning
+                resolve_timeout_seconds or resolve_cadence_seconds. ADR 0075 D2 / ADR 0078.
+
+  - name: "ResolvePassTimingOut does NOT fire when stopped reason is exhausted (not timeout)"
+    interval: 1m
+    input_series:
+      - series: 'worldmonitor_resolve_last_stopped_reason{reason="exhausted"}'
+        values: "1+0x30"
+      - series: 'worldmonitor_resolve_last_stopped_reason{reason="timeout"}'
+        values: "0+0x30"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ResolvePassTimingOut
+        exp_alerts: []
+
+  # -----------------------------------------------------------------------
+  # ErQueueBacklogHigh — fires when er_queue_pending > 10000 for 1h
+  # -----------------------------------------------------------------------
+  - name: "ErQueueBacklogHigh fires after backlog > 10000 sustained for 1h"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_er_queue_pending"
+        # 20000 (> 10000) held for 61 minutes: indices 0..60
+        values: "20000+0x60"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ErQueueBacklogHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "ER queue backlog is high (> 10 000 pending for 1h)"
+              description: >
+                The ER queue has more than 10 000 pending candidates sustained for over 1 hour.
+                Resolution is not keeping up with ingestion. Threshold is operator-tunable (no
+                Settings entry backs it — adjust the expr for your deployment). Check for
+                ResolutionWedged or ResolvePassTimingOut as the root cause. ADR 0078.
+
+  - name: "ErQueueBacklogHigh does NOT fire when backlog is below threshold"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_er_queue_pending"
+        # 5000 (< 10000) — below threshold, never fires
+        values: "5000+0x60"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ErQueueBacklogHigh
+        exp_alerts: []
+
+  # -----------------------------------------------------------------------
+  # IngestDeadLettersPresent — fires when dead_letters > 0 for 15m
+  # -----------------------------------------------------------------------
+  - name: "IngestDeadLettersPresent fires after dead-letter rows present for 15m"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_dead_letters"
+        # 3 dead-letter rows held for 16 minutes
+        values: "3+0x15"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: IngestDeadLettersPresent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Dead-letter rows present — triage required (ADR 0027/0053)"
+              description: >
+                Quarantined ingest/resolution dead-letter rows have been accumulating for 15 minutes.
+                These rows failed permanently after all retries and were quarantined so the pipeline
+                could continue. An operator must triage: inspect the rows, decide whether to retry,
+                discard, or escalate as a data-quality issue. ADR 0027 / ADR 0053.
+
+  - name: "IngestDeadLettersPresent does NOT fire when no dead-letter rows"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_dead_letters"
+        values: "0+0x15"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: IngestDeadLettersPresent
+        exp_alerts: []
+
+  # -----------------------------------------------------------------------
+  # MergesParkedForReview — fires when parked_merges > 0 for 15m
+  # -----------------------------------------------------------------------
+  - name: "MergesParkedForReview fires after parked merges present for 15m"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_parked_merges"
+        # 2 parked merges held for 16 minutes
+        values: "2+0x15"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MergesParkedForReview
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Merges parked for human review by catastrophic-merge guard (ADR 0024/0031)"
+              description: >
+                The catastrophic-merge guard has parked one or more entity merges in 'pending_review'
+                state. These merges require human sign-off before being applied (the guard fires when
+                a merge crosses the sensitivity/size threshold). Review and approve or reject from the
+                Integrations UI. ADR 0024 / ADR 0031.
+
+  - name: "MergesParkedForReview does NOT fire when no parked merges"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_parked_merges"
+        values: "0+0x15"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MergesParkedForReview
+        exp_alerts: []

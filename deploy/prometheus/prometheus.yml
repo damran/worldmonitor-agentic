@@ -1,0 +1,44 @@
+# WorldMonitor — Prometheus scrape configuration (ADR 0078 D1).
+#
+# How to boot (opt-in reference service):
+#   docker compose -f deploy/compose.yaml --profile monitoring up -d prometheus
+#
+# An external / managed Prometheus can consume this file directly (point it at deploy/prometheus/).
+#
+# Coupling: the port '9108' in the scrape target below is the driver_metrics_port default
+# (ADR 0076 §4 / Settings.driver_metrics_port). The scrape-config test in
+# tests/unit/test_prometheus_alerts.py asserts equality against Settings().driver_metrics_port
+# so the two cannot drift silently. If DRIVER_METRICS_PORT is overridden in .env, update the
+# target here accordingly or use a file-based service discovery with the env var.
+#
+# Alertmanager wiring is out of scope per ADR 0078 (external/ops concern).
+# When Alertmanager is added, uncomment and fill the block below:
+#
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#             - alertmanager:9093
+
+global:
+  # 30s is strictly below resolve_cadence_seconds (300s / 5 min) so the live in-memory
+  # worldmonitor_resolve_consecutive_lock_skips gauge (ADR 0075 D3, read at scrape time) is
+  # sampled multiple times per resolve tick — a wedge is never missed between ticks.
+  # ADR 0078 D1.
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  # Relative to the Prometheus config directory (/etc/prometheus inside the container,
+  # or wherever --config.file points). Matches the :ro mount in the compose service.
+  - "alerts/worldmonitor.rules.yml"
+
+scrape_configs:
+  - job_name: "worldmonitor-driver"
+    # Target: the driver service hostname + DRIVER_METRICS_PORT (default 9108).
+    # In-network only (no host publish required). The driver binds 0.0.0.0:9108 inside
+    # its container so any container on the `default` compose network can scrape it.
+    # COUPLING: port must track DRIVER_METRICS_PORT (default 9108, ADR 0076 §4).
+    static_configs:
+      - targets:
+          - "driver:9108"
