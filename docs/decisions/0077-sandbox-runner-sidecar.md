@@ -115,14 +115,19 @@ add nftables (or a host firewall rule) to deny link-local/metadata + broad RFC19
 when there is a way to test it / when deploying to a cloud with a metadata service. For a self-hosted
 deploy (the target model) there is no metadata service, so network isolation is sufficient for v1.
 
-**§D2 hardening — the sidecar argv allowlist is per-tool, default-deny.** Beyond `argv[0] ∈
-{nmap,dig,whois}`, the sidecar requires every **middle** token (`argv[1:-1]`) to be in that tool's
-fixed allow-set (`nmap`: `{-oX, -, --}`; `dig`: `{+short, --}`; `whois`: `{--}` — exactly what the
-connectors emit) and the **last** token (the target) to pass the same host/IP validator the connectors
-use (`[A-Za-z0-9.:-]+`, ≤253, no leading `-`, no `/`). This closes the judge's HIGH finding (a
-compromised caller can no longer smuggle nmap `--script`(NSE) / `-oN`(file write) / `-iR`(random
-internet scan) / `-iL`(file read) past the sidecar — they are not in the allow-set). Intentional
-coupling: adding a connector flag requires updating the sidecar allow-set (a safe, explicit edit).
+**§D2 hardening — the sidecar argv check is a per-tool EXACT TEMPLATE, default-deny.** Beyond
+`argv[0] ∈ {nmap,dig,whois}`, the sidecar requires the whole **prefix** `argv[:-1]` to **equal** that
+tool's fixed template (`nmap`: `("nmap","-oX","-","--")`; `dig`: `("dig","+short","--")`; `whois`:
+`("whois","--")` — exactly what the connectors emit) and the **last** token (the target) to pass the
+same host/IP validator the connectors use (`[A-Za-z0-9.:-]+`, ≤253, no leading `-`, no `/`). An exact
+prefix (not a per-token allow-set) is load-bearing: option-with-argument flags otherwise **recombine**
+— a per-token set that allows `-oX` and `--` individually would accept `nmap -oX -- <target>`, where
+nmap treats `--` as the XML **output filename** (a file-write smuggled past a token check; the
+verify/judge fleet reproduced four such recombinations executing). Pinning the whole prefix rejects
+every recombination **and** the enumerated `--script`(NSE) / `-oN`(file-write) / `-iR`(random-net) /
+`-iL`(file-read) flags. Intentional coupling: adding a connector flag requires updating the template
+here (a safe, explicit edit). *(Initially shipped as a per-token allow-set; tightened to the exact
+template after the judge DENY flagged the recombination bypass.)*
 
 Slice 2 also: a `sandbox-runner` **Dockerfile stage** (`FROM runtime`, apt-installs nmap + dnsutils +
 whois — a dedicated target, so the api/driver image stays slim/apt-free); the **compose service**
