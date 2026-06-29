@@ -41,6 +41,8 @@ from worldmonitor.db.crypto import ConfigCipher
 from worldmonitor.db.engine import engine_from_settings, session_factory
 from worldmonitor.db.models import ConnectorInstance, ErQueueItem, IngestDeadLetter, TaskRun
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.metrics.collector import DriverMetricsCollector
+from worldmonitor.metrics.exporter import start_metrics_exporter
 from worldmonitor.plugins.base import Capability, Mode
 from worldmonitor.plugins.registry import Registry
 from worldmonitor.resolution.pipeline import resolve_pending
@@ -483,6 +485,17 @@ class IngestDriver:
         # recover_stale STAYS startup-only (ADR 0075 D1) — the prunes moved into the periodic
         # maintenance cadence below (the first tick fires, so the boot-time prune is preserved).
         self.recover_stale()
+        # Start the read-only Prometheus /metrics exporter ONCE (Gate H-8c / ADR 0076), on a daemon
+        # thread that stays responsive even if this loop wedges. The helper is a no-op when
+        # driver_metrics_port==0 (the opt-out); the --healthcheck path never reaches here.
+        start_metrics_exporter(
+            self._settings.driver_metrics_port,
+            DriverMetricsCollector(
+                session_factory=self._sessions,
+                neo4j=self._neo4j,
+                skip_counter=lambda: self._consecutive_resolve_skips,
+            ),
+        )
         last_resolve: datetime | None = None
         last_maintenance: datetime | None = None
         while True:
