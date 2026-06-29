@@ -53,6 +53,53 @@ def _is_str_list(value: object) -> bool:
     return all(isinstance(item, str) for item in cast("list[Any]", value))
 
 
+def _target_allowed(target: str, allowed: list[str]) -> bool:
+    """Return True iff ``target`` is permitted by the ``allowed`` list (ADR 0082).
+
+    Semantics:
+
+    * Empty ``allowed`` → True (any valid target; the per-run scope token is the primary auth).
+    * A non-``*.`` entry: case-insensitive **exact** match only.  No implicit sub-domain expansion.
+    * A ``*.<domain>`` entry: ``target`` must end with ``"." + domain``, i.e. it is a **strict
+      subdomain** of ``<domain>``.  The dot-boundary is the load-bearing security invariant:
+
+      - The apex ``<domain>`` itself does **NOT** match (``"example.com".endswith(".example.com")``
+        is False).
+      - A sibling without a dot boundary (``"evil-example.com"``, ``"xexample.com"``) does NOT
+        match.
+      - A suffix-spoof (``"<domain>.attacker.com"``) does NOT match (the string ends with
+        ``.attacker.com``, not with ``.<domain>``).
+
+    * A malformed wildcard — ``*.`` with an empty domain, or a domain that still contains ``*`` —
+      is silently skipped: it matches nothing and can never become a catch-all bypass.
+
+    Both sides are lowercased before comparison (DNS is case-insensitive).
+    """
+    if not allowed:
+        return True
+
+    t = target.lower()
+    for entry in allowed:
+        e = entry.lower()
+        if e.startswith("*."):
+            domain = e[2:]  # strip the "*."; what remains must be the parent domain
+            # Malformed: empty domain or nested wildcard → skip (match nothing, not a catch-all)
+            if not domain or "*" in domain:
+                continue
+            # Strict-subdomain check anchored at a dot boundary.
+            # "a.example.com".endswith(".example.com")  → True  ✓
+            # "example.com".endswith(".example.com")    → False (apex excluded) ✓
+            # "evil-example.com".endswith(".example.com") → False (no dot) ✓
+            if t.endswith("." + domain):
+                return True
+        else:
+            # Non-wildcard: exact case-insensitive match
+            if t == e:
+                return True
+
+    return False
+
+
 class CliToolConnector(Connector):
     """ACTIVE base: validate target → enforce allowlist → build argv list → run → yield stdout."""
 
@@ -86,12 +133,15 @@ class CliToolConnector(Connector):
         target = scope.get("target")
         self._validate_target(target)  # raises ValueError on a bad target, before any exec
 
-        # Enforced instance allowlist (ADR 0072 §2): a non-empty ``allowed_targets`` pre-restricts
-        # an instance to a fixed target set — an out-of-list (exact-match) target is refused BEFORE
-        # the runner is built. An empty/absent list means "any valid target" (the per-run scope
-        # token remains the primary authorization).
+        # Enforced instance allowlist (ADR 0072 §2, extended by ADR 0082): a non-empty
+        # ``allowed_targets`` pre-restricts an instance to a fixed target set.  An absent or empty
+        # list means "any valid target" (the per-run scope token remains the primary authorization).
+        # Entries of the form ``*.<domain>`` match strict subdomains only (dot-boundary anchored —
+        # see ``_target_allowed``).  Non-``*.`` entries keep EXACT-MATCH semantics.
         allowed = config.get("allowed_targets")
-        if isinstance(allowed, list) and allowed and target not in allowed:
+        if isinstance(allowed, list) and not _target_allowed(
+            cast("str", target), cast("list[str]", allowed)
+        ):
             raise ValueError(
                 f"target {target!r} is not in the configured allowed_targets — refused"
             )
