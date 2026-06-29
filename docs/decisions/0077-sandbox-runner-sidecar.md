@@ -96,6 +96,40 @@ wall-clock timeout. Non-root, `read_only` rootfs + a tmpfs for scratch.
 - **Local-test honesty:** the seam + service code are fully tested here with fakes; the real container
   exec + nftables egress are exercised by CI compose-boot + deploy, not this box (it can't build images).
 
+## Slice 2 — deploy & egress (built 2026-06-29; refines §D4 and §D2)
+
+Building Slice 2, two decisions were refined for robustness/testability (recorded here for sign-off):
+
+**§D4 refinement — egress is enforced by Docker NETWORK ISOLATION (primary), not an in-container
+nftables entrypoint.** The compose stack ran on a single default bridge; Slice 2 adds a dedicated
+`sandbox_net` and puts the `sandbox-runner` service on `sandbox_net` **only** (the stores —
+postgres/neo4j/minio/redis/zitadel — stay on the default network), while `api`/`driver` join **both**
+(so they can POST to the sidecar). By topology the sidecar **cannot reach our internal stores** — the
+core data-sovereignty goal — with **no `CAP_NET_ADMIN`, no privilege-drop entrypoint, no nftables**
+(the fragile, locally-untestable part of the original D4). The sidecar stays **non-root** like the rest
+of the stack. This is simpler, more robust, and far less misconfiguration-prone than nftables, and it
+satisfies the locked "constrained egress" invariant (egress is constrained away from our stores).
+*Trade-off:* network isolation alone does NOT block the sidecar from reaching arbitrary public IPs
+(that is the scan tool's purpose) or a cloud metadata endpoint (169.254.169.254). **Deferred follow-up:**
+add nftables (or a host firewall rule) to deny link-local/metadata + broad RFC1918 as defense-in-depth
+when there is a way to test it / when deploying to a cloud with a metadata service. For a self-hosted
+deploy (the target model) there is no metadata service, so network isolation is sufficient for v1.
+
+**§D2 hardening — the sidecar argv allowlist is per-tool, default-deny.** Beyond `argv[0] ∈
+{nmap,dig,whois}`, the sidecar requires every **middle** token (`argv[1:-1]`) to be in that tool's
+fixed allow-set (`nmap`: `{-oX, -, --}`; `dig`: `{+short, --}`; `whois`: `{--}` — exactly what the
+connectors emit) and the **last** token (the target) to pass the same host/IP validator the connectors
+use (`[A-Za-z0-9.:-]+`, ≤253, no leading `-`, no `/`). This closes the judge's HIGH finding (a
+compromised caller can no longer smuggle nmap `--script`(NSE) / `-oN`(file write) / `-iR`(random
+internet scan) / `-iL`(file read) past the sidecar — they are not in the allow-set). Intentional
+coupling: adding a connector flag requires updating the sidecar allow-set (a safe, explicit edit).
+
+Slice 2 also: a `sandbox-runner` **Dockerfile stage** (`FROM runtime`, apt-installs nmap + dnsutils +
+whois — a dedicated target, so the api/driver image stays slim/apt-free); the **compose service**
+(non-root, `read_only` + tmpfs, `mem_limit`/`pids_limit`/`cpus`/`ulimits`, `/health` healthcheck, **no
+host port** — in-network only); and wires `SANDBOX_RUNNER_URL`/`SANDBOX_RUNNER_SECRET` into api+driver.
+`container_sandbox_enabled` stays **default-off** (the operator opts in once the sidecar is up).
+
 ## Reversibility
 Reversible (network/deploy policy + a feature flag). **Reversal cost: low** — set
 `container_sandbox_enabled=False` (or leave `sandbox_runner_url` empty) to fully refuse container tools
