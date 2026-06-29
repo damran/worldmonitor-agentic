@@ -20,7 +20,7 @@ import contextlib
 import ipaddress
 import logging
 import socket
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 
 import httpx
 
@@ -125,6 +125,7 @@ def guarded_stream(
     timeout: float = _DEFAULT_TIMEOUT,
     max_redirects: int = 5,
     transport: httpx.BaseTransport | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> Generator[httpx.Response]:
     """Stream ``method url`` with SSRF-validated, manually-followed redirects.
 
@@ -134,6 +135,11 @@ def guarded_stream(
     yields the streaming response (the caller may then call ``raise_for_status`` / ``iter_bytes`` /
     ``iter_lines`` / ``read``). A redirect with no ``Location``, or exceeding ``max_redirects``,
     raises. ``transport`` is injectable for ``httpx.MockTransport`` unit tests.
+
+    ``headers`` is an optional mapping of request headers forwarded into EVERY hop of the request.
+    It defaults to ``None`` (no additional headers), keeping existing callers unaffected. Headers do
+    NOT influence SSRF host validation — :func:`assert_public_host` is called on every hop's host
+    exactly as before, independently of any ``headers`` value.
     """
     # Quiet httpx/httpcore request-URL logging BEFORE the first request issues — a request URL can
     # carry a secret query param (e.g. OpenCorporates ``?api_token=``) and httpx logs the full URL
@@ -154,9 +160,15 @@ def guarded_stream(
         for _hop in range(max_redirects + 1):
             assert_public_host(httpx.URL(current).host)
             hop = (
-                client.stream(method, current)
+                client.stream(method, current, headers=headers)
                 if client is not None
-                else httpx.stream(method, current, timeout=timeout, follow_redirects=False)
+                else httpx.stream(
+                    method,
+                    current,
+                    timeout=timeout,
+                    follow_redirects=False,
+                    headers=headers,
+                )
             )
             with hop as response:
                 if getattr(response, "is_redirect", False):
