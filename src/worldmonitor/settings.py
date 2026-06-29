@@ -183,6 +183,26 @@ class Settings(BaseSettings):
     geonames_allowed_path_dir: str = ""
     geonames_max_path_bytes: int = Field(default=268_435_456, gt=0)
 
+    # --- Online-migration safety (ADR 0084 / audit M-5) ---
+    # Dialect-aware lock_timeout + statement_timeout applied by env.py::_run BEFORE every
+    # migration batch via SET LOCAL (scoped to the migration transaction, reverts on
+    # commit/rollback — no bleed onto the shared app connection). Postgres-only GUCs:
+    # silently skipped on SQLite and other non-Postgres dialects. Closes the M-5 finding:
+    # a migration that cannot acquire its ACCESS EXCLUSIVE lock FAILS FAST instead of
+    # stalling the driver's enqueue path indefinitely.
+    #
+    #   migration_lock_timeout_ms     — abort if DDL lock cannot be acquired within this
+    #                                   many ms. DEFAULT 3000 (3 s): fail-fast for online
+    #                                   execution. 0 = opt-out (Postgres default = no
+    #                                   timeout). Use 0 in the migrate-while-stopped runbook
+    #                                   where no live traffic competes for the lock.
+    #   migration_statement_timeout_ms — hard wall-clock cap on ANY single SQL statement
+    #                                   in the migration transaction (including long index
+    #                                   builds). DEFAULT 0 = do NOT set (off by default;
+    #                                   lock_timeout is the key guard).
+    migration_lock_timeout_ms: int = Field(default=3000, ge=0)
+    migration_statement_timeout_ms: int = Field(default=0, ge=0)
+
     # --- Landing-zone orphan GC (ADR 0083 / audit M-6) ---
     # The GC scans the landing zone for S3 objects not referenced by either er_queue_item or
     # ingest_dead_letter, and optionally deletes them (the backstop for the put-before-commit race).
