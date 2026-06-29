@@ -77,6 +77,15 @@ def create_sandbox_app(settings: Settings | None = None) -> FastAPI:
         # --- AUTH (constant-time) — before reading/validating anything else (INV-5). ----------- #
         expected = settings.sandbox_runner_secret.get_secret_value()
         provided = x_sandbox_secret or ""
+        # FAIL CLOSED on a misconfigured sidecar: an EMPTY configured secret must never authenticate
+        # anyone (``hmac.compare_digest("", "")`` is True, so without this an unconfigured sidecar
+        # would accept a missing header). The sidecar refuses ALL execution until it is given a real
+        # secret — "never trust the caller", ADR 0077 §D2. (App-side routing also refuses to call an
+        # unconfigured sidecar, operator_run INV-2; this is the independent second gate.)
+        if not expected:
+            raise HTTPException(
+                status_code=401, detail="sandbox-runner secret is not configured (refusing)"
+            )
         if not hmac.compare_digest(provided, expected):
             raise HTTPException(status_code=401, detail="invalid or missing sandbox secret")
 

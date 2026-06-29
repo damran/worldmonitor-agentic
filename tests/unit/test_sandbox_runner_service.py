@@ -196,4 +196,20 @@ def test_out_of_bounds_timeout_is_4xx_and_does_not_exec(
         json={"argv": ["dig", "+short", "--", "example.com"], "timeout": 1_000_000_000},
     )
     assert high.status_code in (400, 422), high.text
+
+
+def test_empty_configured_secret_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """INV-5 (fail-closed): a sidecar configured with an EMPTY secret (the default) must refuse ALL
+    /run requests — never authenticate a missing/empty header via ``hmac.compare_digest("","")``.
+    Closes the review-found fail-open edge before Slice 2 deploys the sidecar (ADR 0077 §D2)."""
+    fake = _FakeRunCommand()
+    monkeypatch.setattr("worldmonitor.sandbox.runner_service.run_command", fake, raising=False)
+    settings = Settings(environment="test", sandbox_runner_secret="", _env_file=None)  # type: ignore[call-arg]
+    client = TestClient(create_sandbox_app(settings=settings), raise_server_exceptions=False)
+    body = {"argv": ["nmap", "-oX", "-", "--", "example.com"], "timeout": 5}
+
+    # No header at all, and an explicit empty header — both must 401 (not execute).
+    assert client.post("/run", json=body).status_code == 401
+    assert client.post("/run", headers={"X-Sandbox-Secret": ""}, json=body).status_code == 401
+    assert fake.calls == [], "an unconfigured (empty-secret) sidecar must NEVER exec a tool"
     assert fake.calls == [], "an out-of-bounds timeout must be rejected BEFORE run_command"
