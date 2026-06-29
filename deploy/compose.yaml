@@ -313,6 +313,13 @@ services:
       # Last-tick heartbeat file (per-container); read by the --healthcheck below.
       DRIVER_HEARTBEAT_PATH: ${DRIVER_HEARTBEAT_PATH:-/var/run/worldmonitor/driver.heartbeat}
       DRIVER_HEARTBEAT_STALE_SECONDS: ${DRIVER_HEARTBEAT_STALE_SECONDS:-90}
+      # Prometheus /metrics exporter (Gate H-8c / ADR 0076): bound 0.0.0.0:9108 INSIDE the container,
+      # in-network only by default (no host publish below) — a scraper on the compose network hits
+      # driver:9108. 0 disables it. The Prometheus server + alert rules stay external/ops (ADR 0054).
+      DRIVER_METRICS_PORT: ${DRIVER_METRICS_PORT:-9108}
+    # Uncomment to expose /metrics on the host (e.g. for a local Prometheus / curl) — loopback-only:
+    # ports:
+    #   - "127.0.0.1:9108:9108"
     volumes:
       # Sole WRITER of the shared heartbeat dir (read-write). The api mounts the same named
       # volume read-only to surface driver freshness on /ready (ADR 0059) — one writer / one

@@ -136,3 +136,28 @@ def test_resolve_lock_skip_alert_threshold_rejects_non_positive() -> None:
         Settings(resolve_lock_skip_alert_threshold=0)
     with pytest.raises(ValidationError):
         Settings(resolve_lock_skip_alert_threshold=-2)
+
+
+# -- H-8c: Prometheus /metrics exporter port (ADR 0076) ---------------------------------------- #
+
+
+def test_driver_metrics_port_defaults_to_9108() -> None:
+    """ADR 0076 §2.2: the driver exposes the Prometheus /metrics endpoint on this port by default
+    (9108 — clear of the node_exporter/Prometheus defaults 9100/9090)."""
+    assert Settings(_env_file=None).driver_metrics_port == 9108  # type: ignore[call-arg]
+
+
+def test_driver_metrics_port_accepts_override() -> None:
+    assert Settings(driver_metrics_port=9200).driver_metrics_port == 9200
+
+
+def test_driver_metrics_port_allows_zero_to_disable() -> None:
+    """ge=0: ``0`` DISABLES the exporter entirely (no thread, no bound port) — today's behaviour
+    and the opt-out / reversal lever (ADR 0076)."""
+    assert Settings(driver_metrics_port=0).driver_metrics_port == 0
+
+
+def test_driver_metrics_port_rejects_negative() -> None:
+    """ge=0: a negative port is nonsensical (it is not a valid TCP port / disable sentinel)."""
+    with pytest.raises(ValidationError):
+        Settings(driver_metrics_port=-1)

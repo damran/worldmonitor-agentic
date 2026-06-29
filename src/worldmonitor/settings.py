@@ -140,6 +140,14 @@ class Settings(BaseSettings):
     # Per-store bound on each /ready probe (Postgres/Neo4j/MinIO) so a hung store cannot hang
     # the readiness endpoint forever (spec §3.4).
     readiness_probe_timeout_seconds: float = Field(default=5.0, gt=0)
+    # TCP port the driver's Prometheus ``/metrics`` exporter binds (Gate H-8c / ADR 0076). Started
+    # ONCE at the top of ``run_forever`` (after recover_stale, before the loop) on a daemon thread,
+    # so the H-8a/H-8b health signals (instances-in-error, the in-memory resolve-lock-skip counter,
+    # the latest resolve stopped_reason, plus the queue/dead-letter/task/graph counts) are
+    # scrapeable. ``0`` DISABLES the exporter entirely (no thread, no bound port) — today's
+    # behaviour and the reversal lever. Default 9108 is clear of the node_exporter/Prometheus
+    # defaults 9100/9090; bound 0.0.0.0 in-container only (the compose service publishes no host).
+    driver_metrics_port: int = Field(default=9108, ge=0)
 
     # --- Fail-closed sensitivity guard (Gate E / ADR 0047) ---
     # The guard's sensitive-topic SET is loaded programmatically from FtM's own

@@ -34,38 +34,51 @@ def _count(session: Session, model: type[Any], *conditions: ColumnElement[bool])
     return session.execute(stmt).scalar_one()
 
 
+def collect_snapshot(session: Session, neo4j: Neo4jClient) -> dict[str, int]:
+    """The shared read-only health counts across Postgres + the graph.
+
+    Single source of truth for the DB/graph-derived metrics, consumed by BOTH :func:`snapshot`
+    (the CLI one-liner) and the H-8c driver Prometheus collector
+    (:class:`worldmonitor.metrics.collector.DriverMetricsCollector`), so the scrape surface and the
+    CLI snapshot cannot drift (ADR 0076 INV-5). Takes an already-open ``session`` + an injected
+    ``neo4j`` and only READS — the caller owns both clients' lifecycles (this never disposes the
+    engine or closes the Neo4j client). Keys are the existing, frozen ``smoke_metrics`` names.
+    """
+    metrics: dict[str, int] = {}
+    metrics["queue_pending"] = _count(session, ErQueueItem, ErQueueItem.status == "pending")
+    metrics["queue_pending_review"] = _count(
+        session, ErQueueItem, ErQueueItem.status == "pending_review"
+    )
+    metrics["parked_merges"] = _count(session, MergeAudit, MergeAudit.decision == "pending_review")
+    metrics["dead_letter"] = _count(session, IngestDeadLetter)
+    for kind in ("ingest", "resolve"):
+        for status in ("ok", "error", "running"):
+            metrics[f"task_{kind}_{status}"] = _count(
+                session, TaskRun, TaskRun.kind == kind, TaskRun.status == status
+            )
+    metrics["graph_nodes"] = neo4j.execute_read("MATCH (n:Entity) RETURN count(n) AS n")[0]["n"]
+    metrics["graph_edges"] = neo4j.execute_read("MATCH ()-[r]->() RETURN count(r) AS n")[0]["n"]
+    return metrics
+
+
 def snapshot() -> dict[str, int]:
-    """One read-only metrics snapshot across Postgres + the graph."""
+    """One read-only metrics snapshot across Postgres + the graph.
+
+    Builds its own engine + Neo4j client from the process settings, delegates the counting to
+    :func:`collect_snapshot`, and tears both clients down. Behaviour-preserving: the returned dict
+    + key set are unchanged (ADR 0076 reuses the queries via ``collect_snapshot`` rather than
+    forking them).
+    """
     settings = get_settings()
     engine = engine_from_settings(settings)
     sessions = session_factory(engine)
-    metrics: dict[str, int] = {}
-
-    try:
-        with sessions() as session:
-            metrics["queue_pending"] = _count(session, ErQueueItem, ErQueueItem.status == "pending")
-            metrics["queue_pending_review"] = _count(
-                session, ErQueueItem, ErQueueItem.status == "pending_review"
-            )
-            metrics["parked_merges"] = _count(
-                session, MergeAudit, MergeAudit.decision == "pending_review"
-            )
-            metrics["dead_letter"] = _count(session, IngestDeadLetter)
-            for kind in ("ingest", "resolve"):
-                for status in ("ok", "error", "running"):
-                    metrics[f"task_{kind}_{status}"] = _count(
-                        session, TaskRun, TaskRun.kind == kind, TaskRun.status == status
-                    )
-    finally:
-        engine.dispose()
-
     neo4j = Neo4jClient.from_settings(settings)
     try:
-        metrics["graph_nodes"] = neo4j.execute_read("MATCH (n:Entity) RETURN count(n) AS n")[0]["n"]
-        metrics["graph_edges"] = neo4j.execute_read("MATCH ()-[r]->() RETURN count(r) AS n")[0]["n"]
+        with sessions() as session:
+            return collect_snapshot(session, neo4j)
     finally:
         neo4j.close()
-    return metrics
+        engine.dispose()
 
 
 def main() -> int:  # pragma: no cover - process entry point
