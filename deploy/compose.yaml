@@ -412,6 +412,49 @@ services:
       retries: 10
       start_period: 20s
 
+  # --- Opt-in reference Prometheus service (ADR 0078 D4) — default-off ---
+  # Boot with: docker compose -f deploy/compose.yaml --profile monitoring up -d prometheus
+  #
+  # Sits on `default` (to scrape driver:9108) and NOT on `sandbox_net` (ADR 0077 egress isolation).
+  # Publishes loopback-only host port 127.0.0.1:9090:9090.
+  # NOT a depends_on of any core service — a bare `docker compose up` does NOT start it.
+  #
+  # Image tag: prom/prometheus:v3.0.0 (released Nov 2024, first stable v3.x GA).
+  # Verify newer tags at https://hub.docker.com/r/prom/prometheus/tags before bumping.
+  prometheus:
+    image: prom/prometheus:v3.0.0
+    profiles:
+      - monitoring
+    restart: unless-stopped
+    networks:
+      - default
+    volumes:
+      # Mount the scrape config and alert rules read-only into /etc/prometheus (the default
+      # Prometheus config dir). The rule_files entry in prometheus.yml references
+      # "alerts/worldmonitor.rules.yml" relative to /etc/prometheus.
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts:/etc/prometheus/alerts:ro
+    ports:
+      # Loopback-only: Prometheus is for operator/internal use, not public-facing.
+      - "127.0.0.1:9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --tries=1
+        - --output-document=-
+        - http://localhost:9090/-/healthy
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
 volumes:
   postgres-data:
   neo4j-data:
