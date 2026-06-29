@@ -40,8 +40,11 @@ writes — mirror the `smoke_metrics` contract). Metrics (all `GaugeMetricFamily
 - `worldmonitor_instances_in_error` = `COUNT(ConnectorInstance WHERE status=='error')` (NEW; ADR 0074).
 - `worldmonitor_resolve_consecutive_lock_skips` = `skip_counter()` (the in-memory ADR-0075 D3 value).
 - `worldmonitor_resolve_last_stopped_reason{reason}` = `1` on the reason of the latest **finished**
-  resolve `task_run` (`stats->>'stopped_reason'`); `reason="unknown"` when no finished row / `stats` is
-  None. (Select the most-recent `TaskRun` `kind=='resolve'`, `status in (ok,error)`, `stats is not None`.)
+  resolve `task_run`, read portably as a Python dict (`stats.get("stopped_reason")`, NOT a Postgres
+  `->>`). Select the most-recent `TaskRun` `kind=='resolve'`, `status in (ok,error)`, `ORDER BY
+  started_at DESC` (the absolute latest finished row — do NOT filter on `stats is not None`).
+  `reason="unknown"` when there is no finished row, that latest row's `stats` is None / lacks the key,
+  or the value is outside the closed set `{exhausted, timeout}` (closed-cardinality label, INV-7).
 
 ### 2.4 Exporter wiring (`src/worldmonitor/metrics/exporter.py` + `runner/driver.py`)
 - `exporter.py`: a thin `start_metrics_exporter(port, collector) -> None` that registers the collector to

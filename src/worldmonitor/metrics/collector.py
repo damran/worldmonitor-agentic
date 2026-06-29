@@ -29,8 +29,11 @@ from worldmonitor.runner.smoke_metrics import collect_snapshot
 # including the zero combinations, so a gap reads as 0 rather than a missing time-series.
 _TASK_KINDS = ("ingest", "resolve")
 _TASK_STATUSES = ("ok", "error", "running")
-# Resolve stopped_reason label when there is no finished resolve row / its stats is None / lacks the
-# key (ADR 0075 D2; INV-4).
+# The CLOSED set of resolve stopped_reason label values (ADR 0075 D2; the only values
+# ``ResolveStats.stopped_reason`` is ever set to). Any other / missing value collapses to
+# ``_UNKNOWN_REASON`` so the label can never carry an unbounded or hostile string — closed
+# cardinality, defense-in-depth even though the only writer today is our own ResolveStats.
+_RESOLVE_STOPPED_REASONS = ("exhausted", "timeout")
 _UNKNOWN_REASON = "unknown"
 
 
@@ -136,7 +139,8 @@ class DriverMetricsCollector:
         Postgres-only ``->>`` operator — so the same path runs on SQLite (the unit suite) and
         Postgres. The most-recent ``kind='resolve'`` row with ``status in (ok, error)`` wins
         (a still-running resolve is excluded, INV-4); ``"unknown"`` when there is no finished row,
-        its ``stats`` is None, or it lacks the key.
+        its ``stats`` is None, it lacks the key, or the value is outside the closed
+        ``_RESOLVE_STOPPED_REASONS`` set (so the label is always closed-cardinality, INV-7).
         """
         stats = (
             session.execute(
@@ -151,4 +155,4 @@ class DriverMetricsCollector:
         if not isinstance(stats, dict):
             return _UNKNOWN_REASON
         reason = stats.get("stopped_reason")
-        return reason if isinstance(reason, str) and reason else _UNKNOWN_REASON
+        return reason if reason in _RESOLVE_STOPPED_REASONS else _UNKNOWN_REASON
