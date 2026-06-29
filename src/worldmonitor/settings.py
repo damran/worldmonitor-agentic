@@ -183,6 +183,25 @@ class Settings(BaseSettings):
     geonames_allowed_path_dir: str = ""
     geonames_max_path_bytes: int = Field(default=268_435_456, gt=0)
 
+    # --- Landing-zone orphan GC (ADR 0083 / audit M-6) ---
+    # The GC scans the landing zone for S3 objects not referenced by either er_queue_item or
+    # ingest_dead_letter, and optionally deletes them (the backstop for the put-before-commit race).
+    # All three settings default to the SAFE OFF position so this gate adds no behaviour change.
+    #
+    #   landing_gc_enabled          — master gate; when False the GC pass never runs in the
+    #                                 maintenance cadence (DEFAULT False: no behaviour change).
+    #   landing_gc_delete_enabled   — deletion opt-in; when False the pass is REPORT-ONLY —
+    #                                 orphan counts/bytes are computed and exposed via Prometheus
+    #                                 but nothing is deleted (DEFAULT False: report-only).
+    #   landing_gc_min_age_seconds  — grace window in seconds; objects younger than this are
+    #                                 NEVER swept, closing the put-before-commit race.
+    #                                 DEFAULT 86400 (1 day) — generous enough that any in-flight
+    #                                 put-before-commit is always safe, even on a slow host.
+    #                                 Set to 0.0 to disable the grace window (sweep all orphans).
+    landing_gc_enabled: bool = False
+    landing_gc_delete_enabled: bool = False
+    landing_gc_min_age_seconds: float = Field(default=86400.0, ge=0.0)
+
     # --- ACTIVE heavy-tool sandbox gate (ADR 0072 §1) ---
     # A CliTool connector declares a ``sandbox`` level ("subprocess" | "container"). A
     # ``sandbox=="container"`` connector (e.g. nmap — an un-sandboxed network scanner from the host

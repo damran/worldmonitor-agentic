@@ -16,6 +16,7 @@ snapshot cannot drift (INV-5 parity).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING
 
 from prometheus_client.core import GaugeMetricFamily
 from sqlalchemy import func, select
@@ -24,6 +25,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from worldmonitor.db.models import ConnectorInstance, TaskRun
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.runner.smoke_metrics import collect_snapshot
+
+if TYPE_CHECKING:
+    from worldmonitor.runner.gc import GcStats
 
 # The worldmonitor_task_runs{kind,status} cross-product: every series is emitted on each scrape,
 # including the zero combinations, so a gap reads as 0 rather than a missing time-series.
@@ -51,10 +55,16 @@ class DriverMetricsCollector:
         session_factory: sessionmaker[Session],
         neo4j: Neo4jClient,
         skip_counter: Callable[[], int],
+        gc_stats: Callable[[], GcStats | None] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._neo4j = neo4j
         self._skip_counter = skip_counter
+        # Zero-arg accessor onto the driver's cached GcStats (ADR 0083 / M-6).
+        # ``None`` when the GC has never run or the collector is created without a GC
+        # accessor (e.g. in tests). Exposes the disk-growth signal (orphan count + bytes)
+        # WITHOUT performing an expensive bucket list on every scrape.
+        self._gc_stats = gc_stats
 
     def collect(self) -> Iterator[GaugeMetricFamily]:
         """Yield every ``worldmonitor_`` gauge family, computed fresh from the stores."""
@@ -131,6 +141,29 @@ class DriverMetricsCollector:
         )
         last_reason.add_metric([stopped_reason], 1)
         yield last_reason
+
+        # Landing-zone GC gauges (ADR 0083 / audit M-6): expose the disk-growth signal from the
+        # CACHED GcStats of the latest periodic pass — no on-scrape bucket list.
+        # All three report 0 until the first GC pass runs (landing_gc_enabled=False by default).
+        gc = self._gc_stats() if self._gc_stats is not None else None
+        yield _gauge(
+            "worldmonitor_landing_objects",
+            "Total landing-zone objects scanned in the latest GC pass (ADR 0083 / M-6). "
+            "0 until the first GC pass runs (landing_gc_enabled=False by default).",
+            gc.scanned if gc is not None else 0,
+        )
+        yield _gauge(
+            "worldmonitor_landing_orphans",
+            "Unreferenced landing-zone orphans found in the latest GC pass (ADR 0083 / M-6). "
+            "0 until the first GC pass runs.",
+            gc.orphaned if gc is not None else 0,
+        )
+        yield _gauge(
+            "worldmonitor_landing_orphan_bytes",
+            "Total bytes of unreferenced landing-zone orphans (disk-growth signal, ADR 0083). "
+            "Computed even in report-only mode; 0 until the first GC pass runs.",
+            gc.bytes_freed if gc is not None else 0,
+        )
 
     def _latest_stopped_reason(self, session: Session) -> str:
         """The ``stopped_reason`` of the latest FINISHED resolve task_run, else ``"unknown"``.

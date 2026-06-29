@@ -13,7 +13,7 @@ is typed via ``boto3-stubs``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -111,6 +111,60 @@ class LandingStore:
         so a repeat erase of an already-deleted object is a clean no-op.
         """
         self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def list_objects_with_metadata(self, prefix: str = "") -> list[dict[str, Any]]:
+        """List ALL objects under ``prefix`` with size and last-modified metadata, paging past
+        the 1000-key S3/MinIO cap.
+
+        Each element is a ``dict`` with:
+        * ``"Key"`` — the object key (``str``).
+        * ``"Size"`` — object size in bytes (``int``; 0 if absent from the response).
+        * ``"LastModified"`` — UTC-aware ``datetime`` set by the server at PUT time, or ``None``
+          if absent from the response (treated as RECENT by the GC to be conservative).
+
+        Used by the landing-zone orphan GC (ADR 0083 / audit M-6) to identify unreferenced
+        orphaned objects without a separate per-key ``HEAD`` request.
+        """
+        paginator = self.client.get_paginator("list_objects_v2")
+        result: list[dict[str, Any]] = []
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                result.append(
+                    {
+                        "Key": obj.get("Key", ""),
+                        "Size": obj.get("Size", 0),
+                        "LastModified": obj.get("LastModified"),
+                    }
+                )
+        return result
+
+    def delete_keys(self, keys: list[str]) -> int:
+        """Delete a specific list of keys in <=1000-key batches. Fail-loud on partial errors.
+
+        Mirrors the batch+fail-loud discipline of ``delete_prefix`` (ADR 0049, Gate B-4a):
+        a non-empty ``Errors`` array in any ``DeleteObjects`` response raises ``RuntimeError``
+        immediately rather than silently under-reporting. Returns the total count of confirmed
+        deletions (from the ``Deleted`` array in the S3 response).
+
+        Unlike ``delete_prefix`` (which sweeps all keys under a prefix), this method deletes
+        a SPECIFIC set of keys computed by the caller (the landing-zone orphan GC, ADR 0083).
+        An empty ``keys`` list is a no-op that returns 0.
+        """
+        deleted = 0
+        for start in range(0, len(keys), _S3_DELETE_BATCH):
+            batch = keys[start : start + _S3_DELETE_BATCH]
+            response = self.client.delete_objects(
+                Bucket=self.bucket,
+                Delete={"Objects": [{"Key": k} for k in batch]},
+            )
+            errors = response.get("Errors")
+            if errors:
+                raise RuntimeError(
+                    f"delete_keys: {len(errors)} object(s) failed to delete "
+                    f"(e.g. {errors[0]}); operation INCOMPLETE — retry (idempotent)"
+                )
+            deleted += len(response.get("Deleted", []))
+        return deleted
 
     def delete_prefix(self, prefix: str) -> int:
         """Delete EVERY object under ``prefix`` and return the TRUE count deleted (idempotent).
