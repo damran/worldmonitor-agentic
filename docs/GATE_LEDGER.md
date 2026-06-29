@@ -122,8 +122,10 @@ self-merge. Invariant-touching gates carry a mandatory `@given` property test in
 |---|---|---|---|---|
 | H-4 | **Abjad (Arabic/Persian) name normalization** — strip harakat/tashkeel + tatweel before `fingerprints.generate` in `_name_fingerprint`, so the SAME abjad name with vs. without short-vowel marks projects the SAME `name_fp` ER key (closes the deferred ADR-0035 abjad sub-case). 0.92 threshold + catastrophic-merge guard + sensitive-park **UNCHANGED**; pure deletion ⇒ no over-merge + strict no-op on non-abjad. `LogicV2` re-scorer + ʿayn-splitting **still deferred**. | 0073 | #131 | **CLOSED** |
 | H-8a | **Auto-hard-disable after N consecutive failures** — after `ingest_max_consecutive_failures` (default 10, `0`=off) consecutive ingest failures the driver flips the instance to a terminal `status="error"` instead of ADR-0054's retry-forever; failure stays visible, operator re-enables from the UI. Extends ADR 0054 (its named follow-up); streak reused from `task_run` (no schema change). Non-person-affecting. First of the H-8 remaining halves. | 0074 | #132 | **CLOSED** |
+| H-8b | **Periodic maintenance cadence + resolve wall-clock timeout + lock-skip escalation** — the two retention prunes (`prune_task_runs` + `prune_dead_letters`) move from startup-only into a periodic in-loop `maintenance_cadence_seconds` gate (first tick fires ⇒ boot prune preserved; `recover_stale` stays startup-only, NOT wrapped); `resolve_pending` grows a cooperative between-batch wall-clock deadline (`resolve_timeout_seconds`, `<=0` off) reporting `ResolveStats.stopped_reason` (per-batch commit ⇒ no work lost, remainder resumes next tick); `run_resolution` escalates info→WARNING after `resolve_lock_skip_alert_threshold` consecutive lock-skips + an `asyncio.wait_for` loop-liveness backstop (abandon-not-kill). No schema change; non-person-affecting (scheduling/liveness only — merges exactly what it merged before). | 0075 | (PR TBD) | **CLOSED** |
 
-**Still open (Stage-4):** the rest of H-8 (periodic maintenance cadence · resolve wall-clock timeout +
-lock-skip escalation · Prometheus `/metrics`), the container/egress sandbox
+**Still open (Stage-4):** the rest of H-8 (~~periodic maintenance cadence~~ · ~~resolve wall-clock
+timeout + lock-skip escalation~~ — both **CLOSED** §6 / ADR 0075 · Prometheus `/metrics` H-8c), the
+container/egress sandbox
 (unlocks nmap), the MEDIUM/LOW sweep (#105, M-5, M-6, wikidata-via-`guarded_stream`, dig/nmap richer
 FtM map, suffix-match allowlist), and **G7** threshold promotion (**BLOCKED** on ground-truth labels).
