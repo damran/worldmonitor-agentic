@@ -80,7 +80,11 @@ Mirror the existing **`ingest_timeout_seconds`** pattern (`ingest.py:130,141,234
 
 Because every batch is **committed before the next loads** (ADR 0026), a timed-out pass loses **no**
 committed work and the remaining backlog stays `pending` and **resumes on the next cadence tick** —
-the timeout bounds a single pass, it does not drop data and changes **nothing** about *what* merges.
+the timeout bounds a single pass and drops no data. It changes **nothing** about what its *committed
+batches* merge (the between-batch break can never split a within-batch merge, never produces an
+un-guarded merge, and runs the same guard/threshold/sign-off path); the *cross-pass* batch grouping of
+the deferred remainder remains subject to the already-accepted ADR-0026 cross-batch dedup limitation
+(a resumed remainder may co-batch with rows enqueued in between — monotonic and bounded by `batch_size`).
 
 ### D3 — Lock-skip escalation + loop-liveness backstop
 
@@ -133,7 +137,8 @@ exactly why D1 keeps `recover_stale` startup-only.
 - **No migration**, **no test-contract flip** (the new defaults sit far from what the existing driver
   tests drive; every disable sentinel reproduces today's behaviour byte-for-byte).
 - **Not person-affecting** — `human_fork: false`; no per-run human sign-off. Connector/queue
-  *scheduling* and loop liveness only; resolution still merges exactly what it merged before.
+  *scheduling* and loop liveness only; resolution still applies the same guard/threshold/sign-off to
+  every merge (a timeout only bounds how far one pass drains — see §D2 on cross-pass grouping).
 - **Out of scope (recorded):** the `/metrics` alerting transport (H-8c / ADR 0076); a true resolve
   watchdog/kill; `recover_stale` advancing `next_run` to break a crash-loop (recover_stale logic is
   frozen here); the HA/multi-replica lease (ADR 0029 fork X2); landing-zone GC (M-6); the DuckDB-Linker

@@ -121,9 +121,11 @@ exist** → `AttributeError` / `TypeError` / `ValidationError`.
 
 ## 7. PERSON-AFFECTING ASSESSMENT
 **NOT person-affecting → no per-run human sign-off** (`human_fork: false`). Pure scheduling/maintenance/
-loop-liveness. Resolution merges EXACTLY what it merged before — a timeout only bounds *how far* one
-pass drains (per-batch committed, remainder resumes), never *what* merges, the guard, thresholds, the
-canonical graph, or the canonical-id ledger. No `@given` invariant property test is mandated (no
+loop-liveness. A timeout only bounds *how far* one pass drains (per-batch committed, remainder resumes):
+it changes nothing about what its *committed batches* merge and runs the same guard/threshold/sign-off
+on every merge; the deferred remainder's *cross-pass* batch grouping stays within the already-accepted
+ADR-0026 cross-batch dedup limitation. It never touches the guard, thresholds, the canonical graph, or
+the canonical-id ledger. No `@given` invariant property test is mandated (no
 ER/merge/canonical-id/provenance/sensitivity invariant is touched — see CLAUDE.md build discipline).
 
 ## 8. OUT OF SCOPE (hard stops)
