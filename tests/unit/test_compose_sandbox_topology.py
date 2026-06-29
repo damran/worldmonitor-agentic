@@ -94,6 +94,21 @@ def test_sandbox_runner_service_exists_with_build_target() -> None:
     )
 
 
+@pytest.mark.parametrize("svc", _APP_SERVICES + ["migrate", "minio-init"])
+def test_app_services_pin_the_slim_runtime_stage(svc: str) -> None:
+    """INV-3 (the artifact-level guard): every app/init service that shares the app image MUST pin
+    ``build.target == "runtime"``. The Dockerfile's LAST stage is ``sandbox-runner`` (carries the
+    nmap/dig/whois binaries), and a build with NO ``target`` defaults to the last stage — so without
+    an explicit ``target: runtime`` the api/driver/init image would ship the active-recon tools (and
+    they sit on the stores' network). This is the guard the original topology test lacked."""
+    build = _service(_load_compose(), svc).get("build")
+    assert isinstance(build, dict), f"{svc} must use a `build:` mapping"
+    assert build.get("target") == "runtime", (
+        f"{svc}.build.target must be 'runtime' (slim, tool-free) so a no-target build does not "
+        f"default to the last `sandbox-runner` stage; got {build.get('target')!r}"
+    )
+
+
 def test_sandbox_runner_isolated_from_the_stores_network() -> None:
     """INV-2: the sidecar is on ``sandbox_net`` and NOT on ``default`` — by topology it cannot reach
     the stores (the data-sovereignty / constrained-egress goal)."""
@@ -144,14 +159,24 @@ def test_top_level_sandbox_net_declared() -> None:
 
 
 def test_sandbox_runner_has_resource_bounds_and_health() -> None:
-    """INV-4: the sidecar carries a ``mem_limit`` AND a ``pids_limit``, is ``read_only: true``, and
-    has a ``healthcheck`` (so a runaway scan is bounded and the stack can probe its liveness)."""
+    """INV-4 (full): the sidecar is resource-bounded + hardened — ``mem_limit`` + ``pids_limit`` +
+    ``cpus`` + ``ulimits`` (so a runaway scan is bounded), ``read_only: true`` + a ``tmpfs`` scratch
+    mount (immutable rootfs), ``cap_drop: [ALL]`` (no caps — egress is network-isolation, not nft),
+    and a ``healthcheck``. The original test only checked mem/pids/read_only/health; this matches
+    the full INV-4 contract so dropping cpus/ulimits/tmpfs/cap_drop fails RED."""
     svc = _service(_load_compose(), "sandbox-runner")
     assert "mem_limit" in svc, "sandbox-runner must set a `mem_limit` (resource bound)"
     assert "pids_limit" in svc, "sandbox-runner must set a `pids_limit` (resource bound)"
+    assert "cpus" in svc, "sandbox-runner must set `cpus` (CPU bound)"
+    assert "ulimits" in svc, "sandbox-runner must set `ulimits` (e.g. nofile)"
     assert svc.get("read_only") is True, (
         "sandbox-runner must run `read_only: true` (immutable rootfs)"
     )
+    assert svc.get("tmpfs"), (
+        "sandbox-runner must mount a `tmpfs` scratch (read_only rootfs needs it)"
+    )
+    cap_drop = svc.get("cap_drop") or []
+    assert "ALL" in cap_drop or "all" in cap_drop, "sandbox-runner must `cap_drop: [ALL]` (no caps)"
     assert "healthcheck" in svc, "sandbox-runner must define a `healthcheck`"
 
 

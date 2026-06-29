@@ -40,15 +40,19 @@ logger = logging.getLogger(__name__)
 # The sidecar's OWN allowlist (defense in depth — NOT trusting the app's allowlist, ADR 0077 §D2).
 _ALLOWED_TOOLS = frozenset({"nmap", "dig", "whois"})
 
-# Per-tool DEFAULT-DENY allow-set for the MIDDLE tokens (``argv[1:-1]``), ADR 0077 §D2 Slice-2
-# hardening. These are EXACTLY what the connectors' ``_build_argv`` emit (see
-# ``plugins/connectors/{nmap,dig,whois}/connector.py``); anything else (``--script``/``-oN``/``-iR``
-# /``-iL``/``-h``) is refused before exec. Intentional coupling: adding a connector flag means
-# extending the matching set here (a safe, explicit edit).
-_ALLOWED_MIDDLE: dict[str, frozenset[str]] = {
-    "nmap": frozenset({"-oX", "-", "--"}),
-    "dig": frozenset({"+short", "--"}),
-    "whois": frozenset({"--"}),
+# Per-tool EXACT argv-prefix template (everything before the target), ADR 0077 §D2 Slice-2
+# hardening. ``argv[:-1]`` must EQUAL the template — these are EXACTLY what the connectors'
+# ``_build_argv`` emit (see ``plugins/connectors/{nmap,dig,whois}/connector.py``). An EXACT prefix
+# (not a per-token allow-set) is required because option-with-argument flags recombine: a per-token
+# set that allows ``-oX`` and ``--`` individually would accept ``nmap -oX -- <target>``, where nmap
+# treats ``--`` as the XML OUTPUT FILENAME — a file-write smuggled past a token check. Pinning the
+# whole prefix rejects every such recombination (``--script``/``-oN``/``-iR``/``-iL``/reordering)
+# while still passing each connector's only emitted argv. Intentional coupling: a new connector flag
+# means updating the template here (a safe, explicit edit).
+_ARGV_TEMPLATES: dict[str, tuple[str, ...]] = {
+    "nmap": ("nmap", "-oX", "-", "--"),
+    "dig": ("dig", "+short", "--"),
+    "whois": ("whois", "--"),
 }
 
 # The SAME host/IP target shape the connectors enforce (cli_tool._TARGET_RE / _MAX_TARGET_LEN,
@@ -155,28 +159,21 @@ def create_sandbox_app(settings: Settings | None = None) -> FastAPI:
                 detail=f"timeout must be a number in (0, {_MAX_TIMEOUT}]",
             )
 
-        # --- ARGV ALLOWLIST (per-tool DEFAULT-DENY, ADR 0077 §D2 Slice-2). --------------------- #
-        # Beyond ``argv[0] in {nmap,dig,whois}``: require ``[tool, ...flags, target]`` (>=2 tokens);
-        # every MIDDLE token (``argv[1:-1]``) must be in that tool's fixed allow-set; the LAST token
-        # (the target) must be a plain host/IP. Closes the ``--script`` (NSE) / ``-oN`` (file-write)
-        # / ``-iR`` (random-net) / ``-iL`` (file-read) / ``-h`` (redirect) smuggling surface — those
-        # flags are not in the set. Independent of the app-side validator (never trust the caller).
-        # Any violation ⇒ 422, ``run_command`` is NOT called.
-        if len(argv) < 2:
+        # --- ARGV EXACT-TEMPLATE (per-tool, ADR 0077 §D2 Slice-2). ----------------------------- #
+        # Beyond ``argv[0] in {nmap,dig,whois}``: require ``argv == [*TEMPLATE, target]`` — the
+        # prefix ``argv[:-1]`` must EQUAL the tool's fixed template and the LAST token must be a
+        # plain host/IP. An EXACT prefix (not a per-token allow-set) is the load-bearing choice:
+        # option-with-argument flags otherwise recombine (``nmap -oX -- <target>`` makes nmap write
+        # XML to a file named ``--``) past a token check. Pinning the whole prefix rejects every
+        # recombination (and ``--script``/``-oN``/``-iR``/``-iL``/reordering) while passing each
+        # connector's only emitted argv. Independent of the app-side validator (never trust the
+        # caller). Violation ⇒ 422, ``run_command`` NOT called.
+        template = _ARGV_TEMPLATES[argv[0]]  # argv[0] in _ALLOWED_TOOLS is already enforced
+        if tuple(argv[:-1]) != template:
             raise HTTPException(
                 status_code=422,
-                detail="argv must be [tool, ...flags, target] (at least tool + target)",
+                detail=f"argv for {argv[0]} must be {[*template, '<target>']} (exact); got {argv}",
             )
-        allowed_middle = _ALLOWED_MIDDLE[argv[0]]  # argv[0] in _ALLOWED_TOOLS is already enforced
-        for token in argv[1:-1]:
-            if token not in allowed_middle:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"flag {token!r} is not in the {argv[0]} allow-set "
-                        f"{sorted(allowed_middle)} (default-deny)"
-                    ),
-                )
         if not _is_valid_target(argv[-1]):
             raise HTTPException(
                 status_code=422,

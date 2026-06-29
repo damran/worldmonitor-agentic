@@ -170,6 +170,10 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      # Pin the SLIM runtime stage: the Dockerfile's LAST stage is `sandbox-runner` (carries the
+      # nmap/dig/whois binaries), so a no-`target` build would default to it — keep the app/init
+      # images tool-free (ADR 0077; tools live ONLY in the isolated sandbox-runner service).
+      target: runtime
     image: worldmonitor-app:dev
     restart: "no"
     depends_on:
@@ -191,6 +195,10 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      # Pin the SLIM runtime stage: the Dockerfile's LAST stage is `sandbox-runner` (carries the
+      # nmap/dig/whois binaries), so a no-`target` build would default to it — keep the app/init
+      # images tool-free (ADR 0077; tools live ONLY in the isolated sandbox-runner service).
+      target: runtime
     image: worldmonitor-app:dev
     restart: "no"
     depends_on:
@@ -212,6 +220,10 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      # Pin the SLIM runtime stage: the Dockerfile's LAST stage is `sandbox-runner` (carries the
+      # nmap/dig/whois binaries), so a no-`target` build would default to it — keep the app/init
+      # images tool-free (ADR 0077; tools live ONLY in the isolated sandbox-runner service).
+      target: runtime
     image: worldmonitor-app:dev
     restart: unless-stopped
     # Bound the API container's memory so a runaway request can't take the host with it.
@@ -284,6 +296,10 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      # Pin the SLIM runtime stage: the Dockerfile's LAST stage is `sandbox-runner` (carries the
+      # nmap/dig/whois binaries), so a no-`target` build would default to it — keep the app/init
+      # images tool-free (ADR 0077; tools live ONLY in the isolated sandbox-runner service).
+      target: runtime
     image: worldmonitor-app:dev
     # restart: unless-stopped covers OOM-kill / crash / reboot (the core B-4 fix); plain Compose
     # does NOT auto-restart on *unhealthy* — the HEALTHCHECK makes a STALL observable (ps ->

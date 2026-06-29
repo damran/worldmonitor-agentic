@@ -280,6 +280,16 @@ _REJECTED_ARGV = [
     pytest.param(["whois", "-h", "evil.example", "--", "example.com"], id="whois-unknown-flag"),
     # just the tool, no target — ``len(argv) < 2``.
     pytest.param(["nmap"], id="nmap-no-target"),
+    # nmap file-read input list — ``-iL`` not in the template (gate.scope INV-1 names it).
+    pytest.param(["nmap", "-iL", "hosts.txt", "--", "example.com"], id="nmap-file-read-iL"),
+    # --- EXACT-TEMPLATE recombinations: each token is individually "allowed" but the PREFIX is not
+    # the connector's fixed template, so the exact-prefix check rejects them (a per-token allow-set
+    # would have EXECUTED these — nmap's ``-oX`` consumes the next token as the XML OUTPUT FILE).
+    pytest.param(["nmap", "-oX", "--", "example.com"], id="nmap-oX-dashdash-as-outfile"),
+    pytest.param(["nmap", "-oX", "example.com"], id="nmap-oX-target-as-outfile"),
+    pytest.param(["nmap", "-oX", "-oX", "example.com"], id="nmap-oX-oX-recombine"),
+    pytest.param(["nmap", "-", "-oX", "example.com"], id="nmap-reordered-prefix"),
+    pytest.param(["dig", "--", "+short", "example.com"], id="dig-reordered-prefix"),
 ]
 
 
