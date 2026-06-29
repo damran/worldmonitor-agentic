@@ -213,3 +213,88 @@ def test_empty_configured_secret_fails_closed(monkeypatch: pytest.MonkeyPatch) -
     assert client.post("/run", headers={"X-Sandbox-Secret": ""}, json=body).status_code == 401
     assert fake.calls == [], "an unconfigured (empty-secret) sidecar must NEVER exec a tool"
     assert fake.calls == [], "an out-of-bounds timeout must be rejected BEFORE run_command"
+
+
+# --------------------------------------------------------------------------- #
+# Slice 2 (ADR 0077 §D2 / gate.scope INV-1) — the per-tool argv allowlist.
+#
+# Beyond the Slice-1 ``argv[0] in {nmap,dig,whois}`` check, the sidecar must
+# DEFAULT-DENY the rest of the command line: every MIDDLE token ``argv[1:-1]``
+# must be in that tool's fixed allow-set, and the LAST token (the target) must
+# pass the same host/IP validator the connectors use (regex ``[A-Za-z0-9.:-]+``,
+# length <= 253, NO leading ``-``, NO ``/``). ``len(argv) >= 2`` (tool + target).
+#
+# The EXACT per-tool MIDDLE-token allow-sets the builder MUST match (these are
+# precisely what the connectors' ``_build_argv`` emit — see
+# ``plugins/connectors/{nmap,dig,whois}/connector.py``):
+#
+#     nmap : {"-oX", "-", "--"}
+#     dig  : {"+short", "--"}
+#     whois: {"--"}
+#
+# RED today: the Slice-1 validator accepts ANY ``list[str]`` whose ``argv[0]`` is
+# allowlisted, so every dangerous form below is executed (200, run_command called)
+# instead of being refused (4xx, run_command NOT called).
+# --------------------------------------------------------------------------- #
+
+# The connectors' REAL argv (must PASS) — pinned against their ``_build_argv``.
+_CONNECTOR_ARGV = [
+    ["nmap", "-oX", "-", "--", "example.com"],
+    ["dig", "+short", "--", "example.com"],
+    ["whois", "--", "example.com"],
+]
+
+
+@pytest.mark.parametrize("argv", _CONNECTOR_ARGV, ids=lambda a: a[0])
+def test_connector_argv_passes_the_allowlist(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """INV-1: each connector's REAL ``_build_argv`` output passes the per-tool allowlist ⇒ 200,
+    and ``run_command`` runs exactly ONCE with that exact argv LIST (no shell, no rewrite)."""
+    client, fake = _client_and_fake(monkeypatch)
+    resp = client.post(
+        "/run",
+        headers={"X-Sandbox-Secret": _SECRET},
+        json={"argv": argv, "timeout": 5},
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(fake.calls) == 1, f"the legit connector argv {argv!r} must be executed once"
+    assert fake.calls[0]["cmd"] == argv
+
+
+# Each form is dangerous OR malformed and MUST be refused (4xx) before any exec.
+_REJECTED_ARGV = [
+    # nmap NSE script engine — arbitrary script execution; ``--script``/``vuln`` not in the set.
+    pytest.param(["nmap", "--script", "vuln", "--", "example.com"], id="nmap-nse-script"),
+    # nmap normal-output-to-FILE — arbitrary file write; ``-oN``/``out.txt`` not in the set.
+    pytest.param(["nmap", "-oN", "out.txt", "--", "example.com"], id="nmap-file-write"),
+    # nmap random-internet scan — ``-iR`` not in the set (target ``100`` is irrelevant).
+    pytest.param(["nmap", "-iR", "100"], id="nmap-random-internet"),
+    # target contains '/' — fails the host/IP validator (path / traversal).
+    pytest.param(["nmap", "-oX", "-", "--", "../etc/passwd"], id="nmap-target-has-slash"),
+    # target has a leading '-' — would be parsed as a flag (flag injection past ``--``).
+    pytest.param(["nmap", "-oX", "-", "--", "-oG"], id="nmap-target-leading-dash"),
+    # dig: an unknown middle flag (only ``+short``/``--`` are allowed).
+    pytest.param(["dig", "+time=1", "--", "example.com"], id="dig-unknown-flag"),
+    # whois: an unknown middle flag (only ``--`` is allowed) — ``-h`` redirects the whois server.
+    pytest.param(["whois", "-h", "evil.example", "--", "example.com"], id="whois-unknown-flag"),
+    # just the tool, no target — ``len(argv) < 2``.
+    pytest.param(["nmap"], id="nmap-no-target"),
+]
+
+
+@pytest.mark.parametrize("argv", _REJECTED_ARGV)
+def test_dangerous_argv_is_rejected_before_exec(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """INV-1: a dangerous/unknown-flag/bad-target/no-target argv ⇒ 4xx, and ``run_command`` is
+    NEVER called (validation-before-exec — the ``.calls`` ledger proves it). The correct secret is
+    supplied, so the ONLY thing that can refuse these is the per-tool argv allowlist."""
+    client, fake = _client_and_fake(monkeypatch)
+    resp = client.post(
+        "/run",
+        headers={"X-Sandbox-Secret": _SECRET},
+        json={"argv": argv, "timeout": 5},
+    )
+    assert resp.status_code in (400, 422), resp.text
+    assert fake.calls == [], f"dangerous argv {argv!r} must be rejected BEFORE run_command"
