@@ -4,14 +4,22 @@ Anchors entities to a Wikidata Q-number (the ``wikidata_id`` canonical anchor):
 first from any FtM ``wikidataId`` the source already carries (OpenSanctions often
 does), otherwise a best-effort SPARQL lookup by exact English label — a *lead*,
 not a verdict. A passive INTERNAL_ENRICHMENT plugin.
+
+All outbound HTTP goes through :func:`worldmonitor.net.ssrf.guarded_stream` (ADR 0057
+discipline: ALL outbound HTTP is SSRF-guarded). The Wikimedia UA policy requires a
+descriptive ``User-Agent`` header, forwarded via the optional ``headers`` param
+added in ADR 0081.
 """
 
 from __future__ import annotations
 
+import json
 import re
+import urllib.parse
 
 import httpx
 
+from worldmonitor.net.ssrf import BlockedAddressError, guarded_stream
 from worldmonitor.ontology.anchors import set_anchor
 from worldmonitor.ontology.ftm import FtmEntity
 from worldmonitor.plugins.base import Capability, Kind, Manifest, Mode, Status
@@ -20,13 +28,36 @@ _SPARQL_URL = "https://query.wikidata.org/sparql"
 _USER_AGENT = "WorldMonitor/0.1 (+https://github.com/damran/worldmonitor)"
 _QID_RE = re.compile(r"Q\d+")
 
+# Headers forwarded with every SPARQL request: Wikimedia UA policy + explicit JSON accept type.
+_SPARQL_HEADERS = {
+    "User-Agent": _USER_AGENT,
+    "Accept": "application/sparql-results+json",
+}
+
 
 class WikidataEnricher:
     """Sets the ``wikidata_id`` anchor on an entity (from FtM data or via SPARQL)."""
 
-    def __init__(self, *, timeout: float = 30.0, lookup: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: float = 30.0,
+        lookup: bool = True,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        """Create a ``WikidataEnricher``.
+
+        Args:
+            timeout: HTTP timeout in seconds for SPARQL requests.
+            lookup: When ``False``, SPARQL lookup is disabled (only FtM-carried ``wikidataId``
+                properties are used). Useful for tests that do not want any outbound requests.
+            transport: Optional ``httpx.BaseTransport`` injected for unit tests
+                (``httpx.MockTransport``). ``None`` ⇒ real HTTP via ``guarded_stream``.
+                Mirrors the pattern used by ``RestApiConnector`` and ``FeedConnector``.
+        """
         self._timeout = timeout
         self._lookup_enabled = lookup
+        self._transport = transport
 
     @property
     def manifest(self) -> Manifest:
@@ -59,16 +90,20 @@ class WikidataEnricher:
             f'SELECT ?item WHERE {{ ?item rdfs:label "{_escape_literal(name)}"@en }} '
             "ORDER BY ?item LIMIT 1"
         )
+        # Build the full URL with query-string params baked in (guarded_stream has no params arg).
+        url = _SPARQL_URL + "?" + urllib.parse.urlencode({"query": query, "format": "json"})
         try:
-            response = httpx.get(
-                _SPARQL_URL,
-                params={"query": query, "format": "json"},
-                headers={"User-Agent": _USER_AGENT, "Accept": "application/sparql-results+json"},
+            with guarded_stream(
+                "GET",
+                url,
+                headers=_SPARQL_HEADERS,
                 timeout=self._timeout,
-            )
-            response.raise_for_status()
-            bindings = response.json()["results"]["bindings"]
-        except (httpx.HTTPError, KeyError, ValueError):
+                transport=self._transport,
+            ) as response:
+                response.raise_for_status()
+                body = response.read()
+            bindings = json.loads(body)["results"]["bindings"]
+        except (httpx.HTTPError, BlockedAddressError, KeyError, ValueError):
             return None
         if not bindings:
             return None
