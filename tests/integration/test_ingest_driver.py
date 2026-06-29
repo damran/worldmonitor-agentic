@@ -686,7 +686,11 @@ def test_run_maintenance_prunes_old_rows_but_leaves_running_untouched(
         "run_maintenance must NOT reset a running task_run to error "
         "(recover_stale stays startup-only — ADR 0075 D1)"
     )
-    assert running.error is None  # recover_stale would have written a reset reason here
+    # TaskRun.error is NOT NULL with a model-level default="" (db/models.py), so an UNTOUCHED
+    # freshly-inserted running row reads back "" (never None). recover_stale would overwrite it with
+    # a non-empty reset reason ("reset on driver startup …"), which "" still rejects — the oracle's
+    # discriminating power is preserved (and status/finished_at independently catch the clobber).
+    assert running.error == ""  # recover_stale would have written a reset reason here
     assert running.finished_at is None  # recover_stale would have stamped finished_at here
     engine.dispose()
 
