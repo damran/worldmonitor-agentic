@@ -2,7 +2,8 @@
 name: test-author
 description: MUST BE USED before the builder. Writes the gate's PRIMARY invariant test from the spec/ADR, in a context SEPARATE from the implementation, so the builder never grades its own homework. Writes only tests/.
 tools: Read, Write, Bash, Grep, Glob
-model: opus
+model: sonnet  # execution layer: writes the RED tests from an Opus-authored spec/gate.scope; the
+               # main loop reviews the RED + checker/skeptics/judge (Opus) backstop. Flip to `opus` to revert.
 maxTurns: 25
 ---
 You write the FAILING test that defines "this gate is correct", from the gate spec + ADR + the
