@@ -1,8 +1,12 @@
-"""Unit tests for ``resolution.silver`` — canonical-anchor SILVER labels (ADR 0079).
+"""Unit tests for ``resolution.silver`` — canonical-anchor SILVER labels (ADR 0079, ADR 0085).
 
 Covers:
 * Example pairs (positive, negative, abstain, contradiction, same-source) — deterministic
   fixtures that document the rules and serve as fast regression guards.
+* Jurisdiction-scoped anchor tier (ADR 0085 Finding 1): ``registrationNumber`` requires
+  jurisdiction/country corroboration for both positive and negative signals.
+* Contradiction-order fix (ADR 0085 Finding 2): has_shared + has_conflict → DROP regardless
+  of source; same-source contradictions must never be emitted as ``non_match``.
 * Idempotent-persist — re-persisting the same silver pairs on the same ``er_gold_pair`` rows
   is a no-op (``ON CONFLICT DO NOTHING``).
 * Human-row-precedence — an existing human/gold row on the same ``(left_id, right_id)`` is
@@ -26,6 +30,8 @@ from worldmonitor.provenance.model import Provenance, stamp
 from worldmonitor.resolution.gold import GoldPair
 from worldmonitor.resolution.silver import (
     ANCHOR_PROPERTIES,
+    GLOBALLY_UNIQUE,
+    JURISDICTION_SCOPED,
     SILVER_SOURCE,
     build_silver_pairs,
     persist_silver_pairs,
@@ -95,8 +101,25 @@ def test_anchor_properties_includes_expected_ids() -> None:
     )
 
 
+def test_anchor_tier_constants_are_consistent() -> None:
+    """ADR 0085: GLOBALLY_UNIQUE + JURISDICTION_SCOPED == ANCHOR_PROPERTIES (union = full set)."""
+    assert set(GLOBALLY_UNIQUE) | set(JURISDICTION_SCOPED) == set(ANCHOR_PROPERTIES), (
+        "ANCHOR_PROPERTIES must equal the union of GLOBALLY_UNIQUE and JURISDICTION_SCOPED"
+    )
+    # No overlap between tiers
+    assert not (set(GLOBALLY_UNIQUE) & set(JURISDICTION_SCOPED)), (
+        "An anchor must not appear in both GLOBALLY_UNIQUE and JURISDICTION_SCOPED"
+    )
+    # registrationNumber is jurisdiction-scoped (key ADR 0085 classification)
+    assert "registrationNumber" in JURISDICTION_SCOPED
+    assert "registrationNumber" not in GLOBALLY_UNIQUE
+    # BIC/LEI/ISIN/QID are globally unique
+    for gid in ("wikidataId", "leiCode", "isin", "swiftBic"):
+        assert gid in GLOBALLY_UNIQUE, f"{gid!r} must be in GLOBALLY_UNIQUE"
+
+
 # ---------------------------------------------------------------------------
-# Example: POSITIVE (shared anchor, distinct sources)
+# Example: POSITIVE — globally-unique anchors (shared, distinct sources)
 # ---------------------------------------------------------------------------
 
 
@@ -112,12 +135,59 @@ def test_example_positive_shared_lei_distinct_sources() -> None:
     assert pairs[0].left_id <= pairs[0].right_id
 
 
-def test_example_positive_shared_registration_number() -> None:
-    """Two companies from distinct sources sharing a registrationNumber → match."""
+# ---------------------------------------------------------------------------
+# Example: POSITIVE — jurisdiction-scoped (registrationNumber + jurisdiction)
+# ---------------------------------------------------------------------------
+
+
+def test_example_positive_shared_registration_number_with_jurisdiction() -> None:
+    """Two companies from distinct sources sharing a registrationNumber AND the same jurisdiction
+    → label="match" (ADR 0085: jurisdiction corroborates the shared value).
+    """
+    a = _entity("e1", "src-A", registrationNumber=["GB123456"], jurisdiction=["gb"])
+    b = _entity("e2", "src-B", registrationNumber=["GB123456"], jurisdiction=["gb"])
+    pairs = build_silver_pairs([a, b])
+    assert any(p.label == "match" for p in pairs), (
+        f"shared regNo + same jurisdiction + distinct sources must produce match; got {pairs}"
+    )
+
+
+def test_example_positive_shared_registration_number_absent_jurisdiction_abstains() -> None:
+    """Two companies sharing a registrationNumber but with NO jurisdiction set → abstain.
+
+    ADR 0085 Finding 1: a shared registrationNumber without jurisdiction corroboration is NOT
+    a positive signal (the same number can legitimately exist in two different countries).
+    """
     a = _entity("e1", "src-A", registrationNumber=["GB123456"])
     b = _entity("e2", "src-B", registrationNumber=["GB123456"])
     pairs = build_silver_pairs([a, b])
-    assert any(p.label == "match" for p in pairs)
+    assert not any(p.label == "match" for p in pairs), (
+        f"shared regNo with absent jurisdiction must NOT produce match; got {pairs}"
+    )
+
+
+def test_example_positive_shared_registration_number_different_jurisdiction_abstains() -> None:
+    """Two companies sharing a registrationNumber but with DIFFERENT jurisdictions → abstain.
+
+    The same number string can appear in two different national registers; without a shared
+    jurisdiction, the value is not a cross-source positive signal.
+    """
+    a = _entity("e1", "src-A", registrationNumber=["12345"], jurisdiction=["gb"])
+    b = _entity("e2", "src-B", registrationNumber=["12345"], jurisdiction=["de"])
+    pairs = build_silver_pairs([a, b])
+    assert not any(p.label == "match" for p in pairs), (
+        f"shared regNo with different jurisdictions must NOT produce match; got {pairs}"
+    )
+
+
+def test_example_positive_shared_registration_number_country_corroboration() -> None:
+    """Jurisdiction corroboration via ``country`` (not just ``jurisdiction``) also suffices."""
+    a = _entity("e1", "src-A", registrationNumber=["US-67890"], country=["us"])
+    b = _entity("e2", "src-B", registrationNumber=["US-67890"], country=["us"])
+    pairs = build_silver_pairs([a, b])
+    assert any(p.label == "match" for p in pairs), (
+        f"shared regNo + same country + distinct sources must produce match; got {pairs}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -149,12 +219,54 @@ def test_example_negative_conflicting_lei() -> None:
     assert pairs[0].clerical_score is None
 
 
-def test_example_negative_same_source_conflicting_anchor() -> None:
-    """Conflict is source-INDEPENDENT: same source, different registrationNumber → non_match."""
+def test_example_negative_conflicting_registration_number_same_jurisdiction() -> None:
+    """Two companies with DIFFERENT registrationNumbers in the SAME jurisdiction → non_match.
+
+    ADR 0085: when jurisdiction corroborates (same register), a conflicting regNo is a definitive
+    negative — two real entities in the same register cannot share a registration number.
+    """
+    a = _entity("e1", "src-A", registrationNumber=["REG-111"], jurisdiction=["gb"])
+    b = _entity("e2", "src-B", registrationNumber=["REG-222"], jurisdiction=["gb"])
+    pairs = build_silver_pairs([a, b])
+    assert any(p.label == "non_match" for p in pairs), (
+        f"conflicting regNo + same jurisdiction must produce non_match; got {pairs}"
+    )
+
+
+def test_example_negative_conflicting_registration_number_absent_jurisdiction_abstains() -> None:
+    """Two companies with DIFFERENT registrationNumbers but NO jurisdiction set → abstain.
+
+    ADR 0085 Finding 1: without jurisdiction corroboration, a conflicting registrationNumber
+    is NOT a negative signal — the numbers may belong to different registers entirely.
+    """
     a = _entity("e1", "src-A", registrationNumber=["REG-111"])
     b = _entity("e2", "src-A", registrationNumber=["REG-222"])
     pairs = build_silver_pairs([a, b])
-    assert any(p.label == "non_match" for p in pairs)
+    assert not any(p.label == "non_match" for p in pairs), (
+        f"conflicting regNo with absent jurisdiction must NOT produce non_match; got {pairs}"
+    )
+
+
+def test_example_negative_conflicting_registration_number_different_jurisdiction_abstains() -> None:
+    """Conflicting registrationNumbers across DIFFERENT jurisdictions → abstain (not non_match)."""
+    a = _entity("e1", "src-A", registrationNumber=["REG-111"], jurisdiction=["gb"])
+    b = _entity("e2", "src-B", registrationNumber=["REG-222"], jurisdiction=["de"])
+    pairs = build_silver_pairs([a, b])
+    assert not any(p.label == "non_match" for p in pairs), (
+        f"conflicting regNo with different jurisdictions must NOT produce non_match; got {pairs}"
+    )
+
+
+def test_example_negative_same_source_conflicting_globally_unique_anchor() -> None:
+    """Conflict is source-INDEPENDENT for globally-unique anchors: same source, different leiCode
+    → non_match.
+    """
+    a = _entity("e1", "src-A", leiCode=["LEI-AAAA"])
+    b = _entity("e2", "src-A", leiCode=["LEI-BBBB"])
+    pairs = build_silver_pairs([a, b])
+    assert any(p.label == "non_match" for p in pairs), (
+        f"conflicting globally-unique anchor same-source must produce non_match; got {pairs}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -183,15 +295,94 @@ def test_example_abstain_non_overlapping_anchor_types() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_example_contradiction_dropped() -> None:
-    """Pair shares leiCode (positive) AND has conflicting registrationNumber (negative) →
-    dropped.
+def test_example_contradiction_dropped_globally_unique() -> None:
+    """Pair shares leiCode (globally-unique positive) AND has conflicting ogrnCode (globally-unique
+    negative) → dropped as contradiction (ADR 0085 §Decision 3).
+
+    Both anchor properties are globally-unique; the contradiction is definitive regardless of
+    source or jurisdiction.
+    """
+    a = _entity("e1", "src-A", leiCode=["LEI-SAME"], ogrnCode=["OGRN-111"])
+    b = _entity("e2", "src-B", leiCode=["LEI-SAME"], ogrnCode=["OGRN-222"])
+    pairs = build_silver_pairs([a, b])
+    assert pairs == [], f"contradiction pair must be dropped, got {pairs}"
+
+
+def test_example_no_contradiction_regnum_absent_jurisdiction() -> None:
+    """leiCode shared (globally-unique positive) + registrationNumber conflicting (jurisdiction-
+    scoped, NO jurisdiction) → NOT a contradiction → emits ``"match"`` on leiCode alone.
+
+    ADR 0085 Finding 1: a registrationNumber conflict without jurisdiction corroboration is not
+    a negative signal.  The pair is therefore NOT contradictory and correctly emits 'match'.
+    This test documents the **behavioural difference** from the pre-ADR 0085 code, which
+    incorrectly treated registrationNumber as globally-unique and would have dropped this pair.
     """
     a = _entity("e1", "src-A", leiCode=["LEI-SAME"], registrationNumber=["REG-111"])
     b = _entity("e2", "src-B", leiCode=["LEI-SAME"], registrationNumber=["REG-222"])
     pairs = build_silver_pairs([a, b])
-    # The contradiction (pos on leiCode, neg on registrationNumber) drops the pair entirely.
-    assert pairs == [], f"contradiction pair must be dropped, got {pairs}"
+    assert len(pairs) == 1, f"expected 1 match pair (not dropped), got {pairs}"
+    assert pairs[0].label == "match"
+
+
+def test_example_contradiction_dropped_regnum_with_jurisdiction() -> None:
+    """leiCode shared (globally-unique positive) + registrationNumber conflicting WITH same
+    jurisdiction → contradiction → dropped.
+
+    When jurisdiction corroborates, the registrationNumber conflict is a valid negative signal,
+    so the pair becomes pos+neg → dropped.
+    """
+    a = _entity(
+        "e1", "src-A", leiCode=["LEI-SAME"], registrationNumber=["REG-111"], jurisdiction=["gb"]
+    )
+    b = _entity(
+        "e2", "src-B", leiCode=["LEI-SAME"], registrationNumber=["REG-222"], jurisdiction=["gb"]
+    )
+    pairs = build_silver_pairs([a, b])
+    assert pairs == [], (
+        "contradiction pair (leiCode shared + regNo conflict + same jurisdiction) "
+        f"must be dropped, got {pairs}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding 2 — same-source contradiction must be DROPPED (not non_match)
+# ---------------------------------------------------------------------------
+
+
+def test_finding2_same_source_contradiction_dropped() -> None:
+    """ADR 0085 Finding 2 regression: same-source pair with a shared globally-unique anchor AND
+    a conflicting globally-unique anchor must be DROPPED — NOT emitted as ``non_match``.
+
+    **Old-code bug (pre-ADR 0085):** same-source pair → is_positive=False (no distinct-source
+    match) + is_negative=True (conflict) → incorrectly emitted as ``non_match``.  The new
+    classification evaluates ``has_shared`` independently of source, so
+    ``has_shared=True AND has_conflict=True`` → DROP (contradiction) regardless of source.
+    """
+    # Same source, so old code would: no positive (same src) → is_negative=True → non_match.
+    a = _entity("e1", "src-A", leiCode=["LEI-SAME"], ogrnCode=["OGRN-111"])
+    b = _entity("e2", "src-A", leiCode=["LEI-SAME"], ogrnCode=["OGRN-222"])
+    pairs = build_silver_pairs([a, b])
+    assert pairs == [], f"same-source contradiction must be dropped, got {pairs}"
+    assert not any(p.label == "non_match" for p in pairs), "must NOT emit non_match"
+    assert not any(p.label == "match" for p in pairs), "must NOT emit match"
+
+
+def test_finding2_same_source_clean_positive_abstains_not_non_match() -> None:
+    """A same-source pair with a shared globally-unique anchor and NO conflict → ABSTAIN (not
+    non_match and not match).
+
+    This is the plain same-source rule (no contradiction); the distinct-source gate only
+    downgrades a positive to abstain — it must NEVER produce non_match.
+    """
+    a = _entity("e1", "src-A", leiCode=["LEI-SAME"])
+    b = _entity("e2", "src-A", leiCode=["LEI-SAME"])
+    pairs = build_silver_pairs([a, b])
+    assert not any(p.label == "non_match" for p in pairs), (
+        "same-source clean positive must not produce non_match"
+    )
+    assert not any(p.label == "match" for p in pairs), (
+        "same-source clean positive must not produce match"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -230,11 +421,16 @@ def test_no_duplicate_pairs_in_output() -> None:
 
 
 def test_all_emitted_pairs_carry_silver_source_and_null_score() -> None:
-    """All emitted pairs must have source=SILVER_SOURCE and clerical_score=None (N3)."""
-    a = _entity("e1", "src-A", registrationNumber=["REG-001"])
-    b = _entity("e2", "src-B", registrationNumber=["REG-001"])
-    c = _entity("e3", "src-A", registrationNumber=["REG-002"])
+    """All emitted pairs must have source=SILVER_SOURCE and clerical_score=None (N3).
+
+    Uses a globally-unique anchor (leiCode) to guarantee pairs ARE actually emitted —
+    registrationNumber without jurisdiction would abstain under ADR 0085 rules.
+    """
+    a = _entity("e1", "src-A", leiCode=["LEI-001"])
+    b = _entity("e2", "src-B", leiCode=["LEI-001"])
+    c = _entity("e3", "src-A", leiCode=["LEI-002"])
     pairs = build_silver_pairs([a, b, c])
+    assert pairs, "expected at least one emitted pair (leiCode is globally-unique)"
     for pair in pairs:
         assert pair.source == SILVER_SOURCE, f"wrong source: {pair.source!r}"
         assert pair.clerical_score is None, f"non-None clerical_score: {pair.clerical_score}"

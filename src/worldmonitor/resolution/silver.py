@@ -24,6 +24,18 @@ that owes nothing to any model output:
   never emitted as either** — the data contradicts itself, so a measurement label would be a
   guess. Concretely: ``match = Pos \\ Neg``, ``non_match = Neg \\ Pos``, ``Pos ∩ Neg`` dropped.
 
+**Anchor tiering (ADR 0085):** the anchor set is split into two tiers:
+
+* :data:`GLOBALLY_UNIQUE` — a shared value alone is a definitive cross-source positive (BIC, LEI,
+  ISIN, QID, and the nationally-unique-but-globally-distinct Russian id schemes OGRN/INN/OKPO).
+* :data:`JURISDICTION_SCOPED` — a shared value is **only** a positive when the two entities'
+  ``jurisdiction``/``country`` FtM properties corroborate (both non-empty and share a value).
+  Currently contains ``registrationNumber``, which is unique only within a register/jurisdiction —
+  two entities in different countries can legitimately share the same number.
+
+:data:`ANCHOR_PROPERTIES` is kept as the union of both tiers so that the benchmark's
+``identity_keys`` import (ADR 0080) sees the full set unchanged.
+
 The three non-circularity invariants (ADR 0079 §"The non-circularity invariant"):
 
 * **N1** — ``build_silver_pairs`` accepts *only* FtM entities (no score / probability /
@@ -47,7 +59,7 @@ from worldmonitor.provenance.model import get_provenance
 from worldmonitor.resolution.gold import GoldPair, persist_gold_pairs
 
 # ---------------------------------------------------------------------------
-# Public constants (ADR 0079 — reversible defaults with revisit triggers)
+# Public constants (ADR 0079 + ADR 0085)
 # ---------------------------------------------------------------------------
 
 SILVER_SOURCE: str = "canonical_silver"
@@ -57,34 +69,68 @@ Distinguishable from human gold (``"uncertainty"`` / ``"os_pairs"``) so the eval
 and future promotion logic can select or exclude the silver partition explicitly.
 """
 
-ANCHOR_PROPERTIES: tuple[str, ...] = (
+GLOBALLY_UNIQUE: tuple[str, ...] = (
     "wikidataId",
     "leiCode",
-    "registrationNumber",
+    "isin",
+    "permId",
+    "swiftBic",
     "ogrnCode",
     "innCode",
-    "swiftBic",
-    "isin",
     "okpoCode",
-    "permId",
 )
-"""Canonical-ID property set used for the positive + negative anchor rules (ADR 0079 §Decision 1).
+"""Globally-administered canonical IDs — a shared value alone is a definitive cross-source signal.
 
-All nine are confirmed FtM ``identifier``-typed properties in this repo's FtM 4.x model.
+Rationale for each (ADR 0085 §Decision 1):
 
-**Reversible default** — revisit triggers (ADR 0079 §Reversibility):
+* ``wikidataId`` (QID), ``leiCode``, ``isin``, ``swiftBic`` — globally administered unique
+  identifier registries; no two real-world entities in distinct registers can share a value.
+* ``ogrnCode``, ``innCode``, ``okpoCode`` — Russian Federation identifier schemes (OGRN 13 digits,
+  INN 10/12 digits, OKPO 8/10 digits). Each number is unique within the scheme and the schemes
+  are nationally administered; no entity outside the Russian registry can carry a valid value, so
+  the codes are *globally distinct* even though they are nationally issued.
+* ``permId`` — Refinitiv/LSEG Permanent Identifier, globally unique across financial instruments.
+
+**Reversible default (ADR 0085):** revisit if a false-positive ``match`` is observed for any of
+these (drop the offender from this tuple); or add further globally-unique types as needed.
+"""
+
+JURISDICTION_SCOPED: tuple[str, ...] = ("registrationNumber",)
+"""Canonical IDs that are unique ONLY within their jurisdiction/register (ADR 0085 §Decision 2).
+
+A company registration number such as ``123456`` may be legitimately assigned to two entirely
+different entities registered in two different countries.  A shared value is therefore a
+**positive signal ONLY when the two entities' FtM** ``jurisdiction`` **and/or** ``country``
+**properties corroborate** — both non-empty and sharing at least one value (case-folded).
+Absent or disjoint jurisdiction/country → the shared value **abstains** (no positive emitted).
+
+Symmetrically, a *conflicting* ``registrationNumber`` (both non-empty, disjoint values) is a
+**negative signal ONLY when jurisdiction corroborates** (same register, different number ⇒
+different entity).  Across different or absent jurisdictions the conflict does not carry signal.
+
+**Reversible default (ADR 0085):** extend this tuple if further register-scoped ids are added;
+collapse into :data:`GLOBALLY_UNIQUE` only if a new id type is confirmed globally unique.
+"""
+
+ANCHOR_PROPERTIES: tuple[str, ...] = GLOBALLY_UNIQUE + JURISDICTION_SCOPED
+"""Union of both anchor tiers — the full set used by ADR 0079 and referenced by ADR 0080's
+``benchmark.identity_keys``.  Kept as a union so external importers still see all nine ids.
+
+**Reversible default** — revisit triggers (ADR 0079 §Reversibility, ADR 0085 §Reversibility):
 
 1. Slice 4's label-sufficiency report shows recall too thin → widen the set.
 2. Cross-source format drift causes missed matches → add ``registry.identifier.clean`` pass.
-3. A false-positive ``match`` observed for any anchor type → drop it from the set.
-4. Any promotion step → a new ADR is required (human-sign-off-gated; this ADR does not
-   authorise it).
+3. A false-positive ``match`` observed for any anchor type → drop it (or move to
+   :data:`JURISDICTION_SCOPED`).
+4. Any promotion step → a new ADR is required (human-sign-off-gated).
 """
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+_JURISDICTION_PROPS: tuple[str, ...] = ("jurisdiction", "country")
+"""FtM property names read for jurisdiction corroboration (ADR 0085 §Decision 2)."""
 
 
 def _canonical(left: str, right: str) -> tuple[str, str]:
@@ -103,6 +149,30 @@ def _anchor_values(entity: FtmEntity, prop: str) -> frozenset[str]:
     return frozenset(str(v) for v in entity.get(prop, quiet=True) if str(v))
 
 
+def _jurisdiction_values(entity: FtmEntity) -> frozenset[str]:
+    """Non-empty, case-folded union of ``jurisdiction`` and ``country`` values for *entity*.
+
+    Case-folded (lowercased) so that ``'GB'`` and ``'gb'`` are treated as the same value —
+    FtM does not always normalise country codes on ``make_entity``.
+    """
+    vals: set[str] = set()
+    for prop in _JURISDICTION_PROPS:
+        for v in entity.get(prop, quiet=True):
+            s = str(v).strip().lower()
+            if s:
+                vals.add(s)
+    return frozenset(vals)
+
+
+def _jurisdictions_corroborate(a_jur: frozenset[str], b_jur: frozenset[str]) -> bool:
+    """Return ``True`` iff both sides have at least one jurisdiction/country value AND they share
+    at least one (case-folded) value — i.e. the two records are plausibly in the same register.
+
+    Empty on either side (jurisdiction unknown) → ``False`` (no corroboration, abstain).
+    """
+    return bool(a_jur) and bool(b_jur) and bool(a_jur & b_jur)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -111,15 +181,30 @@ def _anchor_values(entity: FtmEntity, prop: str) -> frozenset[str]:
 def build_silver_pairs(entities: Sequence[FtmEntity]) -> list[GoldPair]:
     """Derive canonical-anchor silver label pairs from a collection of FtM entities.
 
-    Implements the POSITIVE + NEGATIVE + CONTRADICTION + ABSTAIN rules from ADR 0079:
+    Implements the POSITIVE + NEGATIVE + CONTRADICTION + ABSTAIN rules from ADR 0079 and the
+    anchor-tiering + contradiction-order fix from ADR 0085:
 
-    * **POSITIVE**: a pair ``(a, b)`` with distinct ids where some anchor property ``P`` has a
-      shared non-empty value **and** ``get_provenance(a).source_id != get_provenance(b).source_id``
-      (≥2 distinct sources — the cross-list signal).
-    * **NEGATIVE**: a pair ``(a, b)`` where some anchor property ``P`` has both values non-empty
-      and **disjoint** (conflicting authoritative ids of the same type).
-    * **CONTRADICTION** (positive on ``P`` *and* negative on ``Q``): dropped — never emitted.
-    * **ABSTAIN** (neither positive nor negative): no label.
+    **Tier rules (ADR 0085):**
+
+    * :data:`GLOBALLY_UNIQUE` anchors: a shared value is **positive-eligible**; conflicting
+      values (both non-empty, disjoint) are **negative-eligible** — regardless of source or
+      jurisdiction.
+    * :data:`JURISDICTION_SCOPED` anchors (``registrationNumber``): the same value is
+      positive-eligible **only if** ``jurisdiction``/``country`` corroborates (both sides
+      non-empty and sharing a value); similarly, a conflict is negative-eligible only when
+      jurisdiction corroborates.  Absent or disjoint jurisdiction → abstain for this anchor.
+
+    **Classification order (ADR 0085 Finding 2 — contradiction before source check):**
+
+    1. ``has_shared`` — any positive-eligible signal active (per tier rules above).
+    2. ``has_conflict`` — any negative-eligible signal active (per tier rules above).
+    3. ``has_shared AND has_conflict`` → **DROP** (contradiction) — never emit either label,
+       regardless of source.
+    4. ``has_shared AND distinct sources`` → ``"match"``.
+    5. ``has_shared AND same source`` → **ABSTAIN** (the distinct-source gate *downgrades* a
+       clean positive to abstain; it must **NEVER** convert it to ``"non_match"``).
+    6. ``has_conflict`` (only) → ``"non_match"`` (source-independent, per ADR 0079 §Decision 4).
+    7. Otherwise → **ABSTAIN**.
 
     Returns:
         A canonically ordered (``left_id <= right_id``), de-duplicated ``list[GoldPair]``,
@@ -136,13 +221,16 @@ def build_silver_pairs(entities: Sequence[FtmEntity]) -> list[GoldPair]:
     if n < 2:
         return []
 
-    # Pre-compute anchor values and source_ids once per entity (O(n) cache, O(n²) pair loop).
+    # Pre-compute anchor values, jurisdiction values, and source_ids once per entity
+    # (O(n) cache, O(n²) pair loop).
     anchor_cache: dict[str, dict[str, frozenset[str]]] = {}
+    jurisdiction_cache: dict[str, frozenset[str]] = {}
     source_cache: dict[str, str | None] = {}
     for e in records:
         eid = e.id
         assert eid is not None  # guarded above
         anchor_cache[eid] = {prop: _anchor_values(e, prop) for prop in ANCHOR_PROPERTIES}
+        jurisdiction_cache[eid] = _jurisdiction_values(e)
         prov = get_provenance(e)
         source_cache[eid] = prov.source_id if prov is not None else None
 
@@ -162,42 +250,59 @@ def build_silver_pairs(entities: Sequence[FtmEntity]) -> list[GoldPair]:
 
             a_anchors = anchor_cache[a_id]
             b_anchors = anchor_cache[b_id]
+            a_jur = jurisdiction_cache[a_id]
+            b_jur = jurisdiction_cache[b_id]
             a_src = source_cache[a_id]
             b_src = source_cache[b_id]
 
-            is_positive = False
-            is_negative = False
+            # Step 1: compute has_shared + has_conflict INDEPENDENTLY of the source check
+            # (ADR 0085 Finding 2 — contradiction detection must precede the source gate).
+            has_shared = False
+            has_conflict = False
 
-            for prop in ANCHOR_PROPERTIES:
+            # Globally-unique tier: a shared value alone is definitive; a conflict is definitive.
+            for prop in GLOBALLY_UNIQUE:
                 av = a_anchors[prop]
                 bv = b_anchors[prop]
                 if not av or not bv:
                     continue  # at least one side empty — no signal for this anchor type
-
-                shared = av & bv
-                if shared:
-                    # Shared value: positive iff the two records come from distinct sources.
-                    if a_src is not None and b_src is not None and a_src != b_src:
-                        is_positive = True
-                    # (Same source: no label; within-source duplicates are excluded.)
+                if av & bv:
+                    has_shared = True
                 else:
-                    # Both non-empty and disjoint: conflicting authoritative ids → negative
-                    # (source-independent per ADR 0079 §Decision 4).
-                    is_negative = True
+                    has_conflict = True
 
-            if is_positive and is_negative:
+            # Jurisdiction-scoped tier: signal only when jurisdiction/country corroborates.
+            if _jurisdictions_corroborate(a_jur, b_jur):
+                for prop in JURISDICTION_SCOPED:
+                    av = a_anchors[prop]
+                    bv = b_anchors[prop]
+                    if not av or not bv:
+                        continue
+                    if av & bv:
+                        has_shared = True
+                    else:
+                        has_conflict = True
+            # else: jurisdiction absent or disjoint → all jurisdiction-scoped anchors abstain
+
+            # Step 2: classify (contradiction checked BEFORE the source gate — ADR 0085).
+            if has_shared and has_conflict:
                 # Contradiction: drop entirely — never emit as either label.
                 continue
-            elif is_positive:
-                left, right = key
-                by_pair[key] = GoldPair(
-                    left_id=left,
-                    right_id=right,
-                    label="match",
-                    source=SILVER_SOURCE,
-                    clerical_score=None,
-                )
-            elif is_negative:
+            elif has_shared:
+                # Positive signal present: match iff distinct sources; abstain if same source.
+                # NEVER emit non_match for a same-source clean positive (ADR 0085 Finding 2).
+                if a_src is not None and b_src is not None and a_src != b_src:
+                    left, right = key
+                    by_pair[key] = GoldPair(
+                        left_id=left,
+                        right_id=right,
+                        label="match",
+                        source=SILVER_SOURCE,
+                        clerical_score=None,
+                    )
+                # else: same source → abstain (no label emitted)
+            elif has_conflict:
+                # Negative signal only — source-independent (ADR 0079 §Decision 4).
                 left, right = key
                 by_pair[key] = GoldPair(
                     left_id=left,
