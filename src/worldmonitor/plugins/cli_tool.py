@@ -66,6 +66,12 @@ class CliToolConnector(Connector):
         """Store the injectable runner seam; defaults to the real :func:`run_command`."""
         self._runner: Runner = runner or run_command
 
+    def use_runner(self, runner: Runner) -> None:
+        """Replace the execution runner (the public seam ``operator_run`` uses to route a
+        container-level tool through the sandbox-runner sidecar, ADR 0077 §D3). Keeps the swap an
+        explicit, typed operation rather than reaching into the private attribute."""
+        self._runner = runner
+
     def collect(self, config: Mapping[str, Any]) -> Iterator[RawRecord]:
         """Validate the scope target, enforce the allowlist, build an argv LIST, run it, and yield
         the captured stdout.
