@@ -170,6 +170,10 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      # Pin the SLIM runtime stage: the Dockerfile's LAST stage is `sandbox-runner` (carries the
+      # nmap/dig/whois binaries), so a no-`target` build would default to it — keep the app/init
+      # images tool-free (ADR 0077; tools live ONLY in the isolated sandbox-runner service).
+      target: runtime
     image: worldmonitor-app:dev
     restart: "no"
     depends_on:
@@ -191,6 +195,10 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      # Pin the SLIM runtime stage: the Dockerfile's LAST stage is `sandbox-runner` (carries the
+      # nmap/dig/whois binaries), so a no-`target` build would default to it — keep the app/init
+      # images tool-free (ADR 0077; tools live ONLY in the isolated sandbox-runner service).
+      target: runtime
     image: worldmonitor-app:dev
     restart: "no"
     depends_on:
@@ -212,6 +220,10 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      # Pin the SLIM runtime stage: the Dockerfile's LAST stage is `sandbox-runner` (carries the
+      # nmap/dig/whois binaries), so a no-`target` build would default to it — keep the app/init
+      # images tool-free (ADR 0077; tools live ONLY in the isolated sandbox-runner service).
+      target: runtime
     image: worldmonitor-app:dev
     restart: unless-stopped
     # Bound the API container's memory so a runaway request can't take the host with it.
@@ -249,6 +261,16 @@ services:
       LANDING_BUCKET: ${LANDING_BUCKET:-landing}
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
       READINESS_PROBE_TIMEOUT_SECONDS: ${READINESS_PROBE_TIMEOUT_SECONDS:-5}
+      # Heavy ACTIVE CLI tools (e.g. nmap) are delegated to the in-network sandbox-runner sidecar
+      # (ADR 0077). Reached by SERVICE HOSTNAME on the shared `sandbox_net` (in-network only).
+      # CONTAINER_SANDBOX_ENABLED stays DEFAULT-OFF — the operator opts in once the sidecar is up.
+      SANDBOX_RUNNER_URL: http://sandbox-runner:9101
+      SANDBOX_RUNNER_SECRET: ${SANDBOX_RUNNER_SECRET}
+    # On BOTH networks: `default` for store reachability, `sandbox_net` to POST to the sidecar.
+    # (Declaring `networks:` removes the implicit `default`, so it MUST be listed explicitly.)
+    networks:
+      - default
+      - sandbox_net
     volumes:
       # READ-ONLY view of the driver's last-tick heartbeat so /ready can surface a truthful,
       # NON-FATAL driver freshness field (ADR 0059). The api is a READER only (:ro).
@@ -274,6 +296,10 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      # Pin the SLIM runtime stage: the Dockerfile's LAST stage is `sandbox-runner` (carries the
+      # nmap/dig/whois binaries), so a no-`target` build would default to it — keep the app/init
+      # images tool-free (ADR 0077; tools live ONLY in the isolated sandbox-runner service).
+      target: runtime
     image: worldmonitor-app:dev
     # restart: unless-stopped covers OOM-kill / crash / reboot (the core B-4 fix); plain Compose
     # does NOT auto-restart on *unhealthy* — the HEALTHCHECK makes a STALL observable (ps ->
@@ -317,6 +343,14 @@ services:
       # in-network only by default (no host publish below) — a scraper on the compose network hits
       # driver:9108. 0 disables it. The Prometheus server + alert rules stay external/ops (ADR 0054).
       DRIVER_METRICS_PORT: ${DRIVER_METRICS_PORT:-9108}
+      # Sandbox-runner sidecar wiring (ADR 0077) — symmetric with the api. The cadence driver still
+      # REFUSES all ACTIVE connectors (ADR 0071); this wiring is only used by the operator-run path.
+      SANDBOX_RUNNER_URL: http://sandbox-runner:9101
+      SANDBOX_RUNNER_SECRET: ${SANDBOX_RUNNER_SECRET}
+    # On BOTH networks: `default` for store reachability, `sandbox_net` to reach the sidecar.
+    networks:
+      - default
+      - sandbox_net
     # Uncomment to expose /metrics on the host (e.g. for a local Prometheus / curl) — loopback-only:
     # ports:
     #   - "127.0.0.1:9108:9108"
@@ -334,6 +368,50 @@ services:
       retries: 3
       start_period: 60s
 
+  # --- Sandbox-runner sidecar (ADR 0077) — constrained execution of heavy ACTIVE CLI tools ---
+  # The ONLY service carrying the nmap/dnsutils/whois binaries (its dedicated Dockerfile stage), and
+  # the ONLY one off the stores' `default` network: it sits on `sandbox_net` ALONE, so by topology it
+  # CANNOT reach postgres/neo4j/minio/redis/zitadel — the data-sovereignty / constrained-egress goal
+  # (ADR 0077 §D4 refinement: Docker network isolation, no nftables/CAP_NET_ADMIN in v1). Non-root,
+  # read-only rootfs + a tmpfs for scratch, bounded mem/pids/cpus/ulimits, and NO host port (the app
+  # reaches it in-network at http://sandbox-runner:9101). The cadence driver never auto-runs ACTIVE
+  # connectors (ADR 0071); this is operator-run-only, and CONTAINER_SANDBOX_ENABLED stays default-off.
+  sandbox-runner:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: sandbox-runner
+    image: worldmonitor-sandbox:dev
+    restart: unless-stopped
+    networks:
+      - sandbox_net
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: ${WM_SANDBOX_MEM_LIMIT:-512m}
+    pids_limit: 256
+    cpus: ${WM_SANDBOX_CPUS:-1.0}
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 2048
+    cap_drop:
+      - ALL
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      SANDBOX_RUNNER_SECRET: ${SANDBOX_RUNNER_SECRET}
+    healthcheck:
+      # In-network liveness probe of GET /health — stdlib urllib (the image has no curl).
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen("http://localhost:9101/health",timeout=3).status==200 else 1)
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
 volumes:
   postgres-data:
   neo4j-data:
@@ -344,3 +422,12 @@ volumes:
   # Shared driver last-tick heartbeat: written by `driver` (rw), read by `api` (ro) so /ready
   # can report a NON-FATAL driver-freshness field across containers (ADR 0059).
   driver-heartbeat:
+
+networks:
+  # The stores (postgres/neo4j/minio/redis/zitadel) + the app sit on `default`; the sandbox-runner
+  # is deliberately OFF it (egress isolation, ADR 0077). Declared explicitly so api/driver can name
+  # both networks (declaring `networks:` on a service drops the implicit default membership).
+  default: {}
+  # The sandbox-runner's ONLY network — api/driver also join it to POST to the sidecar; no store does,
+  # so the sidecar cannot reach our internal stores (the data-sovereignty / constrained-egress goal).
+  sandbox_net: {}

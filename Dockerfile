@@ -75,3 +75,34 @@ EXPOSE 8000
 
 # Default to the API; compose overrides `command` for the driver service.
 CMD ["uvicorn", "worldmonitor.api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+
+# ----------------------------------------------------------------------------- #
+# Sandbox-runner — the in-network sidecar that executes heavy ACTIVE CLI tools
+# (ADR 0077 Slice 2). A DEDICATED build target so the scan/lookup tool binaries
+# land ONLY in this stage — the api/driver `runtime` image stays slim + apt-free
+# (INV-3). Egress is constrained by Docker NETWORK ISOLATION in compose (the
+# sidecar sits off the stores' network), not by an in-image entrypoint; it stays
+# NON-ROOT like the rest of the stack (no CAP_NET_ADMIN, no privilege-drop
+# entrypoint — ADR 0077 §D4 refinement). The argv allowlist in runner_service
+# re-validates every call (default-deny per-tool middle tokens + a host/IP target).
+# ----------------------------------------------------------------------------- #
+FROM runtime AS sandbox-runner
+
+# Install the tool binaries — nmap (scan), dnsutils (dig), whois (lookup). This stage MAY use apt: it
+# is a separate build target, so the default runtime/api/driver image is unaffected. Mirror the
+# builder stage's apt-hardening flags (Acquire::Retries + disabled HTTP pipelining) against flaky
+# mirrors, --no-install-recommends to stay lean, and drop the lists afterwards. Switch to root for
+# the install, then back to the non-root worldmonitor user for the CMD.
+USER root
+RUN apt-get -o Acquire::Retries=8 -o Acquire::http::Pipeline-Depth=0 update \
+    && apt-get -o Acquire::Retries=8 -o Acquire::http::Pipeline-Depth=0 \
+        install -y --no-install-recommends \
+        nmap dnsutils whois \
+    && rm -rf /var/lib/apt/lists/*
+
+USER worldmonitor
+
+EXPOSE 9101
+
+# The sidecar ASGI app: GET /health + POST /run (constant-time secret + the per-tool argv allowlist).
+CMD ["uvicorn", "worldmonitor.sandbox.runner_service:create_sandbox_app", "--factory", "--host", "0.0.0.0", "--port", "9101"]

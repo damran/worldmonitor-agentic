@@ -52,8 +52,10 @@ jobs:
       - name: Validate compose interpolation
         run: docker compose --env-file .env -f deploy/compose.yaml config >/dev/null
 
-      - name: Build the WorldMonitor app image (api + driver share one image)
-        run: docker compose --env-file .env -f deploy/compose.yaml build api driver
+      - name: Build the WorldMonitor images (api/driver = slim runtime stage; sandbox-runner = tool stage)
+        # Building sandbox-runner here PROVES the dedicated `target: sandbox-runner` stage builds
+        # (nmap/dig/whois apt-install) AND that api/driver pin `target: runtime` (stay tool-free).
+        run: docker compose --env-file .env -f deploy/compose.yaml build api driver sandbox-runner
 
       - name: Boot core services + wait for healthchecks (Neo4j must bind Bolt :7687)
         run: |
@@ -68,6 +70,13 @@ jobs:
           docker compose --env-file .env -f deploy/compose.yaml \
             up -d --wait --wait-timeout 300 api driver
 
+      - name: Boot sandbox-runner + wait for its /health (ADR 0077 — the isolated tool sidecar)
+        # A healthy sandbox-runner => the dedicated tool image booted, the ASGI app serves /health,
+        # and it came up on its ISOLATED sandbox_net (it has no depends_on the stores by design).
+        run: |
+          docker compose --env-file .env -f deploy/compose.yaml \
+            up -d --wait --wait-timeout 180 sandbox-runner
+
       - name: Status
         run: docker compose --env-file .env -f deploy/compose.yaml ps
 
@@ -78,7 +87,7 @@ jobs:
       - name: api + driver + init logs (on failure)
         if: failure()
         run: |
-          docker compose --env-file .env -f deploy/compose.yaml logs migrate minio-init api driver
+          docker compose --env-file .env -f deploy/compose.yaml logs migrate minio-init api driver sandbox-runner
 
       - name: Tear down
         if: always()
