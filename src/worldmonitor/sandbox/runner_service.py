@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import hmac
 import logging
+import re
 from typing import Any, cast
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -39,9 +40,39 @@ logger = logging.getLogger(__name__)
 # The sidecar's OWN allowlist (defense in depth — NOT trusting the app's allowlist, ADR 0077 §D2).
 _ALLOWED_TOOLS = frozenset({"nmap", "dig", "whois"})
 
+# Per-tool DEFAULT-DENY allow-set for the MIDDLE tokens (``argv[1:-1]``), ADR 0077 §D2 Slice-2
+# hardening. These are EXACTLY what the connectors' ``_build_argv`` emit (see
+# ``plugins/connectors/{nmap,dig,whois}/connector.py``); anything else (``--script``/``-oN``/``-iR``
+# /``-iL``/``-h``) is refused before exec. Intentional coupling: adding a connector flag means
+# extending the matching set here (a safe, explicit edit).
+_ALLOWED_MIDDLE: dict[str, frozenset[str]] = {
+    "nmap": frozenset({"-oX", "-", "--"}),
+    "dig": frozenset({"+short", "--"}),
+    "whois": frozenset({"--"}),
+}
+
+# The SAME host/IP target shape the connectors enforce (cli_tool._TARGET_RE / _MAX_TARGET_LEN,
+# ADR 0072 §3) — re-derived here (NOT imported) so the sidecar's validation stays self-contained,
+# independent of the caller (defense in depth, ADR 0077 §D2; mirrors the inlined ``_is_str_list``).
+_TARGET_RE = re.compile(r"[A-Za-z0-9.:-]+")
+_MAX_TARGET_LEN = 253
+
 # Wall-clock bound on a single delegated tool run. A non-positive or absurdly large timeout is a
 # misuse / abuse and is refused before any subprocess is spawned.
 _MAX_TIMEOUT = 3600.0
+
+
+def _is_valid_target(token: str) -> bool:
+    """True iff ``token`` is a plain host/IP — the SAME rule the connectors enforce (ADR 0072 §3):
+    matches ``[A-Za-z0-9.:-]+`` fully, ``<= _MAX_TARGET_LEN`` chars, NO leading ``-`` (flag
+    injection), NO ``/`` (traversal). The sidecar's last-token (target) gate (ADR 0077 §D2)."""
+    return (
+        bool(token)
+        and not token.startswith("-")
+        and "/" not in token
+        and len(token) <= _MAX_TARGET_LEN
+        and _TARGET_RE.fullmatch(token) is not None
+    )
 
 
 def _is_str_list(value: object) -> bool:
@@ -122,6 +153,34 @@ def create_sandbox_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=422,
                 detail=f"timeout must be a number in (0, {_MAX_TIMEOUT}]",
+            )
+
+        # --- ARGV ALLOWLIST (per-tool DEFAULT-DENY, ADR 0077 §D2 Slice-2). --------------------- #
+        # Beyond ``argv[0] in {nmap,dig,whois}``: require ``[tool, ...flags, target]`` (>=2 tokens);
+        # every MIDDLE token (``argv[1:-1]``) must be in that tool's fixed allow-set; the LAST token
+        # (the target) must be a plain host/IP. Closes the ``--script`` (NSE) / ``-oN`` (file-write)
+        # / ``-iR`` (random-net) / ``-iL`` (file-read) / ``-h`` (redirect) smuggling surface — those
+        # flags are not in the set. Independent of the app-side validator (never trust the caller).
+        # Any violation ⇒ 422, ``run_command`` is NOT called.
+        if len(argv) < 2:
+            raise HTTPException(
+                status_code=422,
+                detail="argv must be [tool, ...flags, target] (at least tool + target)",
+            )
+        allowed_middle = _ALLOWED_MIDDLE[argv[0]]  # argv[0] in _ALLOWED_TOOLS is already enforced
+        for token in argv[1:-1]:
+            if token not in allowed_middle:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"flag {token!r} is not in the {argv[0]} allow-set "
+                        f"{sorted(allowed_middle)} (default-deny)"
+                    ),
+                )
+        if not _is_valid_target(argv[-1]):
+            raise HTTPException(
+                status_code=422,
+                detail=f"target {argv[-1]!r} is not a valid host/IP",
             )
 
         # --- EXEC (only after auth + full validation). argv stays a LIST (no shell). ----------- #
