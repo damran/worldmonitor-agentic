@@ -9,7 +9,7 @@ fully provisioned. See ``.env.example``.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Placeholder/weak markers a non-development boot refuses (ADR 0061). A secret the app
@@ -193,6 +193,19 @@ class Settings(BaseSettings):
     # (whois/dig) are unaffected. When the Stage-4 container sandbox lands, flipping this True lets
     # those tools run — no connector change. Not person-affecting; single-tenant.
     container_sandbox_enabled: bool = False
+
+    # --- Sandbox-runner sidecar (ADR 0077 §D3, Slice 1) ---
+    # Where the app-side ContainerRunner delegates a container-level CLI tool's EXECUTION: a tiny
+    # in-network FastAPI sidecar exposing ``POST /run``. DEFAULT EMPTY ⇒ "not configured": with the
+    # flag ON but no URL/secret the operator-run path STILL refuses container tools
+    # (SandboxUnavailableError) — the flag alone never runs nmap un-sandboxed (INV-2). Set both
+    # (plus ``container_sandbox_enabled=True``) to route container tools through the sidecar.
+    sandbox_runner_url: str = ""
+    # Shared secret the ContainerRunner sends in the ``X-Sandbox-Secret`` header and the sidecar
+    # compares constant-time. A ``SecretStr`` so it never echoes in a repr/log/traceback; the
+    # plaintext is read only via ``.get_secret_value()`` at the routing point. NOT added to
+    # ``validate_production_secrets`` (ADR 0061 frozen) — it is required at routing, not at boot.
+    sandbox_runner_secret: SecretStr = SecretStr("")
 
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in

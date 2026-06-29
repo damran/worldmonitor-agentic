@@ -21,7 +21,7 @@ import logging
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -29,7 +29,9 @@ from worldmonitor.db.crypto import ConfigCipher
 from worldmonitor.db.models import ConnectorInstance, TaskRun
 from worldmonitor.plugins import scope_token
 from worldmonitor.plugins.base import Capability, Connector
+from worldmonitor.plugins.cli_tool import CliToolConnector
 from worldmonitor.runner.ingest import run_ingest
+from worldmonitor.sandbox.container_runner import make_container_runner
 from worldmonitor.settings import Settings
 from worldmonitor.storage.landing import LandingStore
 
@@ -98,16 +100,32 @@ def run_connector_once(
         )
         config = {**config, "_scope": dict(scope)}
 
-    # Heavy-tool sandbox gate (ADR 0072 §1): a connector that requires a container sandbox is
-    # REFUSED until one is enabled — raised BEFORE any runner/landing/audit row, so a heavy tool
-    # (nmap) can never run un-sandboxed in v1. The REST route maps this to 409 (refused capability).
-    if (
-        getattr(connector, "sandbox", "subprocess") == "container"
-        and not settings.container_sandbox_enabled
-    ):
-        raise SandboxUnavailableError(
-            f"connector '{manifest.connector_id}' requires a container sandbox which is not enabled"
-        )
+    # Heavy-tool sandbox gate (ADR 0072 §1 → ADR 0077 §D3): a connector that requires a container
+    # sandbox is refused-or-routed, ALWAYS BEFORE any runner/landing/audit row so a heavy tool
+    # (nmap) can never run un-sandboxed in v1. The REST route maps a refusal to 409.
+    if getattr(connector, "sandbox", "subprocess") == "container":
+        # (a) Flag off ⇒ refuse — byte-identical to ADR 0072 (INV-1). The nmap-refused security
+        # test stays green.
+        if not settings.container_sandbox_enabled:
+            raise SandboxUnavailableError(
+                f"connector '{manifest.connector_id}' requires a container sandbox which is not "
+                "enabled"
+            )
+        # (b) Enabled but the sandbox-runner sidecar is not configured (no URL or no secret) ⇒
+        # STILL refuse (INV-2). The flag alone never runs nmap un-sandboxed; this MUST precede
+        # building any runner (the sidecar is the only sanctioned execution backend).
+        if not settings.sandbox_runner_url or not settings.sandbox_runner_secret.get_secret_value():
+            raise SandboxUnavailableError(
+                f"connector '{manifest.connector_id}' requires a container sandbox which is "
+                "enabled but no sandbox-runner is configured (set sandbox_runner_url + "
+                "sandbox_runner_secret)"
+            )
+        # (c) Enabled AND configured ⇒ ROUTE the execution through the sidecar ContainerRunner
+        # (ADR 0077 §D1, INV-3). The connector's collect() runs via its runner; swapping it here
+        # (the public use_runner seam) delegates the heavy tool's exec to the egress-constrained
+        # sidecar over HTTP (argv stays a LIST — no shell). subprocess-level tools (whois/dig) never
+        # reach this block and keep their host run_command path (INV-3).
+        cast("CliToolConnector", connector).use_runner(make_container_runner(settings))
 
     task_id = str(uuid.uuid4())
     with sessions() as session:

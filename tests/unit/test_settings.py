@@ -8,7 +8,7 @@ CI, which has no project ``.env``. Tests passing explicit overrides keep a bare 
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from worldmonitor.settings import Settings
 
@@ -161,3 +161,49 @@ def test_driver_metrics_port_rejects_negative() -> None:
     """ge=0: a negative port is nonsensical (it is not a valid TCP port / disable sentinel)."""
     with pytest.raises(ValidationError):
         Settings(driver_metrics_port=-1)
+
+
+# -- Sandbox-runner sidecar settings (ADR 0077 Slice 1, spec §2.1 / gate.scope) ---------------- #
+#
+# RED today: ``Settings`` carries neither ``sandbox_runner_url`` nor ``sandbox_runner_secret``, so
+# every assertion below fails with ``AttributeError``. The sidecar base URL defaults to "" (empty ⇒
+# container-level tools stay refused even with the flag on, INV-2); the shared secret is a
+# ``SecretStr`` (never echoed in a repr/log). NEITHER is added to ``validate_production_secrets``
+# (ADR 0061 frozen) — the secret is required at the ROUTING point, not at boot.
+
+
+def test_sandbox_runner_url_defaults_to_empty() -> None:
+    """The sidecar base URL defaults to "" — empty means 'not configured' (the routing gate then
+    REFUSES container tools even when the flag is on, INV-2)."""
+    assert Settings(_env_file=None).sandbox_runner_url == ""  # type: ignore[call-arg]
+
+
+def test_sandbox_runner_url_accepts_override() -> None:
+    settings = Settings(sandbox_runner_url="http://sandbox-runner:9000")  # type: ignore[call-arg]
+    assert settings.sandbox_runner_url == "http://sandbox-runner:9000"
+
+
+def test_sandbox_runner_secret_defaults_to_empty_secretstr() -> None:
+    """The shared secret is a ``SecretStr`` and defaults to empty (no secret ⇒ unconfigured)."""
+    secret = Settings(_env_file=None).sandbox_runner_secret  # type: ignore[call-arg]
+    assert isinstance(secret, SecretStr)
+    assert secret.get_secret_value() == ""
+
+
+def test_sandbox_runner_secret_accepts_override() -> None:
+    settings = Settings(sandbox_runner_secret="sidecar-shared-secret")  # type: ignore[call-arg]
+    assert isinstance(settings.sandbox_runner_secret, SecretStr)
+    assert settings.sandbox_runner_secret.get_secret_value() == "sidecar-shared-secret"
+
+
+def test_sandbox_runner_secret_is_not_leaked_in_repr() -> None:
+    """A ``SecretStr`` must NOT echo its value in ``repr()``/``str()`` (so the shared secret never
+    lands in a log line or a traceback that renders the ``Settings``); only ``.get_secret_value()``
+    returns the plaintext."""
+    value = "do-not-leak-9f3a2b"
+    settings = Settings(sandbox_runner_secret=value)  # type: ignore[call-arg]
+    assert value not in repr(settings.sandbox_runner_secret)
+    assert value not in str(settings.sandbox_runner_secret)
+    assert value not in repr(settings)
+    # The plaintext is still retrievable via the explicit accessor (so routing can send it).
+    assert settings.sandbox_runner_secret.get_secret_value() == value

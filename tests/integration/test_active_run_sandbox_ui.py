@@ -152,7 +152,12 @@ class _PassiveFake(Connector):
 # ================================================================================================
 # Builders / helpers.
 # ================================================================================================
-def _settings(*, container_sandbox_enabled: bool = False) -> Any:
+def _settings(
+    *,
+    container_sandbox_enabled: bool = False,
+    sandbox_runner_url: str = "",
+    sandbox_runner_secret: str = "",
+) -> Any:
     from worldmonitor.settings import Settings
 
     return Settings(
@@ -160,6 +165,8 @@ def _settings(*, container_sandbox_enabled: bool = False) -> Any:
         config_encryption_key=Fernet.generate_key().decode(),
         session_secret_key="test-session-sandbox-ui",
         container_sandbox_enabled=container_sandbox_enabled,  # type: ignore[call-arg]
+        sandbox_runner_url=sandbox_runner_url,  # type: ignore[call-arg]
+        sandbox_runner_secret=sandbox_runner_secret,  # type: ignore[call-arg]
         _env_file=None,  # type: ignore[call-arg]
     )
 
@@ -321,15 +328,33 @@ def test_sandbox_gate_subprocess_connector_runs(postgres_dsn: str) -> None:
     engine.dispose()
 
 
-def test_sandbox_gate_is_flag_conditioned(postgres_dsn: str) -> None:
-    """With ``container_sandbox_enabled`` TRUE the gate lets the container connector proceed — the
-    refusal is conditioned on the flag, not a blanket always-refuse."""
-    settings = _settings(container_sandbox_enabled=True)
+def test_sandbox_gate_is_flag_conditioned(
+    postgres_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With ``container_sandbox_enabled`` TRUE *and* a configured sandbox-runner (ADR 0077 §D3) the
+    gate lets the container connector proceed — the refusal is conditioned on the flag (+config),
+    not a blanket always-refuse.
+
+    ADR 0077 supersedes the ADR-0072 "flag alone ⇒ proceed on the HOST runner": the flag now needs
+    a configured sidecar (``sandbox_runner_url`` + secret), and an enabled+configured run ROUTES
+    through the sidecar ``ContainerRunner`` built by ``make_container_runner``. We patch that
+    factory to return the recording runner so the connector proceeds to a runner (no real HTTP) and
+    the proceed-not-refuse assertion below holds at the same strength."""
+    settings = _settings(
+        container_sandbox_enabled=True,
+        sandbox_runner_url="http://sandbox-runner:9000",
+        sandbox_runner_secret="sidecar-shared-secret",
+    )
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
     nmap_runner = _FakeRunner(_NMAP_STDOUT)
     connector = NmapConnector(runner=nmap_runner)
+    monkeypatch.setattr(
+        "worldmonitor.runner.operator_run.make_container_runner",
+        lambda *args, **kwargs: nmap_runner,
+        raising=False,
+    )
     instance = _transient_instance(
         "nmap", settings, instance_id="nmap-enabled", config={"dataset": "nmap"}
     )
@@ -345,7 +370,8 @@ def test_sandbox_gate_is_flag_conditioned(postgres_dsn: str) -> None:
     )
 
     assert len(nmap_runner.calls) == 1, (
-        "with the sandbox flag enabled the container connector must proceed to the runner"
+        "with the sandbox flag enabled AND configured the container connector must proceed to the "
+        "(sidecar) runner"
     )
     engine.dispose()
 
