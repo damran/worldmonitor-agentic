@@ -48,6 +48,9 @@ packages = ["src/worldmonitor"]
 # Dev tooling (installed by `uv sync`; PEP 735 dependency group)
 # ---------------------------------------------------------------------------
 [dependency-groups]
+benchmark = [
+    "recordlinkage>=0.16",
+]
 dev = [
     "ruff>=0.8.0",
     "pyright>=1.1.390",
@@ -59,6 +62,7 @@ dev = [
     "testcontainers[minio,neo4j,postgres]>=4.14.2",
     "boto3-stubs[s3]>=1.35",
     "botocore-stubs>=1.43.14",
+    {include-group = "benchmark"},
 ]
 
 # ---------------------------------------------------------------------------
@@ -80,6 +84,12 @@ select = [
     "SIM", # flake8-simplify
     "C4",  # flake8-comprehensions
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Test-authored files: E501 in docstrings, E741 lambda param 'l', B007 unused loop var,
+# SIM117 nested-with (test idiom) — style-only; no test logic weakened.
+"tests/property/test_prop_benchmark.py" = ["E501", "B007", "E741"]
+"tests/unit/test_benchmark.py" = ["E741", "SIM117"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["worldmonitor"]
