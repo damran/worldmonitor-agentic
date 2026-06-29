@@ -2,7 +2,8 @@
 name: builder
 description: MUST BE USED to implement one scoped gate slice. Writes code (NOT the primary invariant test — that is the test-author's) and drives quality + tests to green. Holds every locked invariant.
 tools: Read, Edit, Write, Bash, Grep, Glob
-model: opus            # builders START on Opus by choice — flip this ONE line to `sonnet` later
+model: sonnet          # execution layer (implements to green vs the test-author's tests + my spec);
+                       # backstopped by checker+skeptics+judge (all Opus). Flip back to `opus` to revert.
 permissionMode: acceptEdits
 maxTurns: 50
 hooks:
