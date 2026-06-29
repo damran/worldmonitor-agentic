@@ -113,17 +113,20 @@ def test_sandbox_runner_publishes_no_host_port() -> None:
     )
 
 
-@pytest.mark.parametrize("store", _STORE_SERVICES)
-def test_store_services_not_on_sandbox_net(store: str) -> None:
-    """INV-2: every store present is OFF ``sandbox_net`` (the sidecar must not reach it). Vacuously
-    true today (nothing is on sandbox_net yet); the live guard once the sidecar lands."""
-    compose = _load_compose()
-    services = compose.get("services") or {}
-    if store not in services:
-        pytest.skip(f"{store} not defined in this compose")
-    nets = _service_networks(services[store])
-    assert "sandbox_net" not in nets, (
-        f"{store} must NOT be on `sandbox_net` (egress isolation), got {sorted(nets)}"
+def test_store_services_not_on_sandbox_net() -> None:
+    """INV-2: every store service that IS present is OFF ``sandbox_net`` (the sidecar must not be
+    able to reach it). Iterates the present stores (no skip — an absent store is just not asserted,
+    and at least one store must exist so the check is never vacuous)."""
+    services = _load_compose().get("services") or {}
+    present = [s for s in _STORE_SERVICES if s in services]
+    assert present, f"expected at least one store service from {_STORE_SERVICES} in compose"
+    on_sandbox = {
+        s: sorted(_service_networks(services[s]))
+        for s in present
+        if "sandbox_net" in _service_networks(services[s])
+    }
+    assert not on_sandbox, (
+        f"these store services must NOT be on `sandbox_net` (egress isolation): {on_sandbox}"
     )
 
 
