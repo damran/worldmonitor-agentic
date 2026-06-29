@@ -46,6 +46,7 @@ from worldmonitor.metrics.exporter import start_metrics_exporter
 from worldmonitor.plugins.base import Capability, Mode
 from worldmonitor.plugins.registry import Registry
 from worldmonitor.resolution.pipeline import resolve_pending
+from worldmonitor.runner.gc import GcStats, gc_landing_orphans
 from worldmonitor.runner.heartbeat import Heartbeat
 from worldmonitor.runner.ingest import run_ingest
 from worldmonitor.settings import Settings, get_settings
@@ -97,6 +98,10 @@ class IngestDriver:
         # resolve lock held, reset to 0 on a successful acquire. Escalates info->WARNING at the
         # configured threshold so a wedged pass surfaces instead of silently starving resolution.
         self._consecutive_resolve_skips = 0
+        # Latest GC stats from the periodic landing-zone orphan GC pass (ADR 0083 / M-6).
+        # Cached here so the Prometheus collector can expose the disk-growth signal without
+        # performing an expensive bucket list on every scrape. None until the first GC pass runs.
+        self._latest_gc_stats: GcStats | None = None
 
     # -- startup recovery ---------------------------------------------------- #
     def recover_stale(self) -> int:
@@ -186,17 +191,31 @@ class IngestDriver:
 
     # -- periodic maintenance (ADR 0075 D1) ---------------------------------- #
     def run_maintenance(self, *, now: datetime) -> None:
-        """Run the two retention prunes on the maintenance cadence.
+        """Run the retention prunes + optional landing-zone orphan GC on the maintenance cadence.
 
-        Wraps ``prune_task_runs`` + ``prune_dead_letters`` and ONLY those — it deliberately does
-        NOT call ``recover_stale`` (ADR 0075 D1): the prunes only touch old, finished/terminal rows
-        a live row never matches, so they are safe to run mid-uptime; ``recover_stale`` blindly
-        resets every ``running`` row and would clobber a live/abandoned resolve worker, so it stays
-        the startup-only preamble call. The prunes' DELETE semantics are unchanged — only WHEN they
-        run (B-4d / ADR 0053 frozen).
+        Wraps ``prune_task_runs`` + ``prune_dead_letters`` and, when ``landing_gc_enabled=True``,
+        the landing-zone orphan GC pass (ADR 0083 / M-6). Deliberately does NOT call
+        ``recover_stale`` (ADR 0075 D1): the prunes only touch old, finished/terminal rows a live
+        row never matches, so they are safe mid-uptime; ``recover_stale`` blindly resets every
+        ``running`` row and stays the startup-only preamble call. The prunes' DELETE semantics are
+        unchanged — only WHEN they run (B-4d / ADR 0053 frozen).
+
+        GC is DEFAULT-OFF (``landing_gc_enabled=False``): the pass is entirely skipped unless the
+        operator explicitly enables it; the deletion sub-step requires BOTH
+        ``landing_gc_enabled=True`` AND ``landing_gc_delete_enabled=True`` (ADR 0083).
         """
         self.prune_task_runs(now=now)
         self.prune_dead_letters(now=now)
+        if self._settings.landing_gc_enabled:
+            with self._sessions() as session:
+                gc_stats = gc_landing_orphans(
+                    session,
+                    self._landing,
+                    min_age_seconds=self._settings.landing_gc_min_age_seconds,
+                    delete=self._settings.landing_gc_delete_enabled,
+                )
+            # Cache for the Prometheus collector (no on-scrape bucket list).
+            self._latest_gc_stats = gc_stats
 
     def _maintenance_due(self, now: datetime, last_maintenance: datetime | None) -> bool:
         """True when the maintenance cadence has elapsed (or has never run).
@@ -494,6 +513,10 @@ class IngestDriver:
                 session_factory=self._sessions,
                 neo4j=self._neo4j,
                 skip_counter=lambda: self._consecutive_resolve_skips,
+                # Cached GC stats: the collector reads this zero-arg accessor so the
+                # Prometheus scrape surfaces the disk-growth signal (orphan count + bytes)
+                # WITHOUT doing an expensive bucket list on every scrape (ADR 0083 / M-6).
+                gc_stats=lambda: self._latest_gc_stats,
             ),
         )
         last_resolve: datetime | None = None
