@@ -10,6 +10,13 @@ Covers:
   U-7  Deterministic-key invariant — built-in connectors produce the same key for the same input.
   U-8  New Settings fields exist with the correct types and safe defaults.
 
+  B1-1  Grace-window guard: min_age < ingest_timeout with delete=True → ValidationError.
+  B1-2  Grace-window guard: min_age == 0 with delete=True → ValidationError.
+  B1-3  Grace-window guard: ingest_timeout == 0 with delete=True → ValidationError.
+  B1-4  Grace-window guard: delete=False, any min_age → OK (report-only unconstrained).
+  B1-5  Grace-window guard: min_age == ingest_timeout with delete=True → OK (boundary).
+  B2    Reference-set all-statuses guard: every known ErQueueItem status is referenced.
+
 All Docker-free (SQLite + MagicMock for storage).
 """
 
@@ -21,6 +28,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
@@ -110,12 +118,12 @@ def _uri(key: str) -> str:
 
 def test_gc_stats_fields_and_immutability() -> None:
     """U-1: GcStats has the five required fields, is frozen (immutable), and uses slots."""
-    stats = GcStats(scanned=10, referenced=6, orphaned=3, deleted=2, bytes_freed=1024)
+    stats = GcStats(scanned=10, referenced=6, orphaned=3, deleted=2, orphan_bytes=1024)
     assert stats.scanned == 10
     assert stats.referenced == 6
     assert stats.orphaned == 3
     assert stats.deleted == 2
-    assert stats.bytes_freed == 1024
+    assert stats.orphan_bytes == 1024
 
     # Frozen: attribute assignment must raise
     with pytest.raises((AttributeError, TypeError)):
@@ -155,7 +163,7 @@ def test_gc_uses_er_queue_source_record() -> None:
     assert stats.referenced == 1
     assert stats.orphaned == 0
     assert stats.deleted == 0
-    assert stats.bytes_freed == 0
+    assert stats.orphan_bytes == 0
     landing.delete_keys.assert_not_called()
 
 
@@ -307,7 +315,7 @@ def test_gc_mixed_objects_only_old_unreferenced_deleted() -> None:
     assert stats.referenced == 1
     assert stats.orphaned == 1
     assert stats.deleted == 1
-    assert stats.bytes_freed == 200  # size of old_key
+    assert stats.orphan_bytes == 200  # size of old_key
 
     deleted = landing._deleted_keys
     assert old_key in deleted
@@ -321,7 +329,7 @@ def test_gc_mixed_objects_only_old_unreferenced_deleted() -> None:
 
 
 def test_gc_report_only_deletes_nothing_but_computes_stats() -> None:
-    """U-5: with delete=False no deletion occurs; orphaned count and bytes_freed are still set
+    """U-5: with delete=False no deletion occurs; orphaned count and orphan_bytes are still set
     (the disk-growth signal); deleted=0."""
     sessions = _sqlite_sessions()
 
@@ -337,7 +345,7 @@ def test_gc_report_only_deletes_nothing_but_computes_stats() -> None:
 
     assert stats.orphaned == 2
     assert stats.deleted == 0
-    assert stats.bytes_freed == 800  # 500 + 300 — computed even in report-only mode
+    assert stats.orphan_bytes == 800  # 500 + 300 — computed even in report-only mode
     landing.delete_keys.assert_not_called()
 
 
@@ -510,3 +518,174 @@ def test_settings_gc_min_age_accepts_zero() -> None:
     """U-8b: landing_gc_min_age_seconds accepts 0.0 (disables grace window entirely)."""
     s = Settings(landing_gc_min_age_seconds=0.0)
     assert s.landing_gc_min_age_seconds == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# B1: Grace-window guard — fail-closed at Settings construction (ADR 0086 Change 1)
+#
+# The validator fires ONLY when landing_gc_delete_enabled=True.
+# Three error conditions → ValidationError; two accept conditions → OK.
+# --------------------------------------------------------------------------- #
+
+
+def test_grace_below_timeout_rejected_when_delete_enabled() -> None:
+    """B1-1: min_age < ingest_timeout with delete=True → ValidationError naming both fields.
+
+    Spec AC-1: Settings(delete=True, min_age=60, timeout=1800) must raise and the error
+    message must name both ``landing_gc_min_age_seconds`` and ``ingest_timeout_seconds``.
+
+    RED on current code: no model_validator exists for the grace-window guard — Settings
+    constructs fine → pytest.raises DID NOT RAISE.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            landing_gc_delete_enabled=True,
+            landing_gc_min_age_seconds=60,
+            ingest_timeout_seconds=1800,
+        )
+    error_text = str(exc_info.value)
+    assert "landing_gc_min_age_seconds" in error_text, (
+        "ValidationError must name landing_gc_min_age_seconds (the unsafe grace window)"
+    )
+    assert "ingest_timeout_seconds" in error_text, (
+        "ValidationError must name ingest_timeout_seconds (the bounding deadline)"
+    )
+
+
+def test_grace_zero_rejected_when_delete_enabled() -> None:
+    """B1-2: min_age=0 with delete=True → ValidationError (no grace + deletion is unsafe).
+
+    Spec AC-2: a grace window of zero disables age filtering entirely; with deletion enabled,
+    this can sweep a put-before-commit object (G1 provenance loss).
+
+    RED on current code: no validator → DID NOT RAISE.
+    """
+    with pytest.raises(ValidationError):
+        Settings(
+            landing_gc_delete_enabled=True,
+            landing_gc_min_age_seconds=0,
+        )
+
+
+def test_ingest_timeout_zero_with_delete_rejected() -> None:
+    """B1-3: ingest_timeout=0 (deadline disabled) with delete=True → ValidationError.
+
+    Spec AC-3: when the ingest deadline is disabled (timeout=0), the in-flight window is
+    unbounded, so no finite grace window is provably safe. Deletion must be refused.
+
+    RED on current code: no validator → DID NOT RAISE.
+    """
+    with pytest.raises(ValidationError):
+        Settings(
+            landing_gc_delete_enabled=True,
+            ingest_timeout_seconds=0,
+            landing_gc_min_age_seconds=86400,
+        )
+
+
+def test_grace_unconstrained_when_delete_disabled() -> None:
+    """B1-4: delete=False (report-only) — any grace window (including 0) is acceptable.
+
+    Spec AC-4: report-only mode is purely read; no provenance can be lost, so the guard
+    must NOT fire. This test also verifies the validator is not too aggressive.
+
+    GREEN on current code (no validator → no false rejection).
+    """
+    # min_age=0 with delete=False — must NOT raise
+    s = Settings(
+        landing_gc_delete_enabled=False,
+        landing_gc_min_age_seconds=0,
+    )
+    assert s.landing_gc_delete_enabled is False
+    assert s.landing_gc_min_age_seconds == 0.0
+
+
+def test_grace_equals_timeout_accepted() -> None:
+    """B1-5: min_age == ingest_timeout > 0 with delete=True → OK (boundary is accepted).
+
+    Spec AC-5: the boundary ``min_age >= timeout`` is safe (grace exactly covers the
+    maximum in-flight window). Strict inequality is NOT required.
+
+    GREEN on current code (no validator → constructs fine).
+    """
+    s = Settings(
+        landing_gc_delete_enabled=True,
+        landing_gc_min_age_seconds=1800,
+        ingest_timeout_seconds=1800,
+    )
+    assert s.landing_gc_delete_enabled is True
+    assert s.landing_gc_min_age_seconds == 1800.0
+
+
+# --------------------------------------------------------------------------- #
+# B2: Reference-set all-statuses guard (ADR 0086 Change 2b)
+#
+# The ErQueueItem reference query in gc_landing_orphans MUST be status-UNFILTERED.
+# This test fails if a WHERE status = ... clause is ever added.
+# --------------------------------------------------------------------------- #
+
+# All known ErQueueItem status values in the codebase.  If a new status is added,
+# add it here too.  The test verifies every status is included in the reference set.
+_ALL_ER_QUEUE_STATUSES = frozenset({"pending", "resolved", "pending_review", "invalid"})
+
+
+def test_reference_set_covers_all_er_statuses() -> None:
+    """B2: ErQueueItem rows of EVERY status are included in the GC reference set.
+
+    Creates one landing object + one ErQueueItem per known status, calls gc_landing_orphans
+    with min_age=0 (all unreferenced objects would be candidates), and asserts that every
+    object is counted as REFERENCED (referenced == len(statuses), orphaned == 0).
+
+    This test FAILS if someone adds a ``WHERE status = ...`` (or ``status != ...``) filter
+    to the ER reference query in ``gc_landing_orphans``, because filtered-out-status objects
+    would appear as orphan candidates instead of referenced.
+
+    Also imports ``select_orphan_candidates`` to verify the B2 pure-helper refactor is in
+    place — the all-statuses guarantee is only meaningful once the helper is extracted.
+
+    RED on current code (ImportError: select_orphan_candidates not yet in gc.py).
+    """
+    # Require the pure helper to exist — the B2 refactor (ADR 0086 Change 2c) must be done.
+    from worldmonitor.runner.gc import select_orphan_candidates  # noqa: F401
+
+    sessions = _sqlite_sessions()
+    n_statuses = len(_ALL_ER_QUEUE_STATUSES)
+
+    with sessions() as session:
+        for i, status in enumerate(sorted(_ALL_ER_QUEUE_STATUSES)):
+            key = f"conn/ds/status-{status}.json"
+            uri = _uri(key)
+            session.add(
+                ErQueueItem(
+                    id=f"er-{i}",
+                    connector_id="conn",
+                    raw_entity={"id": f"e-{i}"},
+                    source_record=uri,
+                    status=status,
+                )
+            )
+        session.commit()
+
+    # Build the matching landing objects (all very old: age >> any grace window)
+    objects = [
+        _obj(f"conn/ds/status-{status}.json", age_seconds=999_999)
+        for status in sorted(_ALL_ER_QUEUE_STATUSES)
+    ]
+    landing = _make_stub_landing(objects)
+
+    with sessions() as session:
+        stats = gc_landing_orphans(session, landing, min_age_seconds=0.0, delete=False)
+
+    assert stats.scanned == n_statuses, (
+        f"Expected {n_statuses} objects scanned, got {stats.scanned}"
+    )
+    assert stats.referenced == n_statuses, (
+        f"REFERENCE-SET INVARIANT VIOLATED: only {stats.referenced}/{n_statuses} objects were "
+        f"counted as referenced. The ER reference query must be status-UNFILTERED (ADR 0086 D2). "
+        f"A WHERE status filter would exclude some statuses: "
+        f"{_ALL_ER_QUEUE_STATUSES!r}"
+    )
+    assert stats.orphaned == 0, (
+        f"orphaned={stats.orphaned} despite all objects being referenced by ErQueueItem rows. "
+        f"Statuses present: {_ALL_ER_QUEUE_STATUSES!r}"
+    )

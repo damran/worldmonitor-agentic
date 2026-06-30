@@ -74,13 +74,72 @@ class GcStats:
     """Objects that are unreferenced AND older than the grace window (deletion candidates)."""
     deleted: int
     """Objects actually deleted this pass; 0 when ``delete=False`` (report-only)."""
-    bytes_freed: int
+    orphan_bytes: int
     """Total size in bytes of orphaned candidate objects — the disk-growth signal.
 
     ALWAYS computed, even in report-only mode: this makes the Prometheus gauge
     (``worldmonitor_landing_orphan_bytes``) meaningful whether or not deletion is enabled.
-    In delete mode and a clean (no-error) pass, this equals the actual bytes freed.
+    Named ``orphan_bytes`` to reflect that this is bytes of orphan *candidates identified*,
+    computed even when no deletion occurs (ADR 0086 D3).
     """
+
+
+def select_orphan_candidates(
+    objects: list[dict[str, Any]],
+    referenced_uris: set[str],
+    *,
+    now: datetime,
+    min_age_seconds: float,
+) -> list[dict[str, Any]]:
+    """Pure classifier: select orphan candidates from a list of landing objects.
+
+    No DB or S3 access.  An object is a candidate iff ALL of the following hold:
+
+    1. Its ``"uri"`` key is NOT in ``referenced_uris``  (reference beats age, unconditionally).
+    2. Its ``"LastModified"`` is not None  (None → treated as recent → never a candidate).
+    3. Its age ``(now - LastModified).total_seconds() > min_age_seconds``  (past grace window).
+
+    Args:
+        objects:          List of landing-object dicts.  Each dict carries the fields returned
+                          by ``LandingStore.list_objects_with_metadata()`` PLUS a pre-built
+                          ``"uri"`` key (``f"s3://<bucket>/<key>"``).
+        referenced_uris:  Set of pre-built ``s3://`` URI strings from the DB reference tables
+                          (``er_queue_item.source_record ∪ ingest_dead_letter.source_record``).
+        now:              The reference instant for age calculation (UTC-aware).
+        min_age_seconds:  Grace window in seconds.  Objects at or within this age are NEVER
+                          candidates (``0.0`` means any age > 0 is a candidate).
+
+    Returns:
+        List of candidate object dicts (same references as in ``objects``).
+
+    Called by :func:`gc_landing_orphans`; extracted so the property suite can pin the pure
+    classification decision without S3/DB I/O (ADR 0086 Change 2c).
+    """
+    candidates: list[dict[str, Any]] = []
+    for obj in objects:
+        # SAFETY INVARIANT (G1 provenance): referenced objects are NEVER candidates.
+        # Reference check precedes the age check — a very old referenced object is still safe.
+        if obj["uri"] in referenced_uris:
+            continue
+
+        # SAFETY INVARIANT: objects with no LastModified are treated as recent (conservative).
+        last_modified: datetime | None = obj.get("LastModified")
+        if last_modified is None:
+            continue
+
+        # Normalise to UTC (S3/MinIO always returns UTC-aware datetimes; be defensive).
+        if last_modified.tzinfo is None:
+            last_modified = last_modified.replace(tzinfo=UTC)
+
+        age = (now - last_modified).total_seconds()
+
+        # SAFETY INVARIANT: objects within the grace window are NEVER candidates.
+        if age <= min_age_seconds:
+            continue
+
+        candidates.append(obj)
+
+    return candidates
 
 
 def gc_landing_orphans(
@@ -111,13 +170,27 @@ def gc_landing_orphans(
     # ------------------------------------------------------------------ #
     # 1. List ALL landing objects with metadata (paged past the 1000-key cap).
     # ------------------------------------------------------------------ #
-    objects: list[dict[str, Any]] = landing.list_objects_with_metadata()
-    scanned = len(objects)
+    raw_objects: list[dict[str, Any]] = landing.list_objects_with_metadata()
+    scanned = len(raw_objects)
+
+    # Pre-build "uri" key for each object — the contract required by select_orphan_candidates.
+    # gc_landing_orphans owns the URI construction; the pure helper consumes it opaquely.
+    objects: list[dict[str, Any]] = [
+        {**obj, "uri": f"s3://{landing.bucket}/{obj['Key']}"} for obj in raw_objects
+    ]
 
     # ------------------------------------------------------------------ #
-    # 2. Build the referenced-URI set from BOTH reference tables in one pass.
-    #    ErQueueItem.source_record is non-nullable (always a str).
-    #    IngestDeadLetter.source_record is nullable (null on land-stage failure).
+    # 2. Build the referenced-URI set from BOTH reference tables.
+    #
+    # ER-QUEUE-NEVER-HARD-DELETED (ADR 0086 D2):
+    #   The ErQueueItem reference query is UNFILTERED — all rows, ALL statuses (pending,
+    #   resolved, pending_review, invalid, …).  Omitting Neo4j provenance pointers is SAFE
+    #   ONLY while er_queue rows are NEVER hard-deleted: a resolved/processed row's
+    #   source_record persists forever, so the landing object it points at remains referenced.
+    #   If a hard-delete (or TTL purge) is EVER added to er_queue, the GC MUST ALSO union
+    #   Neo4j prov_source_id pointers into referenced_uris before any deletion is attempted.
+    #   This invariant is load-bearing: a status-filtered reference query would silently
+    #   orphan live provenance bytes.  See docs/decisions/0086-landing-gc-safety.md.
     # ------------------------------------------------------------------ #
     er_uris: set[str] = set(session.execute(select(ErQueueItem.source_record)).scalars())
     dl_uris: set[str] = {
@@ -132,40 +205,18 @@ def gc_landing_orphans(
     referenced_uris: set[str] = er_uris | dl_uris
 
     # ------------------------------------------------------------------ #
-    # 3. Classify each object.
+    # 3. Classify each object via the pure helper (no behaviour change vs. inline loop).
     # ------------------------------------------------------------------ #
-    referenced_count = 0
-    candidates: list[dict[str, Any]] = []
+    candidates = select_orphan_candidates(
+        objects, referenced_uris, now=now, min_age_seconds=min_age_seconds
+    )
 
-    for obj in objects:
-        key: str = obj["Key"]
-        uri = f"s3://{landing.bucket}/{key}"
-
-        # SAFETY INVARIANT: referenced objects are NEVER candidates.
-        if uri in referenced_uris:
-            referenced_count += 1
-            continue
-
-        # SAFETY INVARIANT: objects with no LastModified are treated as recent.
-        last_modified: datetime | None = obj.get("LastModified")
-        if last_modified is None:
-            continue
-
-        # Normalise to UTC (S3/MinIO always returns UTC-aware datetimes; be defensive).
-        if last_modified.tzinfo is None:
-            last_modified = last_modified.replace(tzinfo=UTC)
-
-        age = (now - last_modified).total_seconds()
-
-        # SAFETY INVARIANT: objects within the grace window are NEVER candidates.
-        if age <= min_age_seconds:
-            continue
-
-        candidates.append(obj)
+    # Count objects whose URI appears in the reference set (separately from candidates).
+    referenced_count = sum(1 for obj in objects if obj["uri"] in referenced_uris)
 
     orphaned = len(candidates)
-    # bytes_freed is ALWAYS computed — the disk-growth signal for Prometheus.
-    bytes_freed = sum(int(obj.get("Size", 0)) for obj in candidates)
+    # orphan_bytes is ALWAYS computed — the disk-growth signal for Prometheus.
+    orphan_bytes = sum(int(obj.get("Size", 0)) for obj in candidates)
 
     # ------------------------------------------------------------------ #
     # 4. Delete only when requested, batched <=1000, fail-loud on partial errors.
@@ -176,12 +227,12 @@ def gc_landing_orphans(
         deleted = landing.delete_keys(keys_to_delete)
 
     logger.info(
-        "gc_landing_orphans: scanned=%d referenced=%d orphaned=%d deleted=%d bytes_freed=%d",
+        "gc_landing_orphans: scanned=%d referenced=%d orphaned=%d deleted=%d orphan_bytes=%d",
         scanned,
         referenced_count,
         orphaned,
         deleted,
-        bytes_freed,
+        orphan_bytes,
     )
 
     return GcStats(
@@ -189,5 +240,5 @@ def gc_landing_orphans(
         referenced=referenced_count,
         orphaned=orphaned,
         deleted=deleted,
-        bytes_freed=bytes_freed,
+        orphan_bytes=orphan_bytes,
     )

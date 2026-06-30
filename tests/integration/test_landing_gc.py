@@ -3,7 +3,7 @@
 Uses real testcontainer MinIO + Postgres to verify the full GC pass end-to-end:
   I-1  delete=True: only the old-unreferenced object is deleted; the referenced object
        and the recent-unreferenced object survive; GcStats counts are exact.
-  I-2  delete=False: nothing is deleted, but the orphan count and bytes_freed are still
+  I-2  delete=False: nothing is deleted, but the orphan count and orphan_bytes are still
        reported (disk-growth signal).
   I-3  GC is a no-op when all objects are referenced.
   I-4  GC is a no-op when all orphans are within the grace window.
@@ -103,7 +103,7 @@ def test_gc_delete_true_only_old_orphan_deleted(
     assert stats.referenced == 1, f"expected 1 referenced, got {stats.referenced}"
     assert stats.orphaned == 1, f"expected 1 orphan (old), got {stats.orphaned}"
     assert stats.deleted == 1, f"expected 1 deleted, got {stats.deleted}"
-    assert stats.bytes_freed > 0, "bytes_freed must be > 0 (the old orphan's size)"
+    assert stats.orphan_bytes > 0, "orphan_bytes must be > 0 (the old orphan's size)"
 
     # 8. Verify the surviving objects are still present.
     remaining = set(landing.list_keys())
@@ -122,7 +122,7 @@ def test_gc_delete_false_nothing_deleted_but_stats_reported(
     minio: tuple[str, str, str],
     postgres_dsn: str,
 ) -> None:
-    """I-2: delete=False: nothing is deleted; orphan count and bytes_freed are still computed."""
+    """I-2: delete=False: nothing is deleted; orphan count and orphan_bytes are still computed."""
     landing = _landing_store(minio)
     _, sessions = _sessions_from_dsn(postgres_dsn)
 
@@ -145,7 +145,7 @@ def test_gc_delete_false_nothing_deleted_but_stats_reported(
     # Orphan is reported but NOT deleted
     assert stats.orphaned == 1, f"expected 1 orphan, got {stats.orphaned}"
     assert stats.deleted == 0, "delete=False must not delete anything"
-    assert stats.bytes_freed > 0, "bytes_freed must be > 0 even in report-only mode"
+    assert stats.orphan_bytes > 0, "orphan_bytes must be > 0 even in report-only mode"
 
     # Both objects still exist
     remaining = set(landing.list_keys())
@@ -193,7 +193,7 @@ def test_gc_all_referenced_no_orphans(
     assert stats.referenced == 3
     assert stats.orphaned == 0
     assert stats.deleted == 0
-    assert stats.bytes_freed == 0
+    assert stats.orphan_bytes == 0
 
 
 # --------------------------------------------------------------------------- #

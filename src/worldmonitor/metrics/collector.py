@@ -162,7 +162,7 @@ class DriverMetricsCollector:
             "worldmonitor_landing_orphan_bytes",
             "Total bytes of unreferenced landing-zone orphans (disk-growth signal, ADR 0083). "
             "Computed even in report-only mode; 0 until the first GC pass runs.",
-            gc.bytes_freed if gc is not None else 0,
+            gc.orphan_bytes if gc is not None else 0,
         )
 
     def _latest_stopped_reason(self, session: Session) -> str:

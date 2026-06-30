@@ -270,6 +270,53 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_grace_window_guard(self) -> "Settings":
+        """Fail-closed grace-window guard for the landing-zone GC (ADR 0086 D1).
+
+        Only fires when ``landing_gc_delete_enabled=True`` — report-only mode is purely read
+        and safe at any grace.  With deletion enabled, the grace window MUST cover at least one
+        full ingest timeout, otherwise a GC pass can delete a put-before-commit object of an
+        ingest that is still in-flight (provenance destroyed for a record about to be committed).
+
+        Three unsafe conditions are rejected (fail-closed, NOT silent clamp):
+
+        * ``landing_gc_min_age_seconds == 0``: no grace window + deletion is unsafe.
+        * ``ingest_timeout_seconds == 0``: the ingest deadline is disabled ⇒ the in-flight
+          window is unbounded; no finite grace is provably safe.
+        * ``0 < landing_gc_min_age_seconds < ingest_timeout_seconds``: grace is shorter than
+          the maximum in-flight window.
+
+        Boundary ``landing_gc_min_age_seconds >= ingest_timeout_seconds (> 0)`` is accepted.
+        """
+        if not self.landing_gc_delete_enabled:
+            # Report-only (delete=False) is purely read — no provenance can be lost.
+            return self
+        if self.landing_gc_min_age_seconds == 0:
+            raise ValueError(
+                "landing_gc_min_age_seconds must be > 0 when landing_gc_delete_enabled=True; "
+                "a grace window of zero with deletion enabled can delete a put-before-commit "
+                "object before its referencing er_queue row is committed (ADR 0086 D1). "
+                "Set landing_gc_min_age_seconds >= ingest_timeout_seconds or disable deletion."
+            )
+        if self.ingest_timeout_seconds == 0:
+            raise ValueError(
+                "ingest_timeout_seconds must be > 0 when landing_gc_delete_enabled=True; "
+                "when the ingest deadline is disabled (ingest_timeout_seconds=0), the "
+                "in-flight window is unbounded and no finite landing_gc_min_age_seconds is "
+                "provably safe (ADR 0086 D1). Set a finite ingest_timeout_seconds or disable "
+                "landing_gc_delete_enabled."
+            )
+        if self.landing_gc_min_age_seconds < self.ingest_timeout_seconds:
+            raise ValueError(
+                f"landing_gc_min_age_seconds ({self.landing_gc_min_age_seconds}) must be >= "
+                f"ingest_timeout_seconds ({self.ingest_timeout_seconds}) when "
+                "landing_gc_delete_enabled=True; a shorter grace window can delete a "
+                "put-before-commit object of an ingest still in-flight (ADR 0086 D1). "
+                "Either raise landing_gc_min_age_seconds or lower ingest_timeout_seconds."
+            )
+        return self
+
     def validate_production_secrets(self) -> None:
         """Fail closed outside the local/test environments on a placeholder secret (ADR 0061).
 
