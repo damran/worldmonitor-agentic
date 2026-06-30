@@ -26,6 +26,11 @@ import httpx
 
 _DEFAULT_TIMEOUT = 120.0
 
+# G-NET-1 (ADR 0087): headers whose value is scoped to the origin host and must NOT be
+# forwarded to a redirect target on a different host (or on a same-host https→http downgrade).
+# Matched case-insensitively against header key names.
+_SENSITIVE_HEADERS: frozenset[str] = frozenset({"authorization", "cookie", "proxy-authorization"})
+
 
 def _quiet_http_request_logging() -> None:
     """Stop ``httpx``/``httpcore`` from logging full request URLs (which can carry secrets).
@@ -47,6 +52,49 @@ def _quiet_http_request_logging() -> None:
 # shared internal range used for cloud/k8s/CGNAT internal services — a redirect to a literal
 # ``100.64.x.x`` must not be a fetch target. Blocked explicitly (the predicates below miss it).
 _CGNAT_V4 = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _scope_headers(
+    headers: Mapping[str, str] | None,
+    *,
+    origin_host: str,
+    origin_scheme: str,
+    next_url: str,
+) -> dict[str, str] | None:
+    """Return headers to use for the next redirect hop, stripping credentials if needed.
+
+    G-NET-1 (ADR 0087): a sensitive header (member of ``_SENSITIVE_HEADERS``, matched
+    case-insensitively) is stripped from the next hop whenever the redirect target triggers
+    credential exposure:
+
+    - **Cross-host**: ``next_host != origin_host`` (case-insensitive).  ``httpx.URL.host``
+      already lowercases and excludes the port, so a port-only change on the same hostname
+      compares equal and does NOT strip (deliberate, matches ``requests``).
+    - **Scheme downgrade**: ``origin_scheme == "https"`` and ``next_scheme == "http"`` on the
+      SAME host — the credential would travel in cleartext even though the hostname is identical.
+
+    Non-sensitive headers (``User-Agent``, ``Accept``, …) are never stripped.
+
+    The sticky-strip invariant is upheld automatically: once sensitive keys are absent from
+    the returned dict, subsequent calls on that dict cannot restore them.  Callers therefore
+    simply replace their working ``hop_headers`` with the return value and never need a
+    separate ``stripped`` boolean.
+    """
+    if headers is None:
+        return None
+
+    parsed = httpx.URL(next_url)
+    next_host = parsed.host.lower()
+    next_scheme = parsed.scheme.lower()
+
+    should_strip = next_host != origin_host.lower() or (
+        origin_scheme.lower() == "https" and next_scheme == "http"
+    )
+
+    if not should_strip:
+        return dict(headers)
+
+    return {k: v for k, v in headers.items() if k.lower() not in _SENSITIVE_HEADERS}
 
 
 class BlockedAddressError(RuntimeError):
@@ -136,10 +184,17 @@ def guarded_stream(
     ``iter_lines`` / ``read``). A redirect with no ``Location``, or exceeding ``max_redirects``,
     raises. ``transport`` is injectable for ``httpx.MockTransport`` unit tests.
 
-    ``headers`` is an optional mapping of request headers forwarded into EVERY hop of the request.
-    It defaults to ``None`` (no additional headers), keeping existing callers unaffected. Headers do
-    NOT influence SSRF host validation — :func:`assert_public_host` is called on every hop's host
-    exactly as before, independently of any ``headers`` value.
+    ``headers`` is an optional mapping of request headers.  Non-sensitive headers (``User-Agent``,
+    ``Accept``, …) are forwarded on every hop.  Sensitive headers (``Authorization``, ``Cookie``,
+    ``Proxy-Authorization`` — see ``_SENSITIVE_HEADERS``) are forwarded ONLY to the original
+    request host; they are stripped before any hop whose host differs from the original request
+    host, or whose scheme is an ``https → http`` downgrade on the same host (G-NET-1, ADR 0087).
+    The strip is sticky: once triggered it is not reversed even if a later redirect returns to the
+    origin host.  Headers default to ``None`` (no additional headers), keeping existing callers
+    unaffected.
+
+    Headers do NOT influence SSRF host validation — :func:`assert_public_host` is called on every
+    hop's host exactly as before, independently of any ``headers`` value.
     """
     # Quiet httpx/httpcore request-URL logging BEFORE the first request issues — a request URL can
     # carry a secret query param (e.g. OpenCorporates ``?api_token=``) and httpx logs the full URL
@@ -155,19 +210,28 @@ def guarded_stream(
         if transport is not None
         else None
     )
+    # Capture the ORIGINAL origin host and scheme BEFORE the redirect loop so that
+    # credential-scoping comparisons are always anchored to the host the caller named,
+    # not to the previous hop (ADR 0087 D1).
+    origin_parsed = httpx.URL(url)
+    origin_host: str = origin_parsed.host.lower()
+    origin_scheme: str = origin_parsed.scheme.lower()
+    # Mutable working copy of caller headers; sensitive entries are dropped in-place
+    # (by reassignment) whenever a cross-host or downgrade redirect is detected.
+    hop_headers: dict[str, str] | None = dict(headers) if headers is not None else None
     current = url
     try:
         for _hop in range(max_redirects + 1):
             assert_public_host(httpx.URL(current).host)
             hop = (
-                client.stream(method, current, headers=headers)
+                client.stream(method, current, headers=hop_headers)
                 if client is not None
                 else httpx.stream(
                     method,
                     current,
                     timeout=timeout,
                     follow_redirects=False,
-                    headers=headers,
+                    headers=hop_headers,
                 )
             )
             with hop as response:
@@ -178,7 +242,17 @@ def guarded_stream(
                             f"redirect from {current} had no Location header",
                             request=response.request,
                         )
-                    current = str(httpx.URL(current).join(location))
+                    next_url = str(httpx.URL(current).join(location))
+                    # G-NET-1: strip sensitive headers before following a cross-host or
+                    # https→http-downgrade redirect.  The returned dict never re-adds
+                    # stripped keys, so the strip is automatically sticky through the chain.
+                    hop_headers = _scope_headers(
+                        hop_headers,
+                        origin_host=origin_host,
+                        origin_scheme=origin_scheme,
+                        next_url=next_url,
+                    )
+                    current = next_url
                     continue
                 yield response
                 return
