@@ -32,6 +32,7 @@ dependencies = [
     "python-multipart>=0.0.32",
     "websockets>=16.0",
     "prometheus-client>=0.25.0",
+    "litellm>=1.90.1",
 ]
 
 [project.urls]

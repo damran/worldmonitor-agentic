@@ -257,6 +257,29 @@ class Settings(BaseSettings):
     # ``validate_production_secrets`` (ADR 0061 frozen) — it is required at routing, not at boot.
     sandbox_runner_secret: SecretStr = SecretStr("")
 
+    # --- LLM gateway (Phase-3 S2, ADR 0091) ---
+    # The single service-side LLM-egress choke point — one gateway method routes every
+    # call through litellm, attaches the active mode's confidentiality label, and writes
+    # a per-call egress record before the provider is contacted. Three modes (user-finalized,
+    # locked by ADR 0091 §2):
+    #   local           — Ollama loopback, confidential, no egress (DEFAULT).
+    #   claude_headless — claude -p shim, external egress → Anthropic (ToS-gray caveat).
+    #   openrouter      — openrouter/<model>, external egress → OpenRouter.
+    llm_mode: Literal["local", "claude_headless", "openrouter"] = "local"
+    # Ollama (LOCAL mode) — loopback address + local model name. No key, no egress.
+    llm_ollama_base_url: str = "http://localhost:11434"
+    llm_ollama_model: str = "llama3.2"
+    # OpenRouter (OPENROUTER mode) — key as SecretStr so it never echoes in repr/log.
+    llm_openrouter_api_key: SecretStr = SecretStr("")
+    llm_openrouter_model: str = "openai/gpt-4o"
+    # Claude headless (CLAUDE_HEADLESS mode) — argv-list subprocess; ToS-gray caveat.
+    llm_claude_binary: str = "claude"
+    llm_claude_model_label: str = "claude"
+    llm_claude_timeout_seconds: float = Field(default=30.0, gt=0)
+    # Master egress-log toggle. When False, emit() is skipped; the write-before-call
+    # ordering invariant is never bypassed (ADR 0091 §3). Default True.
+    llm_egress_log_enabled: bool = True
+
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in
     # any environment that persists connector configs; empty default fails fast.
