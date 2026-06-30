@@ -49,6 +49,17 @@ class Settings(BaseSettings):
     # ``redirect_uri`` (``app_base_url`` + ``/auth/callback``) — NOT a Host-derived URL (ADR 0068).
     app_base_url: str = ""
 
+    # --- MCP server transport (Phase-3 S1, ADR 0090) ---
+    # Default stdio (ADR 0063, unchanged: no port, local trust boundary). Set to
+    # ``streamable-http`` to serve the authenticated HTTP transport a remote Hermes connects to;
+    # HTTP is fail-closed (always bearer-gated by the Zitadel verifier).
+    mcp_transport: str = "stdio"
+    mcp_http_host: str = "127.0.0.1"
+    mcp_http_port: int = 8765
+    # This MCP server's own public base URL (RFC 9728 protected-resource metadata). Optional;
+    # empty -> omitted. e.g. ``https://mcp.wm.example.com``.
+    mcp_resource_server_url: str = ""
+
     # --- Backing services (URLs only; clients land in later phases) ---
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
