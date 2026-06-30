@@ -17,15 +17,66 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 
+import dotenv
 import pytest
 
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.settings import Settings
+
+
+# --- Neutralize python-dotenv at collection time (CI fidelity) ---------------------------
+# ``litellm`` (added in ADR 0091) calls ``dotenv.load_dotenv()`` at IMPORT time. The first
+# test module that imports the LLM gateway therefore loads this repo's gitignored dev ``.env``
+# into ``os.environ`` during collection — before any fixture runs — which silently diverges
+# the local test environment from CI (which has no project ``.env``). That broke default-
+# asserting settings tests locally while CI stayed green. ``conftest.py`` is imported before
+# any test module is collected, and neither import above pulls in litellm, so patching
+# ``load_dotenv`` to a no-op here means litellm's later import-time call loads nothing — the
+# local env matches the CI checkout. Tests that need env do so explicitly (``monkeypatch``).
+def _noop_load_dotenv(*_args: object, **_kwargs: object) -> bool:
+    return False
+
+
+dotenv.load_dotenv = _noop_load_dotenv  # type: ignore[assignment]
+dotenv.main.load_dotenv = _noop_load_dotenv  # type: ignore[assignment]
 
 NEO4J_IMAGE = "neo4j:2026.05.0-community"
 NEO4J_TEST_PASSWORD = "testpassword"  # pragma: allowlist secret
 # MinIO isn't a Docker Hub `library/` image, so it can't use the ECR mirror
 # prefix; override locally with a fully-qualified mirror (e.g. quay.io/minio/minio).
 MINIO_IMAGE = os.environ.get("WM_TEST_MINIO_IMAGE", "minio/minio:RELEASE.2025-09-07T16-13-09Z")
+
+
+# Env-var names (upper-cased) that map to a ``Settings`` field. pydantic-settings matches
+# env vars case-insensitively, so ``RESOLVE_BATCH_SIZE`` feeds the ``resolve_batch_size`` field.
+_SETTINGS_ENV_KEYS = frozenset(name.upper() for name in Settings.model_fields)
+
+
+@pytest.fixture(autouse=True)
+def _settings_env_isolation() -> Iterator[None]:
+    """Make ``Settings(_env_file=None)`` yield the *coded defaults*, regardless of a
+    developer's local ``.env`` — matching CI, which has no project ``.env``.
+
+    ``_env_file=None`` disables pydantic's ``.env`` *file* read but NOT its ``os.environ``
+    read. Two things populate ``os.environ`` from the gitignored dev ``.env``: a shell that
+    exports it, and — since ADR 0091 added ``litellm`` — litellm's import-time
+    ``load_dotenv()`` (run at collection, before any fixture), which reads the ``.env`` file
+    directly. Either defeats default-asserting unit tests locally while CI stays green.
+
+    This fixture removes every ``Settings``-field env var for the duration of each test,
+    restoring it afterward, so the in-process env matches the CI checkout. It is provably
+    safe: the full suite passes on CI (no ``.env``), so clearing exactly the ``.env``-derived
+    Settings vars cannot break a CI-green test. A test's own ``monkeypatch.setenv`` (and the
+    non-autouse ``configure`` fixtures) run *after* this root autouse fixture, so values a
+    test sets deliberately are preserved.
+    """
+    saved = {k: os.environ[k] for k in list(os.environ) if k.upper() in _SETTINGS_ENV_KEYS}
+    for k in saved:
+        del os.environ[k]
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 
 @pytest.fixture(scope="session")
