@@ -50,3 +50,36 @@ jobs:
 
       - name: Pytest + coverage (unit/contract; integration runs in its own job)
         run: uv run pytest -m "not integration"
+
+  alert-rules:
+    name: alert-rules
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download pinned Prometheus tarball
+        run: |
+          curl -fsSL \
+            "https://github.com/prometheus/prometheus/releases/download/v3.12.0/prometheus-3.12.0.linux-amd64.tar.gz" \
+            -o prometheus-3.12.0.linux-amd64.tar.gz
+
+      - name: Verify SHA-256 checksum
+        # Pinned digest from the official sha256sums.txt for v3.12.0.
+        # A mismatch fails the job before any binary runs (CLAUDE.md: treat external downloads as hostile).
+        run: |
+          echo "20da47f8e5303f74aecb78edd7f7e39041dac08ac4939dba75efd7a900ae8867  prometheus-3.12.0.linux-amd64.tar.gz" \
+            | sha256sum -c -
+
+      - name: Extract promtool
+        run: |
+          tar -xzf prometheus-3.12.0.linux-amd64.tar.gz \
+            prometheus-3.12.0.linux-amd64/promtool \
+            --strip-components=1
+          chmod +x promtool
+
+      - name: promtool check rules (static validation)
+        run: ./promtool check rules deploy/prometheus/alerts/*.rules.yml
+
+      - name: promtool test rules (alert-logic unit tests)
+        run: ./promtool test rules deploy/prometheus/tests/*.rules.test.yml
