@@ -27,11 +27,13 @@ from worldmonitor.api.auth_web import build_oauth
 from worldmonitor.api.deps import get_principal
 from worldmonitor.api.graph import router as graph_router
 from worldmonitor.api.integrations import router as integrations_router
+from worldmonitor.api.llm import router as llm_router
 from worldmonitor.api.middleware import DEFAULT_PUBLIC_PATHS, AuthMiddleware
 from worldmonitor.api.readiness import ReadinessResult, build_default_readiness
 from worldmonitor.authz.oidc import Principal, TokenVerifier, ZitadelTokenVerifier
 from worldmonitor.db.engine import engine_from_settings, session_factory
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.llm.gateway import LLMGateway
 from worldmonitor.plugins.registry import Registry
 from worldmonitor.settings import Settings, get_settings
 
@@ -76,6 +78,7 @@ def create_app(
     oauth: OAuth | None = None,
     db_sessions: sessionmaker[Session] | None = None,
     registry: Registry | None = None,
+    llm_gateway: LLMGateway | None = None,
 ) -> FastAPI:
     """Construct the WorldMonitor API.
 
@@ -93,6 +96,10 @@ def create_app(
     Integrations UI, ADR 0069) and ``registry`` (the plugin catalog) can be
     injected with a testcontainer factory + a fake registry; when ``None`` they are
     built from ``settings`` + a discovered Registry (connectors + notifiers).
+    ``llm_gateway`` (the sovereignty choke point behind ``POST /v1/chat/completions``,
+    ADR 0092) can be injected with a spy/fake in tests; when ``None`` it is built
+    from ``settings`` (the S2 ``LLMGateway`` with its egress-audit + confidential
+    selector).
     """
     settings = settings or get_settings()
     # Fail closed: a non-development boot with a placeholder secret halts loud here, before any
@@ -110,6 +117,8 @@ def create_app(
         db_sessions = session_factory(engine_from_settings(settings))
     if registry is None:
         registry = _discover_registry()
+    if llm_gateway is None:
+        llm_gateway = LLMGateway(settings)
     check_readiness = readiness
 
     app = FastAPI(title="WorldMonitor API", version="0.0.1")
@@ -118,6 +127,7 @@ def create_app(
     app.state.oauth = oauth
     app.state.db_sessions = db_sessions
     app.state.registry = registry
+    app.state.llm_gateway = llm_gateway
     app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
     # Middleware order is load-bearing (ADR 0068 §3): Starlette runs the LAST-ADDED middleware
@@ -170,4 +180,5 @@ def create_app(
     app.include_router(auth_web.router)
     app.include_router(graph_router)
     app.include_router(integrations_router)
+    app.include_router(llm_router)
     return app

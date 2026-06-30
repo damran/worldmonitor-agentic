@@ -9,6 +9,7 @@ from starlette.requests import Request
 
 from worldmonitor.authz.oidc import Principal
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.llm.gateway import LLMGateway
 
 
 def get_db(request: Request) -> Iterator[Session]:
@@ -32,6 +33,16 @@ def get_neo4j(request: Request) -> Neo4jClient:
     routes read it from here so tests can inject a fake or a testcontainer client.
     """
     return request.app.state.neo4j_client
+
+
+def get_llm_gateway(request: Request) -> LLMGateway:
+    """Return the LLM gateway injected onto ``app.state`` by ``create_app``.
+
+    The gateway is stored once at app construction (ADR 0092 DI-for-testability);
+    routes read it from here so tests can inject a spy/fake gateway and assert
+    the route always delegates to it (mirrors :func:`get_neo4j` exactly).
+    """
+    return request.app.state.llm_gateway  # type: ignore[no-any-return]
 
 
 def get_principal(request: Request) -> Principal:
