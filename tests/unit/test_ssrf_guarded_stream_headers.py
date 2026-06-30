@@ -12,6 +12,11 @@ Covers three things:
    enricher NEVER calls the bare ``httpx.get`` — proved by patching ``httpx.get`` to
    explode and confirming the enricher still works.
 
+Gate C (ADR 0087) tests are appended at the end of this file and are RED on the current
+tree.  They pin invariant G-NET-1: a sensitive header (Authorization / Cookie /
+Proxy-Authorization) must NOT be forwarded on a redirect hop whose host differs from the
+ORIGINAL request host, or on a same-host https→http downgrade.
+
 No live network — all tests use ``httpx.MockTransport`` + ``monkeypatch``.
 """
 
@@ -315,3 +320,438 @@ def test_wikidata_enricher_http_error_swallowed(monkeypatch: pytest.MonkeyPatch)
     WikidataEnricher(transport=transport).enrich(entity)
 
     assert "wikidata_id" not in get_anchors(entity)
+
+
+# ---------------------------------------------------------------------------
+# Gate C — cross-host header strip (ADR 0087)
+#
+# These tests pin invariant G-NET-1:
+#   "A sensitive header supplied to guarded_stream is sent ONLY to the host it was
+#    scoped to (the original request host). It is NEVER transmitted on a hop whose
+#    host differs from the original request host."
+#
+# Sensitive denylist: {authorization, cookie, proxy-authorization} (case-insensitive).
+# Scheme downgrade (https→http, same host) also strips.
+# Port-only change on same host does NOT strip.
+# Sticky strip: once stripped, NOT restored even if the chain returns to origin_host.
+#
+# Tests marked RED below FAIL on the current tree (unconditional header forwarding).
+# Tests marked GREEN pass today and must stay green after the fix (regression guards).
+# ---------------------------------------------------------------------------
+
+_AUTHZ = "Bearer gate-c-test-token"
+_COOKIE_VAL = "session=gate-c-test; id=42"
+_PROXY_AUTH = "Basic Z2F0ZWM6dGVzdA=="
+_UA = "GateCTestAgent/1.0"
+
+
+def test_sensitive_header_stripped_on_cross_host_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC2 — cross-host 302 MUST NOT carry Authorization, Cookie, or Proxy-Authorization.
+
+    Hop 1: GET http://example.com/x  (origin)
+    Redirect: 302 → http://other.example.net/dest  (DIFFERENT host)
+    Hop 2: GET http://other.example.net/dest  → 200
+
+    Assert: hop-2 request headers contain NONE of the three sensitive members.
+
+    RED today: guarded_stream passes ``headers=headers`` unconditionally, so all three
+    appear on hop 2.  The assertion fires because the leak is the current behaviour.
+    """
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.host, dict(request.headers)))
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"location": "http://other.example.net/dest"})
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com/x",
+        headers={
+            "Authorization": _AUTHZ,
+            "Cookie": _COOKIE_VAL,
+            "Proxy-Authorization": _PROXY_AUTH,
+            "User-Agent": _UA,
+        },
+        transport=httpx.MockTransport(_handler),
+    ) as resp:
+        resp.read()
+
+    assert len(calls) == 2, (
+        f"Expected exactly 2 hops (origin + cross-host), got {len(calls)}: {[c[0] for c in calls]}"
+    )
+    hop2 = calls[1][1]
+
+    assert "authorization" not in hop2, (
+        f"G-NET-1 VIOLATED (AC2): Authorization leaked to cross-host target "
+        f"'other.example.net'. hop-2 headers: {hop2}"
+    )
+    assert "cookie" not in hop2, (
+        f"G-NET-1 VIOLATED (AC2): Cookie leaked to cross-host target "
+        f"'other.example.net'. hop-2 headers: {hop2}"
+    )
+    assert "proxy-authorization" not in hop2, (
+        f"G-NET-1 VIOLATED (AC2): Proxy-Authorization leaked to cross-host target "
+        f"'other.example.net'. hop-2 headers: {hop2}"
+    )
+
+
+def test_sensitive_header_kept_on_same_host_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC3 — same-host, same-scheme redirect (different path) KEEPS sensitive headers.
+
+    Hop 1: GET http://example.com/x  → 302 → http://example.com/final
+    Hop 2: GET http://example.com/final  → 200
+
+    Assert: Authorization IS present on hop 2 (same host, no strip triggered).
+
+    GREEN today (unconditional forwarding); must stay GREEN after the denylist fix.
+    """
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.host, dict(request.headers)))
+        if request.url.path == "/x":
+            return httpx.Response(302, headers={"location": "http://example.com/final"})
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com/x",
+        headers={"Authorization": _AUTHZ, "User-Agent": _UA},
+        transport=httpx.MockTransport(_handler),
+    ) as resp:
+        resp.read()
+
+    assert len(calls) == 2, f"Expected 2 hops, got {len(calls)}"
+    hop2 = calls[1][1]
+    assert "authorization" in hop2, (
+        f"AC3 regression: Authorization was stripped on a same-host redirect — "
+        f"it must be kept. hop-2 headers: {hop2}"
+    )
+
+
+def test_sensitive_header_stripped_on_https_to_http_same_host_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC4 — same-host https→http scheme downgrade STRIPS sensitive headers.
+
+    Origin: https://example.com/x
+    Redirect: 302 → http://example.com/final  (same hostname, cleartext downgrade)
+    Hop 2: http://example.com/final  → 200
+
+    Assert: Authorization NOT present on hop 2 (credential exposed on wire otherwise).
+
+    RED today: guarded_stream forwards Authorization unconditionally, exposing it in
+    cleartext on the same-host hop.
+    """
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.host, dict(request.headers)))
+        if request.url.scheme == "https":
+            # Downgrade: same host, http
+            return httpx.Response(302, headers={"location": "http://example.com/final"})
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "https://example.com/x",
+        headers={"Authorization": _AUTHZ, "User-Agent": _UA},
+        transport=httpx.MockTransport(_handler),
+    ) as resp:
+        resp.read()
+
+    assert len(calls) == 2, f"Expected 2 hops, got {len(calls)}"
+    hop2 = calls[1][1]
+    assert "authorization" not in hop2, (
+        f"G-NET-1 VIOLATED (AC4): Authorization forwarded on https→http downgrade to "
+        f"the SAME host 'example.com'. Credential now travels in cleartext. "
+        f"hop-2 headers: {hop2}"
+    )
+
+
+def test_nonsensitive_header_survives_cross_host_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC5 — User-Agent and Accept survive a cross-host redirect (no blanket strip).
+
+    The fix MUST be a denylist (strip only Authorization/Cookie/Proxy-Authorization),
+    NOT a blanket strip of all caller headers on host change.  Functional headers that
+    are intentionally host-agnostic (User-Agent, Accept) MUST be present on every hop.
+
+    GREEN today; must stay GREEN after the denylist fix.  If this fails after the fix,
+    the builder used a blanket strip instead of a denylist.
+    """
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.host, dict(request.headers)))
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"location": "http://cdn.other.net/asset"})
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com/x",
+        headers={
+            "Authorization": _AUTHZ,
+            "User-Agent": _UA,
+            "Accept": "application/octet-stream",
+        },
+        transport=httpx.MockTransport(_handler),
+    ) as resp:
+        resp.read()
+
+    assert len(calls) == 2, f"Expected 2 hops, got {len(calls)}"
+    hop2 = calls[1][1]
+    assert "user-agent" in hop2, (
+        f"AC5 regression: User-Agent was stripped on cross-host redirect — blanket strip "
+        f"detected. Only the sensitive denylist must be stripped. hop-2 headers: {hop2}"
+    )
+    assert "accept" in hop2, (
+        f"AC5 regression: Accept was stripped on cross-host redirect — blanket strip "
+        f"detected. Only the sensitive denylist must be stripped. hop-2 headers: {hop2}"
+    )
+
+
+def test_cross_host_strip_is_sticky_through_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC6 — sticky strip: A→B→A chain does NOT restore sensitive headers on the return to A.
+
+    Hop 1: GET http://example.com/x        → 302 → http://other.net/b   (cross-host, strip)
+    Hop 2: GET http://other.net/b          → 302 → http://example.com/final  (back to origin)
+    Hop 3: GET http://example.com/final    → 200
+
+    Assert: Authorization NOT present on hop 3 (the return to origin is sticky-stripped).
+
+    RED today: Authorization is present on ALL hops because headers are unconditional.
+    The assertion at hop 3 fires because the header leaks back on the A→B→A return.
+    """
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.host, dict(request.headers)))
+        if request.url.path == "/x":
+            # Hop 1: example.com → other.net
+            return httpx.Response(302, headers={"location": "http://other.net/b"})
+        if request.url.host == "other.net":
+            # Hop 2: other.net → example.com (back to origin)
+            return httpx.Response(302, headers={"location": "http://example.com/final"})
+        # Hop 3: example.com/final → 200
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com/x",
+        headers={"Authorization": _AUTHZ, "User-Agent": _UA},
+        transport=httpx.MockTransport(_handler),
+    ) as resp:
+        resp.read()
+
+    assert len(calls) == 3, f"Expected 3 hops (A→B→A), got {len(calls)}: {[c[0] for c in calls]}"
+    # Hop 2 (other.net) must not have Authorization
+    hop2 = calls[1][1]
+    assert "authorization" not in hop2, (
+        f"G-NET-1 VIOLATED (AC6 hop-2): Authorization leaked to cross-host target "
+        f"'other.net'. hop-2 headers: {hop2}"
+    )
+    # Hop 3 (return to example.com/final) must also not have Authorization — sticky strip
+    hop3 = calls[2][1]
+    assert "authorization" not in hop3, (
+        f"G-NET-1 VIOLATED (AC6 sticky strip): Authorization was RESTORED on return "
+        f"to origin host 'example.com' after A→B→A chain. "
+        f"Sticky strip must not restore headers. hop-3 headers: {hop3}"
+    )
+    # Non-sensitive header must survive all hops including the return
+    assert "user-agent" in hop3, (
+        f"AC6: User-Agent (non-sensitive) was unexpectedly absent on hop 3. hop-3 headers: {hop3}"
+    )
+
+
+def test_sensitive_header_match_is_case_insensitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC9 — strip is case-insensitive: 'AUTHORIZATION' (uppercase key) is still sensitive.
+
+    The caller passes the header with an uppercase key.  httpx normalises it to lowercase
+    internally ('authorization'), and the denylist match must be case-insensitive so the
+    header is stripped on a cross-host redirect regardless of the caller's key casing.
+
+    RED today: Authorization is forwarded unconditionally (no case-aware strip at all).
+    """
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.host, dict(request.headers)))
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"location": "http://evil.net/steal"})
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com/x",
+        # Uppercase key — must still be treated as sensitive
+        headers={"AUTHORIZATION": _AUTHZ, "User-Agent": _UA},
+        transport=httpx.MockTransport(_handler),
+    ) as resp:
+        resp.read()
+
+    assert len(calls) == 2, f"Expected 2 hops, got {len(calls)}"
+    hop2 = calls[1][1]
+    # httpx lowercases header names; 'AUTHORIZATION' arrives as 'authorization'
+    assert "authorization" not in hop2, (
+        f"G-NET-1 VIOLATED (AC9): AUTHORIZATION (uppercase key) leaked to cross-host "
+        f"target 'evil.net'. Case-insensitive denylist matching failed. "
+        f"hop-2 headers: {hop2}"
+    )
+
+
+def test_cookie_and_proxy_auth_also_stripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC1/AC2 for Cookie and Proxy-Authorization — each denylist member is independently stripped.
+
+    Runs two sub-scenarios to confirm Cookie and Proxy-Authorization are each stripped on a
+    cross-host redirect, independently of Authorization.
+
+    RED today: both headers are forwarded unconditionally.
+    """
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+
+    # --- Sub-scenario A: Cookie only ---
+    calls_cookie: list[tuple[str, dict[str, str]]] = []
+
+    def _cookie_handler(request: httpx.Request) -> httpx.Response:
+        calls_cookie.append((request.url.host, dict(request.headers)))
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"location": "http://evil.net/steal"})
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com/x",
+        headers={"Cookie": _COOKIE_VAL, "User-Agent": _UA},
+        transport=httpx.MockTransport(_cookie_handler),
+    ) as resp:
+        resp.read()
+
+    assert len(calls_cookie) == 2, f"Sub-A: expected 2 hops, got {len(calls_cookie)}"
+    assert "cookie" not in calls_cookie[1][1], (
+        f"G-NET-1 VIOLATED: Cookie leaked to cross-host target 'evil.net'. "
+        f"hop-2 headers: {calls_cookie[1][1]}"
+    )
+
+    # --- Sub-scenario B: Proxy-Authorization only ---
+    calls_proxy: list[tuple[str, dict[str, str]]] = []
+
+    def _proxy_handler(request: httpx.Request) -> httpx.Response:
+        calls_proxy.append((request.url.host, dict(request.headers)))
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"location": "http://evil.net/steal"})
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com/x",
+        headers={"Proxy-Authorization": _PROXY_AUTH, "User-Agent": _UA},
+        transport=httpx.MockTransport(_proxy_handler),
+    ) as resp:
+        resp.read()
+
+    assert len(calls_proxy) == 2, f"Sub-B: expected 2 hops, got {len(calls_proxy)}"
+    assert "proxy-authorization" not in calls_proxy[1][1], (
+        f"G-NET-1 VIOLATED: Proxy-Authorization leaked to cross-host target 'evil.net'. "
+        f"hop-2 headers: {calls_proxy[1][1]}"
+    )
+
+
+def test_no_redirect_sends_all_headers_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC7 — no redirect: all headers (including sensitive) reach the origin unchanged.
+
+    Happy path: a 200 on the first hop means no stripping occurs at all.  Guards against
+    accidental stripping on a direct (non-redirect) request.
+
+    GREEN today; must stay GREEN after the fix.
+    """
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+    seen: dict[str, str] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.headers))
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com/resource",
+        headers={
+            "Authorization": _AUTHZ,
+            "Cookie": _COOKIE_VAL,
+            "User-Agent": _UA,
+        },
+        transport=httpx.MockTransport(_handler),
+    ) as resp:
+        resp.read()
+
+    assert seen.get("authorization") == _AUTHZ, (
+        f"Authorization must be present on a direct (no-redirect) request. seen={seen}"
+    )
+    assert seen.get("cookie") == _COOKIE_VAL, (
+        f"Cookie must be present on a direct (no-redirect) request. seen={seen}"
+    )
+    assert seen.get("user-agent") == _UA, (
+        f"User-Agent must be present on a direct (no-redirect) request. seen={seen}"
+    )
+
+
+def test_same_host_port_only_change_keeps_sensitive_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Port-only change on the same hostname does NOT strip sensitive headers (per spec).
+
+    Origin: http://example.com:8080/x
+    Redirect: 302 → http://example.com:9090/y  (same hostname, different port only)
+
+    httpx.URL.host returns the bare hostname for both URLs ('example.com'), so the
+    origin-host comparison is equal and no strip is triggered.  This matches
+    requests.Session.rebuild_auth behaviour and is a deliberate spec choice.
+
+    GREEN today (unconditional forwarding); must stay GREEN after the fix.
+    """
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.host, dict(request.headers)))
+        if request.url.path == "/x":
+            return httpx.Response(302, headers={"location": "http://example.com:9090/y"})
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com:8080/x",
+        headers={"Authorization": _AUTHZ, "User-Agent": _UA},
+        transport=httpx.MockTransport(_handler),
+    ) as resp:
+        resp.read()
+
+    assert len(calls) == 2, f"Expected 2 hops, got {len(calls)}"
+    hop2 = calls[1][1]
+    assert "authorization" in hop2, (
+        f"Port-only-change regression: Authorization was stripped on a same-hostname "
+        f"port-change redirect. Spec says port-only change must NOT strip. "
+        f"hop-2 headers: {hop2}"
+    )
