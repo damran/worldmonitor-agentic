@@ -1,0 +1,20 @@
+# WorldMonitor — Hermes agent config template (Phase-3 S3b, ADR 0093).
+# Secrets are ${VAR} placeholders ONLY — Hermes resolves them from the container env at connect time
+# (compose fills them from the operator's host env). NEVER commit a real bearer/JWT here.
+mcp_servers:
+  worldmonitor:
+    url: "http://mcp:8765/mcp"            # our bearer-gated streamable-http MCP (S1, ADR 0090)
+    transport: streamable_http            # confirm exact key vs v0.17.0 mcp-config-reference
+    headers:
+      Authorization: "Bearer ${WM_MCP_TOKEN}"
+    tools:
+      include: [get_entity, get_neighbors, get_provenance, find_paths]   # EXACTLY the 4 read tools
+    timeout: 300
+    connect_timeout: 60
+    ssl_verify: true
+    enabled: true
+model:
+  default: "<local-model-name>"           # operator-set; resolved backend is decided server-side (S3a)
+  provider: custom
+  base_url: "http://api:8000/v1"          # OUR S3a route — NOT Ollama/OpenRouter/Anthropic (sovereignty)
+  api_key: "${WM_LLM_TOKEN}"
