@@ -35,8 +35,11 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
+from worldmonitor.authz.oidc import ZitadelTokenVerifier
 from worldmonitor.graph import queries, read_guards
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.mcp.auth import ZitadelMCPTokenVerifier, build_auth_settings
+from worldmonitor.settings import get_settings
 
 logger = logging.getLogger("worldmonitor.mcp.server")
 
@@ -120,18 +123,13 @@ def tool_find_paths(
     )
 
 
-def build_server(*, neo4j_client: Neo4jClient | None = None) -> FastMCP:
-    """Build the FastMCP server, registering exactly the four read tools (ADR 0063).
+def _register_read_tools(server: FastMCP, client: Neo4jClient) -> None:
+    """Register exactly the four read tools on ``server``, closing over ``client``.
 
-    The Neo4j client is INJECTABLE for testability (mirrors ``create_app``, ADR 0062):
-    an injected client is used verbatim and NO connection is opened here; only when
-    ``neo4j_client is None`` is the default ``Neo4jClient.from_settings()`` constructed.
-    Tool handlers close over the client and delegate to the thin module-level functions.
+    Shared by the stdio (:func:`build_server`) and HTTP (:func:`build_http_app`) transports so
+    BOTH surfaces expose an identical 4-tool, read-only set — there is exactly one place a tool
+    is registered (INV-S1-READONLY: the HTTP surface never drifts from stdio).
     """
-    configure_stderr_logging()
-    client = neo4j_client if neo4j_client is not None else Neo4jClient.from_settings()
-
-    server: FastMCP = FastMCP(name="worldmonitor-graph-read")
 
     def get_entity(entity_id: str) -> dict[str, Any]:
         """Return a resolved entity's properties (incl. provenance); error if absent."""
@@ -153,10 +151,116 @@ def build_server(*, neo4j_client: Neo4jClient | None = None) -> FastMCP:
     server.add_tool(get_neighbors, name="get_neighbors")
     server.add_tool(get_provenance, name="get_provenance")
     server.add_tool(find_paths, name="find_paths")
+
+
+def _resolve_client(neo4j_client: Neo4jClient | None) -> Neo4jClient:
+    """Use an injected client verbatim (no connection opened); else build from settings."""
+    return neo4j_client if neo4j_client is not None else Neo4jClient.from_settings()
+
+
+def build_server(*, neo4j_client: Neo4jClient | None = None) -> FastMCP:
+    """Build the **stdio** FastMCP server, registering exactly the four read tools (ADR 0063).
+
+    The Neo4j client is INJECTABLE for testability (mirrors ``create_app``, ADR 0062):
+    an injected client is used verbatim and NO connection is opened here; only when
+    ``neo4j_client is None`` is the default ``Neo4jClient.from_settings()`` constructed.
+
+    This is the unchanged stdio path: NO auth, NO port, NO token verifier (INV-S1-STDIO).
+    """
+    configure_stderr_logging()
+    server: FastMCP = FastMCP(name="worldmonitor-graph-read")
+    _register_read_tools(server, _resolve_client(neo4j_client))
     return server
 
 
+def build_http_app(
+    *,
+    neo4j_client: Neo4jClient | None = None,
+    token_verifier: ZitadelMCPTokenVerifier,
+) -> Any:
+    """Build the **authenticated** ``streamable-http`` ASGI app for a remote Hermes (ADR 0090).
+
+    ``token_verifier`` is REQUIRED and has no default: omitting it raises ``TypeError`` before
+    any code runs, so an anonymous HTTP MCP port can never be constructed (INV-S1-AUTH,
+    fail-closed). The verifier (a :class:`ZitadelMCPTokenVerifier`) is wired through the SDK's
+    native ``BearerAuthBackend`` + ``RequireAuthMiddleware`` via ``FastMCP(auth=…,
+    token_verifier=…)``; we hand-roll no middleware.
+
+    Exposes EXACTLY the same four read tools as :func:`build_server` (INV-S1-READONLY). The
+    issuer/resource come from settings; in an unconfigured dev/test environment (no
+    ``zitadel_domain``) the issuer falls back to a localhost placeholder so the app can still
+    be constructed — real token validation is done by the wrapped Zitadel verifier regardless.
+
+    Unlike the stdio path, this transport does NOT call ``configure_stderr_logging()``: STDOUT
+    PURITY is a stdio-only invariant (there, stdout is the JSON-RPC frame channel). Over HTTP the
+    frames travel in the response body, so logging may use the process default — and forcing the
+    process-global stderr handler here would otherwise fight stdio logging config in-process.
+    """
+    settings = get_settings()
+
+    issuer_url = settings.oidc_issuer or _DEV_FALLBACK_ISSUER
+    if not settings.oidc_issuer:
+        logger.warning(
+            "no zitadel_domain configured; using a localhost issuer placeholder for MCP "
+            "protected-resource metadata (token validation still uses the wrapped verifier)"
+        )
+    resource_server_url = settings.mcp_resource_server_url or None
+
+    auth_settings = build_auth_settings(
+        issuer_url=issuer_url, resource_server_url=resource_server_url
+    )
+    server: FastMCP = FastMCP(
+        name="worldmonitor-graph-read",
+        auth=auth_settings,
+        token_verifier=token_verifier,
+        # Stateless HTTP (no server-side session continuity / no mcp-session-id requirement):
+        # the read-only tool surface holds no per-session state, and statelessness keeps the
+        # transport 12-factor (any replica serves any request, no sticky sessions).
+        stateless_http=True,
+    )
+    _register_read_tools(server, _resolve_client(neo4j_client))
+    return server.streamable_http_app()
+
+
+# Localhost issuer used ONLY when zitadel_domain is unset (dev/test). Production always sets
+# zitadel_domain, so oidc_issuer is the real issuer and this is never reached.
+_DEV_FALLBACK_ISSUER = "http://localhost"
+
+
 def main() -> None:
-    """Console entrypoint — run the stdio MCP server (spawned by Hermes / an operator)."""
+    """Console entrypoint — run the MCP server on the configured transport.
+
+    Default is stdio (ADR 0063, unchanged). When ``mcp_transport == "streamable-http"`` the
+    server runs the authenticated HTTP transport (ADR 0090): a ``ZitadelTokenVerifier`` is built
+    from settings, wrapped by :class:`ZitadelMCPTokenVerifier`, and the HTTP app is served on the
+    configured host/port. Fail-closed: HTTP requires the verifier, which requires a configured
+    issuer/JWKS/audience.
+    """
     configure_stderr_logging()
-    build_server().run(transport="stdio")
+    settings = get_settings()
+
+    if settings.mcp_transport == "streamable-http":
+        import uvicorn
+
+        # Fail-closed AND loud: refuse to start the HTTP transport unless Zitadel is configured.
+        # Without it the wrapped verifier would reject every token (a server that 401s everything),
+        # which is safe but a silent operator footgun — so we hard-fail at boot with a clear cause
+        # instead of serving a uselessly-locked port.
+        if not settings.zitadel_domain:
+            raise RuntimeError(
+                "mcp_transport=streamable-http requires zitadel_domain (+ client_id) to be "
+                "configured: the HTTP MCP transport is bearer-gated and cannot verify tokens "
+                "without an OIDC issuer/JWKS. Set ZITADEL_DOMAIN or run the stdio transport."
+            )
+
+        verifier = ZitadelMCPTokenVerifier(
+            ZitadelTokenVerifier(
+                issuer=settings.oidc_issuer,
+                jwks_uri=settings.oidc_jwks_uri,
+                audience=settings.zitadel_client_id,
+            )
+        )
+        app = build_http_app(token_verifier=verifier)
+        uvicorn.run(app, host=settings.mcp_http_host, port=settings.mcp_http_port)
+    else:
+        build_server().run(transport="stdio")
