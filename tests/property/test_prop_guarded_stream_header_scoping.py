@@ -175,13 +175,16 @@ def test_prop_sensitive_never_leaves_origin(
     # max_redirects must cover the full chain; default=5, but be explicit.
     max_redir = len(chain) + 1
 
-    with mock.patch("socket.getaddrinfo", _fake_getaddrinfo), guarded_stream(
-        "GET",
-        f"{origin_scheme}://{_ORIGIN_HOST}/start",
-        headers=request_headers,
-        transport=transport,
-        max_redirects=max_redir,
-    ) as resp:
+    with (
+        mock.patch("socket.getaddrinfo", _fake_getaddrinfo),
+        guarded_stream(
+            "GET",
+            f"{origin_scheme}://{_ORIGIN_HOST}/start",
+            headers=request_headers,
+            transport=transport,
+            max_redirects=max_redir,
+        ) as resp,
+    ):
         resp.read()
 
     # --- Sanity: exactly len(chain)+1 requests were issued ---
