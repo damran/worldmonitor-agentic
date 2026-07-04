@@ -41,9 +41,11 @@ reviewable data, and add a CI gate that fails when the installed schema diverges
    - `followthemoney-graph==0.1.0`
    - `nomenklatura==4.10.0`
 
-   `uv.lock` is **left unchanged** — it already pins these exact versions with sha256 hashes; the `==`
-   pins make the intent explicit in the human-edited manifest and stop a floor-driven drift at resolve
-   time.
+   `uv.lock`'s **resolved versions and sha256 hashes are unchanged** — it already pinned these exact
+   versions. The only lock delta is its `requires-dist` mirror updating the three specifiers from `>=`
+   to `==` to match the manifest, so `uv lock --check` stays consistent (a stale lock would make CI's
+   `uv sync` attempt a re-resolve). The `==` pins make the intent explicit in the human-edited manifest
+   and stop a floor-driven drift at resolve time.
 
 2. **Vendor the schema as data.** Copy the 69 FtM schema YAMLs from the installed package into a new
    repo directory `ontology/vendor/ftm/` and commit them as **data** (not code — no import path, no
