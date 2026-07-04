@@ -1,6 +1,6 @@
 # ADR 0046 — Abstract `Thing`-range edge materialization (thin ftmg override + `:Ghost`)
 
-> Status: **PROPOSED** · 2026-06-25 · Closes audit gap **G3** · Addresses **ADR 0023 item 2**
+> Status: **ACCEPTED** · 2026-06-25 · Closes audit gap **G3** · Addresses **ADR 0023 item 2**
 > Gate: [Gate D — Abstract `Thing`-Range Edge Materialization](../reviews/GATE_D_ABSTRACT_EDGES_SPEC.md)
 > Person-affecting: **NO** (graph structure only; the one person-relevant surface is a *forward-constraint*, §Decision 4)
 

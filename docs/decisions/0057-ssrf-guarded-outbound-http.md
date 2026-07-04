@@ -1,6 +1,6 @@
 # 0057 — SSRF-guarded outbound HTTP for connectors
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-27
 - **Gate:** Phase-B #4 (`gate/connector-ssrf-redirects`) — a focused fix off `master`.
 - **Addresses:** audit **M-9** (the SSRF half) — confirmed at file:line in Round-2 (flagged single-verifier;

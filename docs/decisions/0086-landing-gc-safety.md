@@ -1,6 +1,6 @@
 # ADR 0086 — Landing-zone GC safety hardening (review remediation)
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Gate:** Gate B — landing-zone GC safety (`docs/reviews/GATE_B_LANDING_GC_SAFETY_SPEC.md`).
 - **Addresses:** adversarial review 2026-06-29 of PRs #138–145 — three **medium** findings against
   the landing-zone orphan GC (ADR 0083 / PR #143). 0 critical / 0 high. Default-off ⇒ no behaviour

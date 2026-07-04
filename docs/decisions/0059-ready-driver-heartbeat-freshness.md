@@ -1,6 +1,6 @@
 # 0059 — Surface driver-heartbeat freshness on `/ready` (non-fatal)
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-27
 - **Gate:** Phase-D (`gate/ready-driver-heartbeat`) — a focused, LOW enhancement off `master`.
 - **Addresses:** the cross-workflow review's one A→B port candidate — the sibling's `/ready` includes a

@@ -1,6 +1,6 @@
 # ADR 0041 — Resolution / sign-off integrity
 
-- **Status:** proposed
+- **Status:** ACCEPTED
   *(No OPEN fork. ACCEPTED on merge after the builder record is filled in and the fresh-context judge
   approves. `human_fork=false` — see §Decision rationale.)*
 - **Date:** 2026-06-24

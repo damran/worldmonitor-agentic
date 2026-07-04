@@ -1,6 +1,6 @@
 # 0052 — GeoNames connector: bounded streaming + fail-closed local-path confinement
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-27
 - **Gate:** H-6 (OOM) + H-7 (local-path LFI) — `gate/h6h7-geonames-oom-lfi`
 - **Spec:** `docs/reviews/GATE_H6H7_GEONAMES_OOM_LFI_SPEC.md`

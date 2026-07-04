@@ -1,6 +1,6 @@
 # ADR 0087 — `guarded_stream` cross-host header strip (review remediation)
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Gate:** Gate C — `guarded_stream` cross-host header strip
   (`docs/reviews/GATE_C_GUARDED_STREAM_HEADER_STRIP_SPEC.md`).
 - **Addresses:** adversarial review 2026-06-29 of PRs #138–145 — a cheap-high-value LOW against the

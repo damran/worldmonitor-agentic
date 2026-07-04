@@ -1,6 +1,6 @@
 # 0061 — Production secret hygiene: loopback-bound stores + fail-closed placeholder secrets
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-27
 - **Gate:** Stage-0 / audit **M-2** (`gate/m2-secret-hygiene`). Off `master`.
 - **Addresses:** audit M-2 — weak/placeholder secrets + backend ports exposed to the host.

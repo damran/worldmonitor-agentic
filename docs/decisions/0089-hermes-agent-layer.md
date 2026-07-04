@@ -1,6 +1,6 @@
 # 0089 — Phase 3: the Hermes agent layer (umbrella)
 
-- **Status:** PROPOSED (2026-06-30)
+- **Status:** ACCEPTED (2026-06-30)
 - **Date:** 2026-06-30
 - **Milestone:** Phase 3 — Agent layer (Hermes) connected (`docs/40_ROADMAP.md:71`). Done-condition:
   *"you can ask WorldMonitor questions from Telegram and receive scheduled briefings, driven by

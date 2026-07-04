@@ -1,6 +1,6 @@
 # 0090 — Phase-3 S1: authenticated HTTP transport for the MCP read server
 
-- **Status:** PROPOSED (2026-06-30)
+- **Status:** ACCEPTED (2026-06-30)
 - **Date:** 2026-06-30
 - **Gate:** Phase-3 slice **S1** (the security boundary). Companion spec:
   `docs/reviews/GATE_S1_MCP_HTTP_AUTH_SPEC.md`. Umbrella: ADR 0089 (D2).

@@ -1,6 +1,6 @@
 # 0060 — Node provenance integrity: additive re-emit + fail-closed node provenance
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-27
 - **Gate:** Stage-0 / audit **M-1** + the node-side **G1** hole (`gate/m1-node-provenance`). Off `master`.
 - **Addresses:** audit M-1 (`SET n = props` clobbers anchors/`prov_*` on re-emit) and the node half of

@@ -1,6 +1,6 @@
 # 0055 — Fail-closed edge provenance (no silently-unprovenanced edges)
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-27
 - **Gate:** Phase-B #2 (`gate/edge-provenance-g1`) — a focused fix off `master`.
 - **Addresses:** the G1 edge-provenance hole at `graph/writer.py` (`_inject_props`, the `if edge_props:`

@@ -2,8 +2,8 @@
 
 - **Status:** accepted
 - **Date:** 2026-06-21
-- **Supersedes the temporary mode of:** [0024](0024-merge-guard-alert-mode.md)
-- **Builds on:** [0026](0026-batch-first-resolution.md) (batch-first), [0028](0028-ephemeral-per-batch-resolver.md) (per-batch resolver / G4), [0025](0025-referent-rewriting.md) (referent rewriting), [0030](0030-alembic-migrations.md) (migrations)
+- **Supersedes the temporary mode of:** [0024](0024-merge-guard-alert-mode-build-phase.md)
+- **Builds on:** [0026](0026-batch-first-resolution.md) (batch-first), [0028](0028-per-batch-resolver-isolation.md) (per-batch resolver / G4), [0025](0025-referent-rewriting.md) (referent rewriting), [0030](0030-alembic-migrations.md) (migrations)
 
 ## Context
 
@@ -14,7 +14,7 @@ Block mode parks a flagged (oversized / PEP / sanctioned) cluster as `pending_re
 and never writes it — but until now nothing let an operator *act* on a parked merge,
 so block mode was a dead end.
 
-The hard part is durability under [0028](0028-ephemeral-per-batch-resolver.md): the
+The hard part is durability under [0028](0028-per-batch-resolver-isolation.md): the
 resolver is **ephemeral per batch** (the G4 fix — a shared nomenklatura ledger leaked
 merges across tenants). A judgement made in one batch evaporates, so a human decision
 would be forgotten and the cluster would re-park on every later batch.
