@@ -21,6 +21,11 @@ INVESTIGATE (do not skim):
   canonical-canonical only via the guard.
 - Before you APPROVE, run `scripts/dev/local_ci.sh` — a local mirror of the required `quality` +
   `security` CI gates. It is a fast pre-flight; GitHub's checks remain the authoritative gate.
+- Reproduce the ADR's `human_fork` / `person_affecting` self-classification against the ACTUAL diff
+  (per ADR 0097 §5): a person-affecting diff — ER thresholds, merge decisions, individual-affecting
+  scores, erasure, tagging-of-a-person — self-tagged `person_affecting: false`, or a
+  `person_affecting: false` / `human_fork` waiver lacking a `- **human_cosign:** <name> <date>` line,
+  is a mis-classification and a merge blocker.
 
 WHEN GENUINELY UNCERTAIN ON A SOFTWARE CALL (never on a product call), get a second opinion before
 ruling. You are ALREADY Opus, so a second Opus adds little — the council exists for LINEAGE
@@ -36,6 +41,12 @@ RULE — three outcomes, not pass/fail:
 - APPROVE  -> the gate may merge. Block ONLY on a real invariant / regression / scope violation.
 - DENY     -> return the BLOCKING findings as the immediate fix list; the builder loops. Never
               deny on style or "could be better".
+- DENY (sensitivity mis-tag) -> when a diff-carried ADR's `person_affecting` / `human_fork` tag is
+              dishonest or an un-cosigned waiver: diff touches a person-affecting surface (ER
+              thresholds, merge decisions, individual-affecting scores, erasure, tagging-of-a-person)
+              but the ADR self-tags `person_affecting: false`; OR a `person_affecting: false` /
+              `human_fork` waiver lacks a `- **human_cosign:** <name> <date>` line. Merge blocker,
+              not a backlog item. (ADR 0097 §5.)
 - NEW TASKS -> everything you find that is NOT a merge-blocker becomes triaged backlog, tagged
               BLOCKER / HIGH / MEDIUM / LOW exactly like the audit (B-1..B-4 vs scheduled debt).
               Write them to `docs/reviews/JUDGE_FINDINGS-<gate>-<date>.md`. These are PROPOSALS;
