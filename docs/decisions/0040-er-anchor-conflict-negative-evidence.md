@@ -1,7 +1,6 @@
 # 0040 — ER anchor-conflict + identifier-override negative evidence
 
-- **Status:** proposed — anchor-conflict fork **RESOLVED → (C) HYBRID** by the human on 2026-06-24;
-  ACCEPTED on merge after the Builder record is filled and the judge approves.
+- **Status:** ACCEPTED — anchor-conflict fork **RESOLVED → (C) HYBRID** by the human on 2026-06-24.
 - **Date:** 2026-06-24
 - **Gate:** B-5 (`docs/reviews/GATE_B5_SPEC.md`)
 - **Touches (intended):** `resolution/splink_model.py`, `resolution/review.py`, `ontology/anchors.py`

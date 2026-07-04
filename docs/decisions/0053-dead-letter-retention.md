@@ -1,6 +1,6 @@
 # 0053 — Dead-letter (`ingest_dead_letter`) retention / pruning
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-27
 - **Gate:** B-4d (the dead-letter half of audit finding M-6; last B-4-family slice)
 - **Branch:** `gate/b4d-deadletter-pruning` (off `master` @ `f8c322b`)

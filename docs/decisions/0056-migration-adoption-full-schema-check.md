@@ -1,6 +1,6 @@
 # 0056 — Migration adoption requires a complete schema (no blind-stamp on one column)
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-27
 - **Gate:** Phase-B #3 (`gate/migration-adoption-schema-check`) — a focused fix off `master`.
 - **Addresses:** the partial-restore hazard at `db/engine.py:74` (`migrate_to_head`), confirmed

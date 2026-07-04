@@ -1,6 +1,6 @@
 # 0044 — Anchor-preferred stable canonical ids + canonical-alias ledger + adopt/merge/split
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-25
 - **Gate:** B-front (`docs/reviews/GATE_B_FRONT_STABLE_IDS_SPEC.md`) — the **front half** of Gate B
   ([0019](0019-batch-vs-streaming-resolution.md), still OPEN for the incremental-ER fork).

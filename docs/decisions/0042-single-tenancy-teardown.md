@@ -1,6 +1,6 @@
 # ADR 0042 — Single-tenancy teardown: remove `tenant_id` (supersedes ADR 0017)
 
-> Status: **PROPOSED** · 2026-06-25 · `human_fork=false` (user-authorized 2026-06-25, locked
+> Status: **ACCEPTED** · 2026-06-25 · `human_fork=false` (user-authorized 2026-06-25, locked
 > decision **D1: single-tenant**). Supersedes **ADR 0017**. Notes **0028 / 0029 / 0031**.
 > Gate: `docs/reviews/GATE_0_SPEC.md` (Gate 0, a DELETION gate).
 

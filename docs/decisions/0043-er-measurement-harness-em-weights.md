@@ -1,6 +1,6 @@
 # ADR 0043 — ER measurement harness + EM weights (extends ADR 0016)
 
-> Status: **PROPOSED** · 2026-06-25 · **Extends ADR 0016** (does not supersede it) ·
+> Status: **ACCEPTED** · 2026-06-25 · **Extends ADR 0016** (does not supersede it) ·
 > Closes the *measurement* half of audit gap **G7**.
 > Gate spec: `docs/reviews/GATE_A_ER_HARNESS_SPEC.md`.
 > `human_fork`: **slice-1 = false** (autonomous) · **slice-2 = true** (human sign-off required).

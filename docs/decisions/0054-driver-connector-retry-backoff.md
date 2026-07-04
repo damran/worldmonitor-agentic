@@ -1,6 +1,6 @@
 # 0054 — Driver connector retry with exponential backoff
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-27
 - **Gate:** Phase-B #1 (`gate/driver-retry-backoff`) — a focused fix off `master`.
 - **Addresses:** audit H-8 (the retry half) — confirmed at file:line in the cross-workflow Round-2

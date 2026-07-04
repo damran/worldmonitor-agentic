@@ -1,0 +1,34 @@
+name: adr-index
+
+# Fails if docs/decisions/README.md's generated ADR index has drifted from the ADR
+# file headers. Pure-Python, stdlib-only guard (scripts/gen_adr_index.py --check) — no
+# dependency install needed. Own workflow file so it never conflicts with quality.yml.
+# NOT yet a branch-protection required check (admin TODO, mirroring the alert-rules pattern).
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adr-index-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  adr-index:
+    name: adr-index
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check ADR index is in sync with ADR headers
+        run: python scripts/gen_adr_index.py --check

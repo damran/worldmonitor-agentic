@@ -1,6 +1,6 @@
 # 0051 — Driver supervision, containerization & a real readiness surface
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-27
 - **Gate:** B-4c — driver supervision & containerization (`docs/reviews/GATE_B4C_DRIVER_SUPERVISION_SPEC.md`). **BUILD gate.**
 - **Closes (one of three B-4 defects):** the cross-line audit finding **B-4** bundles three defects:

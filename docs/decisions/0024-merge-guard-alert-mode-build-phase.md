@@ -1,7 +1,7 @@
 # ADR 0024 — Catastrophic-merge guard: alert-only mode for the build phase
 
 > Status: **LOCKED (build phase, TEMPORARY)** · June 2026 · Supersedes [0020](0020-merge-guard-thresholds.md)
-> for the build phase. Format: Context → Decision → Status → Consequences.
+> for the build phase · Superseded by [0031](0031-return-to-block-signoff.md). Format: Context → Decision → Status → Consequences.
 
 ## Context
 ADR 0020 set the catastrophic-merge guard to **block**: a cluster that is oversized

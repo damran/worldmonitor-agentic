@@ -1,6 +1,6 @@
 # 0048 — FtM-valid, injective durable canonical id (Gate CID-fix)
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-26
 - **Gate:** CID-fix (`docs/reviews/GATE_CID_FIX_SPEC.md`) — a focused BUG-FIX gate off `master`.
 - **Touches:** `resolution/canonical.py` (`pick_anchor` id serialization + `record_durable_id` parse +

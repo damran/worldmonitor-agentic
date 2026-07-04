@@ -1,6 +1,6 @@
 # 0058 — ConfigCipher key rotation via MultiFernet
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-06-27
 - **Gate:** Phase-B #5 (`gate/config-cipher-key-rotation`) — a focused fix off `master`.
 - **Addresses:** audit **M-10** — confirmed file:line in the cross-workflow Round-2 cross-examination.
