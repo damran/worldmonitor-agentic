@@ -30,7 +30,8 @@ the ontology, plugin, agent, and API specs are siblings (`20`/`30`/`50`/`60`).
 │ L6  Anomaly & signals (plugins) point / time-series / coordinated · insider signals│  Sec 3
 │ L5  Domain enrichers (plugins)  news/NLP · social · crypto · CTI/infra · geo/imagery│  Sec 2,4,5,6,7
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│ L4  Graph store & analytics     Neo4j (+ GDS) = property-graph SYSTEM OF RECORD ·   │  Sec 2
+│ L4  Graph store & analytics     Neo4j (+ GDS) = derived property-graph projection   │  Sec 2
+│                                 (SoR = Postgres statement log, ADR 0095) ·          │
 │                                 centrality/community/paths/fund-flow · ref layers   │
 │ L3  Entity resolution           Splink (DuckDB) + nomenklatura · canonical-ID       │  Sec 1
 │                                 registry · clustering · catastrophic-merge guard    │
@@ -92,7 +93,7 @@ Confirmed: **graph-native with a custom ontology on a property graph.**
 ### Core spine
 | Concern | Choice | Why / notes | Alternative |
 |---|---|---|---|
-| Graph store (SoR) | **Neo4j 2026.x Community + GDS** | Property-graph SoR; GDS Community includes the algorithms; Cypher; `graphdatascience` client. Single-tenant (D1/ADR 0042) — one graph, no per-tenant scoping; Enterprise RBAC/multi-db stays available *if* a future cloud-tier reintroduces multi-tenancy. | Memgraph; ArangoDB |
+| Graph store | **Neo4j 2026.x Community + GDS** | Derived property-graph projection (statement log = SoR, ADR 0095; Neo4j live SoR in transition until F1 projector cutover); GDS Community includes the algorithms; Cypher; `graphdatascience` client. Single-tenant (D1/ADR 0042) — one graph, no per-tenant scoping; Enterprise RBAC/multi-db stays available *if* a future cloud-tier reintroduces multi-tenancy. | Memgraph; ArangoDB |
 | Ontology / model | **FollowTheMoney 4.x** + **STIX 2.1** (CTI) | Maintained, MIT, ecosystem (nomenklatura/yente/ftmq/rigour). | Custom schema (rejected) |
 | FtM↔graph | **followthemoney-graph** | Purpose-built FtM→Neo4j. | hand-rolled |
 | Entity resolution | **Splink** (DuckDB) + **nomenklatura** | Unsupervised Fellegi–Sunter, ~1M rec/min on a laptop, scales to Spark; FtM-native merge. | Dedupe, recordlinkage |

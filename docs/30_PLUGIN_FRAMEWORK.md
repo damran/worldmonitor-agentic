@@ -17,7 +17,7 @@ A plugin is a **self-describing unit of work**. Every plugin ships:
 4. **Tests** — fixture-based (input → expected output).
 
 The **registry** discovers plugins (entry-points / a plugins dir), aggregates manifests, and exposes
-enable/disable per tenant. A plugin instance is a tenant-scoped, configured, versioned row.
+enable/disable. A plugin instance is a configured, versioned row.
 
 ## 2. Plugin kinds (the typed interfaces)
 
@@ -61,7 +61,7 @@ directly and never resolves entities** (L3 owns that). Idempotent upserts; rate-
 |---|---|
 | Opens **Integrations** | Catalog renders from the registry (the connector + notifier kinds), grouped by category, filterable by cost & status (available/implemented/planned). |
 | **Configure** a card | Form generated from its `config.schema.json`; secrets marked; active connectors show a required **authorized-scope** field. |
-| **Save** | `validate()` runs; secrets → **vault** (never the DB in plaintext); a tenant-scoped instance row is created. |
+| **Save** | `validate()` runs; secrets → **vault** (never the DB in plaintext); an instance row is created. |
 | **Enable** | Runner schedules it / starts the stream. Collection begins. |
 | View instance | **Status/health:** last run, records ingested, entities produced, errors, next run. |
 
@@ -77,12 +77,12 @@ is **data, not doc**.
 ## 8. Rules engine (declarative, pluggable)
 Rules are first-class plugins: `when(condition over graph/stream) → action (alert via Notifier / set a
 score / queue for review / trigger an Enricher)`. Start simple (a condition DSL over entity/edge
-properties + events); rules are versioned and tenant-scoped. The self-improvement loop (`50`) may
+properties + events); rules are versioned. The self-improvement loop (`50`) may
 propose new/changed rules — which go through propose→evaluate→gate→promote, never silent.
 
 ## 9. Cross-cutting rules (every plugin)
 Provenance stamped at collection · secrets only in the vault (per-plugin, never logged/in-URLs) ·
-hostile input parsed in isolation (no `eval`/shell-interp) · idempotent · tenant-scoped (`tenant_id`) ·
+hostile input parsed in isolation (no `eval`/shell-interp) · idempotent ·
 status-tagged · active capability gated.
 
 ## 10. Open decisions (need the user — see `decisions/`)
