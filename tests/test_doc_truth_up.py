@@ -336,6 +336,22 @@ def test_e2_orient_no_gate_ledger_reference() -> None:
     )
 
 
+def test_e6_orient_script_no_gate_ledger_reference() -> None:
+    """scripts/dev/orient.sh must not read the retired GATE_LEDGER.
+
+    orient.sh (run first on every session/gate by the orient agent) previously
+    grepped docs/GATE_LEDGER.md under an "open/current gates in ledger" header.
+    With the ledger retired it must read the live source of truth
+    (docs/40_ROADMAP.md) instead — otherwise the automated orient step keeps
+    treating a tombstoned file as current state.
+    """
+    text = read_live("scripts/dev/orient.sh")
+    assert "GATE_LEDGER" not in text, (
+        "scripts/dev/orient.sh still references GATE_LEDGER — repoint the "
+        "'open/current gates' line at docs/40_ROADMAP.md (the ledger is retired)."
+    )
+
+
 def test_e3_architecture_review_has_frozen_banner() -> None:
     """docs/ARCHITECTURE_REVIEW.md must carry a dated/frozen snapshot banner near the top.
 
