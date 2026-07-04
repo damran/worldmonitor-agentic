@@ -1,5 +1,16 @@
 # 60 — Total Review Questionnaire
 
+> **ANSWERED 2026-07-04.** All items resolved by the operator; the answers are folded into the
+> **execution handoff plan** (`70_EXECUTION_HANDOFF.md`) as an ordered gate sequence + operator runbook,
+> and where they were architectural, into ADRs: **0096** (tagging first-class — the operator's added
+> "main point"), plus updates to 0094/0095. Headlines: build is handed to a fresh Opus session per the
+> plan (Fable plans, does not build); run the truth-up sprint first (Gate 0); storage steps 1–2 then the
+> full sequence; retire GATE_LEDGER; conflict pack second; local ER-annotation model = Qwen3-4B on the
+> 6 GB GPU; **public flip = generated reports only, repo stays private** (LICENSE deferred). This doc is
+> kept for the record; the live plan is the handoff.
+
+---
+
 > A single place to resolve every open clarification across the whole engagement — the strategic
 > review (`50_FABLE_REVIEW.md`), the operator decisions (ADR 0094), the storage-direction
 > confirmation (ADR 0095), and the UI/experience design (`docs/70_UI_AND_EXPERIENCE.md`). Answer

@@ -1,6 +1,6 @@
 # 70 — UI & Experience (the consumption surface)
 
-> `v0.1` · 2026-07-04 · The analyst-facing design spec. Sits above L8 (API + MCP, `docs/60`) and
+> `v0.2` · 2026-07-04 · The analyst-facing design spec. Sits above L8 (API + MCP, `docs/60`) and
 > consumes the resolved graph. Commissioned as the product's UI design; grounded in the strategic
 > review's consumption findings (`docs/fable-review/50_FABLE_REVIEW.md` F4) and the operator's
 > answers in ADR 0094 (persona = CTI / L3 SOC; OSS-only; no paid products; ~5 h/week review budget)
@@ -30,6 +30,9 @@
    hypotheses with a confidence band** — there is no "verdict" component in the design system.
 6. **The review queue is a first-class surface** (safety control + calibration label factory),
    sized to the ~5 h/week budget (ADR 0094 D6).
+7. **Everything is tagged, and tags are searchable** (§6.1, ADR 0096). A tag is a provenance-carrying
+   claim, so tag-search, tag facets, and tag-driven overlays/alerts are a first-class retrieval layer —
+   one of the platform's main points, not an afterthought.
 7. **Modern but simple, and extensible by construction.** Server-rendered HTMX shell + a few
    self-contained interactive islands (§9). No SPA. OSS-only, CSP-strict, self-hosted (including the
    basemap — no external tile calls). A solo operator must be able to hold the whole thing in their
@@ -186,9 +189,9 @@ automatically (degrade-conservative — review F3/§3.7), never accrue into a si
 
 ## 5. The Overlay lifecycle
 
-1. **Create** — from a promoted query result, an enrichment/connector output, a saved selection on
-   any surface, an alert/watchlist, or a manual definition. Mappability is *inferred from the schema*
-   (any geo property or GeoNames/ISO-3166 anchor makes it map-able).
+1. **Create** — from a promoted query result, a **tag or tag-query** (§6.1), an enrichment/connector
+   output, a saved selection on any surface, an alert/watchlist, or a manual definition. Mappability is
+   *inferred from the schema* (any geo property or GeoNames/ISO-3166 anchor makes it map-able).
 2. **Bind** — source selection · ontology type(s) · geometry resolver · **time accessor** · style
    ramp · confidence predicate · provenance pass-through.
 3. **Toggle** — it enters the **Library** and is available on every surface.
@@ -239,6 +242,32 @@ the map is a thin lens); **conflict reporting** = ACLED/CAMEO events as `wm:Even
 `wm:MarketSignal` as scored, calibrated leads (dashboard + timeseries home). The UI never changes;
 the pack does. (Ontology governance stays as `docs/20` §4/§9: additive `wm:` schemas, ADR-per-
 extension.)
+
+### 6.1 Tagging & labels — the searchable retrieval layer (ADR 0096)
+
+Tagging is a **first-class** capability, not a bolt-on — and it falls straight out of the storage
+model: **a tag is a provenance-carrying statement** (`ADR 0096`). So every tag records *who/what
+applied it, when, and how confidently*, is bitemporal (when-tagged / retracted / valid-for), is
+erasable and auditable like any claim, and — the point the operator cares about — is **searchable
+through the same surfaces as everything else**.
+
+- **Four kinds, one mechanism:** *ontology labels* (STIX `labels`, FtM topics, sensitivity), *analyst
+  tags* (free or controlled, applied during investigation), *auto-tags* (from scorers/rules — they
+  carry a **confidence** and render as leads, never verdicts; a person-affecting auto-tag is
+  **sign-off-gated** exactly like an ER merge), and *system tags* (reliability, source, status).
+- **Controlled taxonomies:** namespaced vocabularies — `tlp:amber`, `admiralty:reliability=B`,
+  `misp-galaxy:threat-actor="…"`, STIX `labels` — are first-class; a taxonomy is a small ontology
+  extension (data, not code). Free tags are allowed but the UI nudges toward controlled vocab so
+  search stays reliable.
+- **UI:** **tag chips** wherever an entity/claim/case renders (coloured by namespace; the source chip
+  on hover; a confidence dot on auto-tags); a **faceted tag search** on the Desk (namespace → values →
+  counts — the fast "tag search"); **bulk-tag** a selection in the workbench, the graph, or a query
+  result; a **non-destructive tag manager** (rename/merge/deprecate = supersede, provenance kept).
+- **Tag = Selection = Overlay:** a tag or tag-query is a §2 Selection — *promote it to an Overlay* and
+  "everything tagged `sanctioned` in the last 30 days" renders on the map, as a graph filter, a
+  dashboard widget, or a **tag-driven watchlist alert**. Tags are queryable in the pipe-DSL
+  (`search tag:sanctioned`) and Cypher, and exposed via the read API/MCP so **Hermes can filter by
+  tag** (read now; *applying* a tag from the agent is a Phase-6 gated write tool).
 
 ---
 
@@ -330,9 +359,13 @@ traversal, so the design is layered (as Aleph, Grafana, and Kusto all split it):
 3. **API layer = GraphQL → Cypher** (Neo4j GraphQL Library or Strawberry/Ariadne with Cypher
    resolvers) for programmatic/UI fetch — never the human query bar.
 
+Both layers include **tag search** as a first-class filter (§6.1): `search tag:sanctioned` in the pipe
+layer, a tag predicate in Cypher, and a faceted tag sidebar on the Desk — the fast tag-retrieval the
+operator asked for, backed by a rebuildable tag index.
+
 **Handoff:** pipe/Cypher result rows carry canonical entity IDs → *Open in graph* pivots to a Cypher
-view; *Promote to Overlay* turns any result into the §2 primitive; *Save as alert* wraps either
-language with a schedule. **My recommendation:** ship Cypher + templates now (covers the power need at
+view; *Promote to Overlay* turns any result (including a **tag query**) into the §2 primitive; *Save as
+alert* wraps either language with a schedule. **My recommendation:** ship Cypher + templates now (covers the power need at
 near-zero cost); decide the pipe layer (a/b/c) when the query workbench is actually built — leaning
 (a) WM-QL *if* you'll value the Sumo familiarity enough to maintain a small grammar, else (b) PRQL.
 
@@ -382,6 +415,8 @@ Used on every surface, so the invariants are visual, not aspirational:
   (C3 made visual).
 - **Confidence band** — a gradient with a hover distribution. There is **no verdict component** (C5).
 - **Canonical-anchor chip** — Wikidata Q / LEI / GeoNames / ISO-3166; monospace id, links out.
+- **Tag chip** (§6.1) — namespace-coloured; source chip on hover; a confidence dot on auto-tags.
+  Click a tag → faceted tag search; drag a tag → promote to an overlay.
 - **Ontology-type badge** — colours by domain pack (pack identity = accent).
 - **Overlay pill** — toggle + time-binding + provenance count; draggable across surfaces.
 - **Bitemporal time control** — one global cursor; world↔belief toggle; diff-since-t; play.
@@ -394,6 +429,10 @@ keyboard-first (arrow-scrub time, one-key review verdicts, ⌘K everywhere).
 ---
 
 ## 11. Build sequencing (how this lands incrementally)
+
+> The authoritative, cross-cutting build order (storage + ER + tagging + UI + operator runbook) lives
+> in the **execution handoff plan** (`docs/fable-review/70_EXECUTION_HANDOFF.md`). The UI-only order
+> below is the slice of it that concerns this document.
 
 Trails the storage/ER work (it needs claims + a review queue to be worth building), and every step
 is a self-contained slice that fits the existing HTMX app.
