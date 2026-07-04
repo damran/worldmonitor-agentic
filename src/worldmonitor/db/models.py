@@ -11,7 +11,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Float, String, Text, UniqueConstraint, func, text
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Float,
+    Identity,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -304,6 +314,10 @@ class StatementRecord(Base):
     __tablename__ = "statement"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Monotonic server-assigned ordering column — the outbox watermark (ADR 0100 D1).
+    # Server-assigned via Postgres IDENTITY; NEVER set by application code; append-only, additive.
+    # Model + migration MUST agree byte-for-byte (test_migrations.py drift guard, ADR 0030).
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), index=True, nullable=False)
     # FtM Statement.id — the deterministic content hash; dedup / backfill key (non-unique in step 1)
     statement_id: Mapped[str] = mapped_column(String(64), index=True)
     # SUBJECT = the cluster's durable canonical id (post-rekey)
@@ -354,6 +368,10 @@ class DecisionRecord(Base):
     __tablename__ = "decision"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Monotonic server-assigned ordering column — the outbox watermark (ADR 0100 D1).
+    # Server-assigned via Postgres IDENTITY; NEVER set by application code; append-only, additive.
+    # Model + migration MUST agree byte-for-byte (test_migrations.py drift guard, ADR 0030).
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), index=True, nullable=False)
     # The id the decision acts on = cluster.canonical_id
     canonical_id: Mapped[str] = mapped_column(String(255), index=True)
     # "merge" only in step 1; "split" / "negative" reserved for later gates
@@ -372,3 +390,34 @@ class DecisionRecord(Base):
     # Reserved forward-compat (ADR 0099 Decision A) — UNENFORCED; single-tenant D1 unchanged
     scope: Mapped[str | None] = mapped_column(String(64), server_default=text("'default'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProjectionCheckpoint(Base):
+    """Per-target projection watermark — the fold engine's resumable checkpoint (ADR 0100 D1).
+
+    One row per projection target (e.g. ``id="neo4j"``). The projector reads rows past the
+    watermark (``seq > last_statement_seq / last_decision_seq``), folds them, writes Neo4j
+    FIRST (idempotent MERGE), then advances the watermark and commits — at-least-once ordering.
+    A crash between the two replays the delta on restart (idempotent).
+
+    Append-only-friendly, additive, single-tenant D1 unchanged (ADR 0042). Model + migration
+    ``0010_projection_outbox`` MUST agree byte-for-byte (``tests/integration/test_migrations.py``
+    drift guard, ADR 0030).
+    """
+
+    __tablename__ = "projection_checkpoint"
+
+    # Target name, e.g. "neo4j" — the projection target this watermark belongs to.
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Highest statement.seq folded into this target. Initialises to 0 (no rows consumed yet).
+    last_statement_seq: Mapped[int] = mapped_column(
+        BigInteger, server_default=text("0"), nullable=False
+    )
+    # Highest decision.seq folded into this target. Initialises to 0.
+    last_decision_seq: Mapped[int] = mapped_column(
+        BigInteger, server_default=text("0"), nullable=False
+    )
+    # Last fold timestamp (server-assigned on INSERT; manually updated on subsequent folds).
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
