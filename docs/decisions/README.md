@@ -114,4 +114,5 @@
 | [0095](0095-parallel-stores-statement-log-sor.md) | Parallel data stores: Postgres statement-log = system of record, Neo4j = derived graph projection | ACCEPTED | 2026-07-04 | — | — |
 | [0096](0096-tagging-first-class.md) | Tagging & labels as first-class, provenance-carrying statements | ACCEPTED | 2026-07-04 | — | — |
 | [0097](0097-adr-governance-index-automation.md) | ADR governance: index automation + machine-checkable status & sensitivity metadata | ACCEPTED | 2026-07-04 | false | false |
+| [0098](0098-ftm-version-pinning-schema-vendoring.md) | FtM version pinning + schema vendoring + schema-diff CI gate | ACCEPTED | 2026-07-04 | false | false |
 <!-- END GENERATED ADR INDEX -->
