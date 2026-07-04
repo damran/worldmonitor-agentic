@@ -53,6 +53,7 @@ from worldmonitor.resolution.merge import (
 from worldmonitor.resolution.referents import build_referent_map, rewrite_referents
 from worldmonitor.resolution.review import needs_review
 from worldmonitor.resolution.splink_model import score_pairs
+from worldmonitor.resolution.statements import record_decision, record_statements
 from worldmonitor.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -473,6 +474,15 @@ def _resolve_batch(
             )
 
         record_merge(session, cluster, decision="merged", reason=reason)
+        # Gate 2a (ADR 0099): dual-write the fused statement evidence + one decision row per
+        # promoted merge.  Inserted AFTER record_merge so the audit trail commits first; runs
+        # BEFORE _set_status so a rollback on any failure reverts both.  The parked path above
+        # (the block-mode `continue`) writes neither, preserving the "parked writes nothing"
+        # invariant (P-STMT-3c).  Module-level imports so the integration test's monkeypatch
+        # (`worldmonitor.resolution.pipeline.record_statements/record_decision`) works correctly.
+        record_statements(session, cluster, by_id)
+        if cluster.is_merge:
+            record_decision(session, cluster, reason=reason)
         _set_status(cluster.member_ids, "resolved")
         promoted_entities.append(entity)
         promoted_clusters.append(cluster)

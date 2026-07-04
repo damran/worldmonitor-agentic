@@ -310,7 +310,7 @@ def _member_statements(canonical_id: str, member: FtmEntity, source_id: str) -> 
     return statements
 
 
-def _fuse_statement_entity(
+def fuse_statement_entity(
     canonical_id: str, kept_ids: list[str], by_id: dict[str, FtmEntity]
 ) -> StatementEntity | None:
     """Fuse the KEPT cluster members into one :class:`StatementEntity` under ``canonical_id``.
@@ -321,6 +321,10 @@ def _fuse_statement_entity(
     (VERIFIED_API.md). ``add_statement``'s per-prop SET union makes the fused VALUE set identical to
     ``ValueEntity.merge`` (the §9 fence is derived independently from the kept ``ValueEntity``
     merge; this entity exists only to derive the witness map). Returns ``None`` if nothing to fuse.
+
+    Renamed from ``_fuse_statement_entity`` to the public ``fuse_statement_entity`` (Gate 2a /
+    ADR 0099): makes one authoritative fusion feed both the witness map and the statement log. Pure
+    identifier rename — ZERO logic, threshold, score, or value change.
     """
     if not kept_ids:
         return None
@@ -408,7 +412,7 @@ def _merge_entities(
     # Gate C: derive + stamp the Tier-1 witness map from the SAME kept members (a no-op for an
     # entity with no values). The fused StatementEntity is lineage-only; the value set above is
     # authoritative and the fence proves the two agree.
-    fused = _fuse_statement_entity(canonical_id, kept, by_id)
+    fused = fuse_statement_entity(canonical_id, kept, by_id)
     if fused is not None:
         stamp_witness_map(merged, _witness_map_from_statements(fused))
     return merged, tuple(dropped)

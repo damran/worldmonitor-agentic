@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Float, String, UniqueConstraint, func
+from sqlalchemy import DateTime, Float, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -278,4 +278,97 @@ class ErGoldPair(Base):
     label: Mapped[str] = mapped_column(String(16))  # "match" | "non_match"
     source: Mapped[str] = mapped_column(String(32))  # e.g. "uncertainty" | "os_pairs"
     clerical_score: Mapped[float | None] = mapped_column(Float, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class StatementRecord(Base):
+    """Append-only per-claim log — the statement spine (Gate 2a / ADR 0099).
+
+    One row per ``(subject, entity_id, schema, prop, value, dataset)`` claim the fused
+    ``StatementEntity`` yields at merge time (the ``id`` pseudo-statement excluded).  Realises
+    **G1 provenance at the per-claim grain**: ``dataset`` = ``Provenance.source_id``, plus the
+    full G1 quad (``retrieved_at``, ``reliability``, ``raw_pointer``) on every claim.
+
+    Append-only: the writers only INSERT (``session.add``); no UPDATE or DELETE. The
+    ``supersedes`` / ``superseded_by`` write path and any ``statement_id`` uniqueness /
+    idempotency constraint are Gate 3 concerns (ADR 0099 §Deferred).
+
+    ``scope`` is a reserved forward-compatibility column (ADR 0099 Decision A): it is
+    **UNENFORCED** — no code reads, writes (beyond the server default), or filters on it. It
+    is NOT re-adding tenant scoping (ADR 0042, single-tenant D1 unchanged).
+
+    This model and migration ``0009_statement_spine`` MUST agree byte-for-byte
+    (``tests/integration/test_migrations.py`` drift guard, ADR 0030).
+    """
+
+    __tablename__ = "statement"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # FtM Statement.id — the deterministic content hash; dedup / backfill key (non-unique in step 1)
+    statement_id: Mapped[str] = mapped_column(String(64), index=True)
+    # SUBJECT = the cluster's durable canonical id (post-rekey)
+    canonical_id: Mapped[str] = mapped_column(String(255), index=True)
+    # The contributing source member id
+    entity_id: Mapped[str] = mapped_column(String(255), index=True)
+    schema: Mapped[str] = mapped_column(String(64))
+    prop: Mapped[str] = mapped_column(String(64))  # never "id" — excluded on write
+    # Unbounded TEXT — hostile-data rule: no cast on free-form connector values
+    value: Mapped[str] = mapped_column(Text)
+    # The member's Provenance.source_id (G1 source)
+    dataset: Mapped[str] = mapped_column(String(255))
+    # G1 quad — nullable when the member was genuinely unstamped (no invented provenance)
+    reliability: Mapped[str | None] = mapped_column(String(16), default=None)
+    # ISO-8601 string — Provenance.retrieved_at; stored as string, no cast (hostile-data rule)
+    retrieved_at: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Provenance.source_record (landing-zone pointer); unbounded TEXT; NULL if unstamped
+    raw_pointer: Mapped[str | None] = mapped_column(Text, default=None)
+    first_seen: Mapped[str | None] = mapped_column(String(64), default=None)
+    last_seen: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Unmodelled in step 1 — always NULL until a method field exists (ADR 0099 §table)
+    method: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Reserved forward-compat (ADR 0099 Decision A) — UNENFORCED; single-tenant D1 unchanged
+    scope: Mapped[str | None] = mapped_column(String(64), server_default=text("'default'"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DecisionRecord(Base):
+    """Append-only merge / split / negative belief-revision log (Gate 2a / ADR 0099).
+
+    One row per **promoted merge** (``cluster.is_merge``, i.e. ≥2 source members). Step 1
+    only ever writes ``kind="merge"``.  Distinct from the legacy ``merge_audit`` (which also
+    records singletons + ``pending_review``) and from ``resolver_judgement`` / ``sign_off``
+    (human pair sign-offs seeded into the resolver); the three coexist in step 1 and a later
+    gate reconciles them.
+
+    Append-only: the writers only INSERT; ``supersedes`` / ``superseded_by`` stay ``NULL`` in
+    step 1 (the un-merge / belief-revision back-pointer is a Gate 3 concern).
+
+    ``scope`` is a reserved forward-compatibility column (ADR 0099 Decision A): UNENFORCED —
+    no code reads, writes (beyond the server default), or filters on it.  NOT re-adding tenant
+    scoping (ADR 0042, single-tenant D1 unchanged).
+
+    This model and migration ``0009_statement_spine`` MUST agree byte-for-byte
+    (``tests/integration/test_migrations.py`` drift guard, ADR 0030).
+    """
+
+    __tablename__ = "decision"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # The id the decision acts on = cluster.canonical_id
+    canonical_id: Mapped[str] = mapped_column(String(255), index=True)
+    # "merge" only in step 1; "split" / "negative" reserved for later gates
+    kind: Mapped[str] = mapped_column(String(16), index=True)
+    # list(cluster.member_ids) — the collapsed source ids (evidence of what merged)
+    member_ids: Mapped[list[str]] = mapped_column(JSONB)
+    # cluster.score — weakest-link match probability
+    score: Mapped[float] = mapped_column(Float)
+    # "auto:resolver" — the automated decider; human-decision path is a later gate
+    decided_by: Mapped[str] = mapped_column(String(255))
+    # {"reason": reason} when the guard reason is non-empty, else NULL
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB, default=None)
+    # Belief-revision back-pointers — always NULL in step 1 (reserved for Gate 3 un-merge)
+    supersedes: Mapped[str | None] = mapped_column(String(64), default=None)
+    superseded_by: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Reserved forward-compat (ADR 0099 Decision A) — UNENFORCED; single-tenant D1 unchanged
+    scope: Mapped[str | None] = mapped_column(String(64), server_default=text("'default'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
