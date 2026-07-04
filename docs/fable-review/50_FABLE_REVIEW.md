@@ -987,6 +987,15 @@ much of F10 is "now" vs "later."
 
 ## 5. Open questions for the operator
 
+> **Answered 2026-07-04** — all seven decided by the operator; the durable record and the plan
+> re-prioritisations are in **ADR 0094** (`docs/decisions/0094-strategic-review-operator-decisions.md`).
+> Headlines: commercial = none-or-open-core (AGPLv3 at public flip); zero-egress *claim* dropped
+> (sovereignty = operator-discretion mode, local default stays); tenancy = none (F11-T declined);
+> persona = CTI investigators / L3 SOC analysts (CTI enricher slice first); ER scale = build-deeper,
+> no paid products ever (Senzing permanently out, Community-forever); review budget ≤5 h/week
+> (sizes the abstention band); claude-headless retained until Anthropic breaks or prohibits it —
+> resolving the F6.1 landmine from the claim side rather than the mode side.
+
 1. **Commercial intent, 12-month horizon: none / open-core / appliance+services?** Determines: the
    LICENSE (F9 — AGPL+CLA if commercial-optional; Apache-2.0 if community-pure), the OS-Pairs
    posture (commercial license vs eval-enclave), how much of F10 is now-vs-later, and whether the
