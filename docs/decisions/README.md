@@ -115,4 +115,5 @@
 | [0096](0096-tagging-first-class.md) | Tagging & labels as first-class, provenance-carrying statements | ACCEPTED | 2026-07-04 | — | — |
 | [0097](0097-adr-governance-index-automation.md) | ADR governance: index automation + machine-checkable status & sensitivity metadata | ACCEPTED | 2026-07-04 | false | false |
 | [0098](0098-ftm-version-pinning-schema-vendoring.md) | FtM version pinning + schema vendoring + schema-diff CI gate | ACCEPTED | 2026-07-04 | false | false |
+| [0099](0099-statement-spine-step1.md) | Statement spine, step 1: statement + decision tables and the merge-time dual-write | ACCEPTED | 2026-07-04 | false | false |
 <!-- END GENERATED ADR INDEX -->
