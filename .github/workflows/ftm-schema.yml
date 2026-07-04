@@ -1,0 +1,45 @@
+name: ftm-schema
+
+# Fails if the installed followthemoney schema diverges from the vendored copy
+# in ontology/vendor/ftm/. Guards the L2 contract (ADR 0098): any schema change
+# in a new FtM version becomes a reviewable diff that must be explicitly
+# re-vendored before it can land. Own workflow file (like adr-index.yml) so it
+# never conflicts with quality.yml.
+# NOT yet a branch-protection required check (admin TODO, mirroring adr-index pattern).
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ftm-schema-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ftm-schema:
+    name: ftm-schema
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system build deps (ICU headers for PyICU / followthemoney)
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libicu-dev
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Pin Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies (installs followthemoney from locked hashes)
+        run: uv sync
+
+      - name: Assert installed FtM version == pin and schema is byte-identical to vendor
+        run: uv run python scripts/check_ftm_schema.py
