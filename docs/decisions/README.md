@@ -9,7 +9,7 @@
 | # | Decision | Status | Why |
 |---|----------|--------|-----|
 | 1 | **Graph-native, ontology-first** (the resolved graph is the product) | LOCKED | OSINT is a graph-traversal problem. |
-| 2 | **Property graph (Neo4j + GDS)** as system of record | LOCKED | Best analytics + ecosystem; RDF/OWL reasoning not needed yet. |
+| 2 | **Postgres statement log = system of record; Neo4j + GDS = derived graph projection** (ADR 0095, supersedes original Neo4j-SoR lock; Neo4j live SoR in transition until F1 projector cutover) | LOCKED | One truth in the statement log; Neo4j is rebuildable. |
 | 3 | **FollowTheMoney 4.x core ontology** + STIX 2.1 (CTI) + `wm:` extensions | LOCKED | Maintained, MIT, the model your tools speak; ships ER + graph bridge. |
 | 4 | **ER = Splink (DuckDB) + nomenklatura**, central (L3), never in connectors | LOCKED | Unsupervised, laptop-fast, FtM-native; per-connector dedup fragments the model. |
 | 5 | **OpenCTI demoted** to optional upstream CTI source; **CTI is just one plugin domain** | LOCKED | Follows from graph-native + max-expandability. |
@@ -21,7 +21,7 @@
 | 11 | **LLM pluggable** — Hermes (`hermes model`) agent-side; **LiteLLM** service-side | LOCKED | Ollama/OpenRouter/Anthropic swappable everywhere. |
 | 12 | **Telegram** outbound: Hermes (rich reports) + a `TelegramNotifier` plugin (deterministic alerts) | LOCKED | Reports/notifications; alerts survive agent downtime. |
 | 13 | **Self-improvement = all three** (Hermes loop + model fine-tune + param/rule tuning), **fully gated** | LOCKED | User chose "all"; nothing self-modifies silently (propose→evaluate→gate→promote, versioned, rollback, audit). |
-| 14 | **Auth/tenancy SaaS-grade from day one via Zitadel**, single-node deploy now | LOCKED | Solo now, cloud later; org model = tenants. |
+| 14 | **Auth via Zitadel, single-tenant deployment** (ADR 0042 / D1): one org, no per-account scoping; single-node deploy now | LOCKED | single-tenant; Zitadel scales to a future cloud tier if needed. |
 | 15 | **Containerized + 12-factor + S3-compatible** | LOCKED | Portable + reproducible; dev on WSL2, always-on stack on a persistent host. |
 
 ## Recorded ADRs (#16+)

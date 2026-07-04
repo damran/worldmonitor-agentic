@@ -23,9 +23,12 @@ what makes it expandable.
 2. **Mapping = a source's raw fields → typed entities.** Each connector's `map()` emits FtM/STIX
    objects, **validated against the schema** (the FtM lib rejects non-conforming data). The only place
    that knows a source's quirks; it stamps provenance + canonical IDs.
-3. **Store = Neo4j.** Resolved FtM Things → nodes (labelled by type); FtM relationship-entities → edges
-   (or intermediate nodes when they carry their own properties/provenance), via `followthemoney-graph`.
-   Canonical IDs indexed/unique-constrained; every node/edge carries provenance + `tenant_id`.
+3. **Store.** **Postgres statement + decision log = system of record** (the one truth, ADR 0095);
+   **Neo4j property graph = derived, rebuildable projection** for traversal/analytics (Neo4j remains
+   the live SoR in transition until the F1 projector cutover). Resolved FtM Things → nodes (labelled
+   by type); FtM relationship-entities → edges (or intermediate nodes when they carry their own
+   properties/provenance), via `followthemoney-graph`.
+   Canonical IDs indexed/unique-constrained; every node/edge carries provenance.
 
 ## 3. FollowTheMoney core (use as-is)
 
@@ -43,7 +46,7 @@ Minimal, additive, each with an ADR entry. Before adding, check it isn't express
 
 | Domain | Extension entities (proposed) | Notes |
 |---|---|---|
-| News / events | `wm:Article`, `wm:Event` (CAMEO), `wm:Narrative`, `wm:Claim` | GDELT GKG maps here; events link FtM actors + `wm:Place` + time |
+| News / events | FtM-native `Article`; `wm:Event` (CAMEO), `wm:Narrative`, `wm:Claim` | GDELT GKG maps here; events link FtM actors + `wm:Place` + time |
 | Social | `wm:Account`, `wm:Post`, `wm:Channel` | account → resolves-to → `Person`/`Organization`; coordination edges |
 | Geospatial | `wm:Place`, `wm:Observation`, `wm:AOI` | keyed to GeoNames ID + coordinates; imagery observations attach |
 | CTI / infra | `wm:Domain`, `wm:IPAddress`, `wm:Certificate`, `wm:Host` | mapped from STIX SCOs; fingerprint clusters as edges |
@@ -56,7 +59,7 @@ Use STIX for CTI rather than re-expressing it: SDOs (`indicator`, `malware`, `th
 `campaign`, `infrastructure`, `attack-pattern`) + SCOs (`domain-name`, `ipv4-addr`, `x509-certificate`,
 …). **Bridge by canonical identity:** a STIX `threat-actor` that is a real org links to the FtM
 `Organization`; SCOs become `wm:Domain`/`wm:IPAddress` nodes with the STIX object retained as payload.
-OpenCTI/MISP (if used) are upstream STIX *sources*; WorldMonitor's graph stays the system of record.
+OpenCTI/MISP (if used) are upstream STIX *sources*; the **statement log** stays the system of record; the graph is a rebuildable projection (ADR 0095).
 
 ## 6. Canonical IDs (the anchor — non-negotiable)
 

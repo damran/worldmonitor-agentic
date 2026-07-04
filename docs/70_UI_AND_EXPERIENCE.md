@@ -109,8 +109,8 @@ provenance inspector), and **⌘K** (search / run a saved query / jump / *ask He
 ### 4A. Monitor — the world map + overlays (the founding feature)
 
 Full-bleed **MapLibre GL JS** (BSD-3) over a **self-hosted Protomaps PMTiles basemap** served from
-MinIO by HTTP range requests — **no external tile CDN, data never leaves the perimeter** (the
-data-sovereignty invariant, made concrete). **deck.gl** (MIT) interleaves GPU overlays (arcs for
+MinIO by HTTP range requests — **no external tile CDN**; sovereignty is per-workload with a
+local-default posture (ADR 0094 D2). **deck.gl** (MIT) interleaves GPU overlays (arcs for
 flows/attribution, hexbin/heat aggregation, large point sets) via `MapboxOverlay`.
 
 - **Left — Overlay stack** (Photoshop-style layer list, grouped by domain pack): each row = toggle ·

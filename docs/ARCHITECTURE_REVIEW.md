@@ -1,5 +1,11 @@
 # WorldMonitor — Architecture & Review
 
+> **FROZEN SNAPSHOT — 2026-06-21 (pre-ADR-0095).** This document is a point-in-time review
+> written before ADR 0095 reframed the store axis. The "one canonical property graph (Neo4j)"
+> framing it uses has since been superseded: Postgres statement log = system of record; Neo4j =
+> derived, rebuildable projection (Neo4j remains the live SoR in transition until the F1 projector
+> cutover). For current architecture, see `docs/10_ARCHITECTURE.md` and `docs/decisions/`.
+
 > Standalone architecture and review of the WorldMonitor ingest → resolution → graph pipeline.
 > File:line citations are to the source tree at the time of writing (`master` after the WS1–WS2 merges).
 

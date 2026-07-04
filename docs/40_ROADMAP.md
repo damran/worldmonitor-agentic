@@ -18,19 +18,19 @@ layer has tools; **Hermes** connects after that; self-improvement is unlocked la
 - [ ] Repo layout (below); `.env.example`; `CLAUDE.md` (mirrored to `AGENTS.md`/`.clinerules`).
 - [ ] **GitHub Actions** `quality` green + `security` (Trivy, CodeQL); **branch protection requires both** (enables safe autonomous merge).
 - [ ] `deploy/compose.yaml` (core): **Neo4j+GDS, PostgreSQL(+pgvector), MinIO, Redis, Zitadel**; optional profiles for the rest.
-- [ ] **Zitadel** configured: instance, org (= first tenant), admin user, OIDC apps for the API and for Hermes (service principal).
-- [ ] FastAPI boots, **auth-gated (OIDC) + tenant-context middleware**, `/health` returns.
+- [ ] **Zitadel** configured: instance, org, admin user, OIDC apps for the API and for Hermes (service principal).
+- [ ] FastAPI boots, **auth-gated (OIDC)**, `/health` returns.
 - [ ] `runner/` runs an async subprocess with **timeout + error handling** (base for `CliToolConnector`).
 - [ ] No hardcoded secrets; everything on a feature branch.
 
-**Done when:** `docker compose up` → a logged-in, empty, tenant-aware platform with green CI.
+**Done when:** `docker compose up` → a logged-in, empty, single-tenant platform with green CI.
 
 ---
 
 ## Phase 1 — The spine: one source → ontology → ER → graph ✅ COMPLETE
 **Goal:** prove `connector → ontology → resolution → graph → query` with **OpenSanctions** (FtM-native, free, zero-risk), with tests.
-- [x] **Ontology bootstrap:** FtM installed + schema validation; `followthemoney-graph` writes FtM → Neo4j with `tenant_id` + unique constraints on canonical IDs.
-- [x] **Plugin framework v0:** base interfaces + registry + `FtmBulkConnector` + provenance stamping + tenant-scoped instance table (`30`).
+- [x] **Ontology bootstrap:** FtM installed + schema validation; `followthemoney-graph` writes FtM → Neo4j with unique constraints on canonical IDs.
+- [x] **Plugin framework v0:** base interfaces + registry + `FtmBulkConnector` + provenance stamping + instance table (`30`).
 - [x] **OpenSanctions connector:** manifest + schema + collect + (near-identity) map; raw → MinIO, candidates → ER queue.
 - [x] **Entity resolution v0:** **Splink** (DuckDB) + **nomenklatura** → canonical entities; **merge audit trail**; a size/sensitivity **review-queue threshold**.
 - [x] **Reference anchor:** load **GeoNames** + a Wikidata slice → canonical IDs on resolved entities.
@@ -53,7 +53,7 @@ layer has tools; **Hermes** connects after that; self-improvement is unlocked la
 
 ---
 
-## Next — Stage-4 hardening backlog (interleaved) ★ CURRENT, then Phase 3 (Hermes, now unblocked)
+## Next — Gate 0 (truth-up & governance) ★ CURRENT; Stage-4 hardening backlog; Phase-3 infra S1–S3b shipped
 _Pay down the deferred hardening before/alongside Phase 3. (Full notes: the forward plan + the `phase-2-complete-stage-4-next` memory.)_
 - [x] **H-4 Abjad/Arabic-Persian ER** ✅ (ADR 0073, PR #131) — strip harakat/tashkeel + tatweel before `fingerprints.generate` in `splink_model.py::_name_fingerprint`, so the same abjad name written with/without short-vowel marks projects the same `name_fp`. `@given` recall/precision/no-op properties + Arabic/Persian fixtures; threshold + merge-guard + sensitive-park unchanged. `LogicV2` re-scorer still deferred.
 - [x] **H-8 remaining halves** (sliced; decided, ADR 0054) — [x] auto-hard-disable after N failures (ADR 0074, PR #132) · [x] periodic in-loop maintenance cadence (ADR 0075) · [x] resolve wall-clock timeout + lock-skip escalation (ADR 0075) · [x] Prometheus `/metrics` transport (ADR 0076) · [x] Prometheus scrape config + alert rules in-repo (ADR 0078, H-8c follow-up) — 7 alerts (2 critical/5 warning), INV-PARITY drift test, opt-in compose service; closes ADR 0075 revisit trigger.
@@ -70,6 +70,9 @@ _Pay down the deferred hardening before/alongside Phase 3. (Full notes: the forw
 
 ## Phase 3 — Agent layer (Hermes) connected
 **Goal:** the self-improving assistant on top of the surface.
+
+**Shipped infrastructure (ADRs 0089–0093; PRs #149–#153):** S1 MCP-auth (Zitadel bearer, ADR 0089, #149) · S2 LiteLLM gateway + 3-mode confidential selector (ADR 0091, #150) · S3a HTTP /v1 shim (ADR 0092, #151) · S3b Hermes + MCP compose deploy (ADR 0093, #153). Infrastructure COMPLETE; operational deployment (below) is R1 and awaits operator verification.
+
 - [ ] **Hermes deployed** and connected to WorldMonitor's **MCP** as a service principal (read + run-passive).
 - [ ] **LLM pluggability** verified — Hermes on Ollama and on OpenRouter (`hermes model`); **LiteLLM** wired for any service-side LLM use.
 - [ ] **Scheduled reports** (Hermes cron → Telegram): a daily brief + "what changed about entity X" queries.
@@ -110,9 +113,9 @@ worldmonitor/
 ├── pyproject.toml  uv.lock  .python-version  .env.example  .pre-commit-config.yaml
 ├── docs/                                    # THIS plan
 ├── src/worldmonitor/
-│   ├── api/               # FastAPI REST/GraphQL (auth-gated, tenant-scoped)
+│   ├── api/               # FastAPI REST/GraphQL (auth-gated)
 │   ├── mcp/               # FastMCP server (the MCP tool surface)
-│   ├── authz/             # Zitadel/OIDC, RBAC, tenant context, capability gating
+│   ├── authz/             # Zitadel/OIDC, RBAC, capability gating
 │   ├── ontology/          # FtM use, wm: extensions, STIX mapping, validation
 │   ├── plugins/           # base interfaces + registry; connectors/ enrichers/ resolvers/ rules/ scorers/ notifiers/
 │   ├── runner/            # async subprocess + timeout/sandbox; scheduler; stream consumers

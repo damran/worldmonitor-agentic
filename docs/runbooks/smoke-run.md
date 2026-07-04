@@ -71,7 +71,6 @@ settings = get_settings()
 cipher = ConfigCipher.from_settings(settings)
 sessions = session_factory(engine_from_settings(settings))
 
-TENANT = "smoke"
 instances = [
     # EDGES (+ G3): DoD "Chinese Military Companies" — 208 Company + 130 Ownership edges
     # (every endpoint present -> real Company-OWNS->Company relationships). NO 'limit':
@@ -89,11 +88,11 @@ instances = [
 with sessions() as s:
     for connector_id, config in instances:
         s.add(ConnectorInstance(
-            id=str(uuid.uuid4()), tenant_id=TENANT, connector_id=connector_id,
+            id=str(uuid.uuid4()), connector_id=connector_id,
             config_encrypted=cipher.encrypt(json.dumps(config)), status="enabled",
         ))
     s.commit()
-print("seeded", len(instances), "instances for tenant", TENANT)
+print("seeded", len(instances), "instances")
 # PY
 ```
 
@@ -136,9 +135,9 @@ Each snapshot prints (read-only, Postgres + graph):
 Review the parked merges and exercise sign-off (ADR 0031):
 
 ```bash
-python -m worldmonitor.review list    --tenant smoke
-python -m worldmonitor.review approve --tenant smoke --canonical NK-... --approver you
-python -m worldmonitor.review reject  --tenant smoke --canonical NK-... --approver you
+python -m worldmonitor.review list
+python -m worldmonitor.review approve --canonical NK-... --approver you
+python -m worldmonitor.review reject  --canonical NK-... --approver you
 ```
 
 ## 5. Success / failure criteria
@@ -153,7 +152,7 @@ python -m worldmonitor.review reject  --tenant smoke --canonical NK-... --approv
   edge materialization is not firing (the minimal seed produced `0` because it had no
   edge-schema entities).
 - **`parked_merges >= 1`** — block mode parks the OFAC "OOO Legion Komplekt" collision (a
-  sensitive merge); `python -m worldmonitor.review list --tenant smoke` shows it, and
+  sensitive merge); `python -m worldmonitor.review list` shows it, and
   `approve`/`reject` works. (The minimal seed produced `0`; this is the path it didn't cover.)
 - **G3 (expected, NOT to fix here):** the ~397 DoD `Sanction.entity` links + the OFAC
   sanctions do **not** become graph edges — they hit the documented abstract-`Thing`-range
@@ -197,7 +196,7 @@ python -m worldmonitor.review reject  --tenant smoke --canonical NK-... --approv
 ## Path coverage (the point of the richer run)
 - EDGES: graph_edges=<n> (expect >= 130 Company-OWNS->Company); `review`-confirmed a sample
   Ownership lands on both Company nodes? <yes/no>
-- PARKING: parked_merges=<n> (expect >= 1); `review list --tenant smoke` shows the OFAC
+- PARKING: parked_merges=<n> (expect >= 1); `review list` shows the OFAC
   "OOO Legion Komplekt" pair? <yes/no>; approve/reject exercised? <yes/no>
 - G3 (surface, do NOT fix): Sanction entities written=<n>, Sanction.entity edges in graph=0
   (the documented Thing-range drop on real data)
