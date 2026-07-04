@@ -113,15 +113,47 @@ implicit. **This ADR dogfoods it** — its header carries `human_cosign: Mithat 
 2026-07-04)`, covering both its `person_affecting: false` and `human_fork: false` self-tags for a
 governance change.
 
-### Extended by slice 0d
+### 5. Gate-fleet enforcement mandate (slice 0d)
 
-> **STUB — to be filled by Gate 0, slice 0d (`[extends ADR-G]`).** Slice 0d extends this ADR with the
-> **gate-fleet enforcement mandate**: the fleet **checker** and **judge** must reproduce the ADR's
-> `human_fork` / `person_affecting` classification against the actual diff and **FAIL / DENY** on a
-> mismatch, or on an un-cosigned waiver (a `person_affecting: false` in a person-affecting area, or a
-> waived `human_fork`, without a `human_cosign` line). Insertion points are already scouted
-> (`.claude/agents/checker.md`, `.claude/agents/judge.md`). 0d appends the concrete mandate text here;
-> nothing above this subsection changes.
+The `human_fork` / `person_affecting` self-classification of §3 is only worth anything if the fleet
+reproduces it. Slice 0d makes that verification a **standing duty of the checker and the judge** for
+every gate whose diff introduces or edits an ADR. The builder transcribes the operative sentences
+below into `.claude/agents/checker.md` (a new paragraph after the "confirm NO test was weakened"
+paragraph) and `.claude/agents/judge.md` (a new `INVESTIGATE` bullet plus a `DENY` condition in
+`RULE`). Slice 0d changes no other agent behavior and no runtime code.
+
+**The person-affecting surface** is the CLAUDE.md enumerated set, verbatim: **ER thresholds, merge
+decisions, individual-affecting scores, erasure, and tagging-of-a-person.** A diff "touches a
+person-affecting surface" when it adds or changes code, config, or behavior in any of those areas.
+
+**Checker duty.** For every gate whose diff carries an ADR, the checker reproduces the ADR's
+`human_fork` / `person_affecting` self-classification against the ACTUAL diff — not the ADR's prose,
+not the test names. The checker **FAILs the gate** if EITHER:
+
+- **(a)** the diff touches a person-affecting surface (per the enumerated set above) but the ADR
+  self-tags `person_affecting: false`; OR
+- **(b)** the ADR self-tags `person_affecting: false` in a person-affecting area, OR waives a
+  `human_fork` (self-tags `human_fork: false` where a fork is arguable), **without** a
+  `- **human_cosign:** <name> <date>` line present (per §4).
+
+**Judge duty.** The judge performs the SAME check as an explicit `INVESTIGATE` step and carries a
+matching **DENY** condition in its ruling: a person-affecting-but-untagged ADR, or an un-cosigned
+waiver, is a **merge blocker** — not a style nit and not a backlog item. This is additive to the
+judge's existing duty of escalating a genuine product/architecture fork to the human (judge already
+does that); it adds a *classification-verification* duty on top of it.
+
+**Boundary / non-goals.** This mandate verifies only that the *classification is honest and, where
+required, co-signed* — NOT that the human's decision was correct. A correctly-tagged
+`person_affecting: true` ADR carrying a human sign-off is **NOT** blocked by this mandate; whether
+that decision was the right call stays the human's own. A non-person-affecting, `human_fork: false`
+ADR that carries a `human_cosign` line (as 0097 and 0098 themselves do) **passes**. The mandate
+never re-opens a settled, correctly-tagged decision; it catches only a *dishonest* tag or an
+*un-cosigned* waiver.
+
+**Dogfooding + closure.** Slice 0d's own change — adding this mandate — is a governance/process
+change: `human_fork: false`, `person_affecting: false`. This ADR's header already carries
+`- **human_cosign:** Mithat (plan approval 2026-07-04)`, which covers the 0d change as well. With
+this section, **slice 0d closes ADR-G (0097)** — no further slice extends this ADR.
 
 ## Consequences
 
