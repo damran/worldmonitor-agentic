@@ -10,7 +10,11 @@ provenance → analysis on top → exposed via an **API + MCP surface** → driv
 agent layer (Hermes)**. CTI is just one plugin domain. Read `docs/00_VISION_AND_SCOPE.md`, then `docs/10_ARCHITECTURE.md`.
 
 ## Locked decisions (do NOT relitigate — see `docs/decisions/`)
-- **Neo4j + GDS** = system of record (property graph). No parallel datastore.
+- **Storage (ADR 0095, supersedes the old "Neo4j sole SoR / no parallel datastore" rule):** the
+  **Postgres statement + decision log = system of record** (one truth); **Neo4j + GDS = the derived,
+  rebuildable graph projection** ("the graph end") for traversal/analytics. Parallel stores, one
+  truth: every other store is a view rebuildable from the log. *In transition* — the live SoR stays
+  Neo4j until the F1 projector cutover; do not assume the statement store exists in code yet.
 - **Ontology = FollowTheMoney 4.x** + STIX 2.1 (CTI) + `wm:` extensions only where FtM can't reach.
   Validate every object against the FtM schema. Never invent a parallel model.
 - **ER = Splink (DuckDB) + nomenklatura**, central (L3) — **NEVER dedupe inside a connector.**
