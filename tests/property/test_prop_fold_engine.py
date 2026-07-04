@@ -40,7 +40,7 @@ from worldmonitor.db.engine import create_all, make_engine, session_factory
 from worldmonitor.db.models import Base, ErQueueItem, StatementRecord
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.ontology.ftm import FtmEntity
-from worldmonitor.resolution.canonical import record_alias
+from worldmonitor.resolution.canonical import record_alias, record_canonical
 from worldmonitor.resolution.pipeline import resolve_pending
 from worldmonitor.resolution.projector import project  # gate import: RED until builder lands
 
@@ -405,7 +405,19 @@ def test_p_fold_4_dedup_supersession_convergence(
         engine.dispose()
         return  # no statements written (all dead-lettered); skip
 
-    # X is a "prior" canonical with NO self-row in the ledger
+    # X is a "prior" canonical that will receive BOTH a self-row AND a supersession alias
+    # to Y — the hardened F2 scenario (fold-under-re-canonicalisation DETERMINISM guard).
+    #
+    # PRE-FIX REGRESSION (old unordered alias_map): the ledger would hold both
+    #   (canonical_id=X, canonical_alias=X)  ← self-row
+    #   (canonical_id=Y, canonical_alias=X)  ← supersession row
+    # When the alias map was built without filtering self-rows (canonical_id == canonical_alias),
+    # a simple first()-lookup could return X itself as survivor_of(X), producing an orphan
+    # node under X in the projected graph — the assertion x_count == 0 would then FAIL.
+    #
+    # FIXED: project() now builds its alias map from supersession rows ONLY
+    # (canonical_id != canonical_alias), with deterministic ORDER BY, so the self-row
+    # is excluded and survivor_of(X) always resolves to Y.
     canonical_x = f"fake-prior-canonical-p-fold-4-{uuid.uuid4().hex[:8]}"
 
     # (a) Insert statement rows under X + a DUPLICATE of one (same statement_id, new PK)
@@ -440,9 +452,16 @@ def test_p_fold_4_dedup_supersession_convergence(
         session.add(x_dup_row)
         session.commit()
 
-    # (b) Record alias X → Y: X has no self-row so no double-row ambiguity in resolve_durable
+    # (b) Give X a self-row THEN alias X → Y.
+    # The ledger now holds both (X→X self-row) and (Y→X supersession row) for the alias X.
+    # Against the old projector, survivor_of(X) could match the self-row and return X
+    # (unordered first() on two rows with canonical_alias=X).  The fixed projector filters
+    # self-rows from the alias map before lookup, so X→Y is the only resolution.
     with sessions() as session:
-        record_alias(session, canonical_y, canonical_x)
+        record_canonical(session, canonical_x)  # adds (canonical_id=X, canonical_alias=X)
+        session.commit()
+    with sessions() as session:
+        record_alias(session, canonical_y, canonical_x)  # adds (canonical_id=Y, canonical_alias=X)
         session.commit()
 
     # Wipe graph, then project fresh (full_rebuild=True reads ALL rows including X rows)

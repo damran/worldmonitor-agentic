@@ -27,6 +27,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from followthemoney import model as ftm_model
 from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
@@ -514,4 +515,93 @@ def test_null_quad_members_produce_g1_valid_provenance() -> None:
     assert node_props.get("prov_source_id") == "src-null-test", (
         f"T-PROJ-UNIT-5: G1 — prov_source_id={node_props.get('prov_source_id')!r} in node props, "
         "expected 'src-null-test'"
+    )
+
+
+# ===========================================================================
+# T-PROJ-UNIT-6: Mixed-schema group → common schema (F1, ADR 0100)
+# ===========================================================================
+
+
+def test_mixed_schema_fold_uses_ftm_common_schema() -> None:
+    """reconstruct_entities uses ftm_model.common_schema for a mixed-schema survivor group.
+
+    When a survivor group contains rows with DIFFERENT-but-compatible schemas (e.g.
+    Company rows and Organization rows merged into the same canonical_id), the fold MUST
+    produce an entity whose schema is the FtM COMMON schema (the most specific compatible
+    type), not an arbitrary ``rows[0].schema``.
+
+    For Company + Organization:
+    - Company extends Organization (Company is the more specific descendant)
+    - ftm_model.common_schema("Company", "Organization") == "Company"
+    - This is symmetric: common_schema("Organization", "Company") == "Company" too
+
+    PRE-FIX REGRESSION (``rows[0].schema`` path):
+    - If rows are [Organization row, Company row]: schema = "Organization" (WRONG — too broad)
+    - If rows are [Company row, Organization row]: schema = "Company" (coincidentally correct)
+    The old code was order-dependent.  The new code uses ``common_schema`` and is
+    order-independent.  This test asserts BOTH orderings produce "Company".
+
+    In-band check: the resulting entity has the correct schema so that entity-typed
+    property resolution and FtM validation do not silently widen the type to a supertype.
+    """
+    # --- Forward order: Company row first, then Organization row ---
+    rows_co_first = [
+        _stmt("mixed-schema-C", "m1", "Company", "name", "MixedCo", "src-A"),
+        _stmt("mixed-schema-C", "m2", "Organization", "name", "MixedCo Org", "src-B"),
+    ]
+    entities_co_first = reconstruct_entities(rows_co_first, lambda cid: cid)
+
+    assert len(entities_co_first) == 1, (
+        f"T-PROJ-UNIT-6 (Company-first): expected 1 entity, got {len(entities_co_first)}"
+    )
+    entity_co_first = entities_co_first[0]
+    assert entity_co_first.schema.name == "Company", (
+        "T-PROJ-UNIT-6 MIXED-SCHEMA FAILED (Company-first order): "
+        f"entity.schema={entity_co_first.schema.name!r}, expected 'Company'. "
+        "ftm_model.common_schema('Company', 'Organization') == 'Company' (Company is the "
+        "more specific descendant). The fold MUST use common_schema, not rows[0].schema "
+        "(ADR 0100 F1 fix)."
+    )
+
+    # --- Reversed order: Organization row first, Company row second ---
+    # Against rows[0].schema, this would produce "Organization" (WRONG / too broad).
+    # The fixed common_schema path produces "Company" regardless of order.
+    rows_org_first = [
+        _stmt("mixed-schema-C", "m2", "Organization", "name", "MixedCo Org", "src-B"),
+        _stmt("mixed-schema-C", "m1", "Company", "name", "MixedCo", "src-A"),
+    ]
+    entities_org_first = reconstruct_entities(rows_org_first, lambda cid: cid)
+
+    assert len(entities_org_first) == 1, (
+        f"T-PROJ-UNIT-6 (Organization-first): expected 1 entity, got {len(entities_org_first)}"
+    )
+    entity_org_first = entities_org_first[0]
+    assert entity_org_first.schema.name == "Company", (
+        "T-PROJ-UNIT-6 MIXED-SCHEMA ORDER-DEPENDENCE BUG (Organization-first order): "
+        f"entity.schema={entity_org_first.schema.name!r}, expected 'Company'. "
+        "With rows[0].schema the pre-fix code would return 'Organization' here (the first "
+        "row's schema). The fixed projector uses ftm_model.common_schema iteratively, "
+        "producing 'Company' regardless of row order (ADR 0100 F1)."
+    )
+
+    # --- Confirm the two orderings produce the same schema (order-independence) ---
+    assert entity_co_first.schema.name == entity_org_first.schema.name, (
+        "T-PROJ-UNIT-6 ORDER-INDEPENDENCE VIOLATED: "
+        f"Company-first → {entity_co_first.schema.name!r}, "
+        f"Org-first → {entity_org_first.schema.name!r}. "
+        "reconstruct_entities MUST produce the same schema regardless of row order "
+        "(ADR 0100 F1: use ftm_model.common_schema, not rows[0].schema)."
+    )
+
+    # --- Verify via ftm_model directly (regression anchor) ---
+    expected_common = ftm_model.common_schema("Company", "Organization").name
+    assert expected_common == "Company", (
+        f"T-PROJ-UNIT-6 PRECONDITION: ftm_model.common_schema('Company','Organization') "
+        f"returned {expected_common!r} — expected 'Company'. "
+        "This test's premise depends on Company being the common schema of Company+Organization."
+    )
+    assert entity_co_first.schema.name == expected_common, (
+        f"T-PROJ-UNIT-6: entity schema {entity_co_first.schema.name!r} != "
+        f"ftm_model.common_schema result {expected_common!r}"
     )

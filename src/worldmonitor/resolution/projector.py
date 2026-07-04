@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from followthemoney import registry
+from followthemoney.exc import InvalidData
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -132,9 +133,23 @@ def reconstruct_entities(
         if not rows:
             continue
 
-        # Schema = uniform within the group (all rows share the same statement schema)
-        schema_name = rows[0].schema
-        schema_obj = ftm_model.get(schema_name)
+        # Schema = the FtM COMMON schema of the group's member schemas (F1, ADR 0100).
+        # Mirrors the merge path (``proxy.merge`` sets ``schema = common_schema`` over the
+        # members); using an arbitrary ``rows[0].schema`` would pick a sub/supertype by
+        # unordered row order on a group whose members carry different-but-compatible schemas
+        # (e.g. Company + Organization) → a divergent, potentially lossy node.
+        schemata = sorted({row.schema for row in rows})
+        schema_obj = ftm_model.get(schemata[0])
+        for _other in schemata[1:]:
+            if schema_obj is None:
+                break
+            try:
+                schema_obj = ftm_model.common_schema(schema_obj, _other)
+            except InvalidData:
+                # Incompatible schemata cannot co-merge into one canonical (H-2, ADR 0041),
+                # so this is unreachable for a real fold; fall back deterministically.
+                break
+        schema_name = schema_obj.name if schema_obj is not None else schemata[0]
 
         # Build props: {prop -> set of values}, EXCLUDING prop == "id"
         props: dict[str, set[str]] = defaultdict(set)
@@ -245,16 +260,38 @@ def project(
     statements_deduped = statements_read - unique_stmt_ids
 
     # --- Full ledger read: build survivor_of (ADR 0100 D2 global-fold-is-truth) ---
-    # One query over the complete canonical_id_ledger; semantically identical to calling
-    # resolve_durable(session, cid) for each canonical_id but avoids N per-row round-trips.
+    # One query over the complete canonical_id_ledger, avoiding N per-row round-trips.
+    # F2 (determinism): build the map from SUPERSESSION rows ONLY (canonical_id != canonical_alias)
+    # and read them in a deterministic ORDER BY. Excluding self-rows (canonical == alias) is
+    # load-bearing: an id that is BOTH a live canonical (its self-row) AND later superseded (an
+    # alias row → its survivor) must resolve to the SURVIVOR, not to itself by unordered last-wins.
+    # Otherwise a fresh Postgres / DR rebuild (the scenario the projector exists for) could flip the
+    # row order and leave an orphan node under the superseded id — the exact ADR-0095
+    # fold-under-re-canonicalisation guarantee this projector claims to enforce.
     ledger_rows = session.execute(
-        select(CanonicalIdLedger.canonical_alias, CanonicalIdLedger.canonical_id)
+        select(CanonicalIdLedger.canonical_alias, CanonicalIdLedger.canonical_id).order_by(
+            CanonicalIdLedger.canonical_alias, CanonicalIdLedger.canonical_id
+        )
     ).all()
-    alias_map: dict[str, str] = {str(row[0]): str(row[1]) for row in ledger_rows}
+    alias_map: dict[str, str] = {
+        str(alias): str(canonical)
+        for alias, canonical in ledger_rows
+        if str(alias) != str(canonical)
+    }
 
     def survivor_of(cid: str) -> str:
-        """Resolve a (possibly superseded) canonical_id to its durable survivor."""
-        return alias_map.get(cid, cid)
+        """Resolve a (possibly superseded) canonical_id to its durable survivor.
+
+        Follows the supersession chain transitively (a → b → c) to a fixed point, with a
+        visited-guard against a pathological cycle. Deterministic: the map holds supersession
+        rows only, so a coexisting self-row never shadows the survivor mapping.
+        """
+        seen: set[str] = set()
+        current = cid
+        while current in alias_map and current not in seen:
+            seen.add(current)
+            current = alias_map[current]
+        return current
 
     # --- Fold: reconstruct entities from the statement log ---
     entities = reconstruct_entities(statement_rows, survivor_of)

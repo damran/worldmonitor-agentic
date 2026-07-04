@@ -274,6 +274,34 @@ merged-node/DR/erasure pain it removes — the 3a-ii rebuild-and-diff job is the
   normalisation, a `method` field, capturing anchors/enrichment into the log, and folding `merge_audit`
   into `decision`.
 
+## Adversarial-verification findings (5-lens fold audit, 2026-07-05)
+
+A perspective-diverse adversarial review of the fold engine ran before merge. It confirmed the E4
+exclusion is legitimate (a full no-exclusion node diff shows *only* `datasets` diverges), no test was
+weakened, and the projector is dormant/isolated with an honest `person_affecting:false`. It surfaced
+correctness gaps the property suite had *dodged*; **two were fixed in 3a-i**, the rest are recorded as
+3a-ii/3b prerequisites:
+
+- **FIXED (F2 — survivor-resolution determinism).** `project()`'s `survivor_of` now builds its alias map
+  from **supersession rows only** (`canonical_id != canonical_alias`), reads them under a deterministic
+  `ORDER BY`, and resolves **transitively**. Previously a canonical id holding *both* a self-row and a
+  supersession alias resolved by unordered last-wins, so a fresh Postgres / DR rebuild could leave an
+  orphan node under the superseded id — violating the fold-under-re-canonicalisation guarantee. (P-FOLD-4
+  had deliberately avoided the self-row case; coverage added.)
+- **FIXED (F1 — mixed-schema fold).** `reconstruct_entities` now folds a survivor group under the FtM
+  **common schema** of its member schemas (mirroring `proxy.merge`), not an arbitrary `rows[0].schema`,
+  so a group whose members carry different-but-compatible schemas cannot produce a divergent/lossy node.
+- **BACKLOG (F3 — incremental delta-fold, 3a-ii).** `project(full_rebuild=False)` folds only the delta
+  and writes via `SET n += props`, which overwrites a multi-valued property across runs. 3a-i uses
+  `full_rebuild` as its meaningful mode (incremental is exercised only for the 0-delta no-op); **3a-ii
+  must re-read each touched survivor's full statement history before writing.**
+- **BACKLOG (F4 — edge byte-equivalence + edge `datasets`, 3a-ii).** IT-PROJ-2's corpus has no edges and
+  IT-PROJ-3 asserts only edge `prov_*` presence; full fold-vs-direct **edge** byte-equivalence (and the
+  E4 `datasets` divergence on edge properties) is deferred to 3a-ii's parity guard.
+- **BACKLOG (LOW).** Retroactive supersession node-*deletion* (the projector only MERGEs; the
+  rebuild-and-diff / cutover owns removing a superseded node); a promoted entity with zero FtM properties
+  writes no statements → no node (document); IT-PROJ-3 exercises a single-batch, not cross-batch, rewrite.
+
 ## Alternatives rejected
 
 - **A separate transactional outbox table.** Rejected (D1): a second in-Postgres write to keep in sync
@@ -304,4 +332,4 @@ merged-node/DR/erasure pain it removes — the 3a-ii rebuild-and-diff job is the
 Adding this file requires the builder to re-run `python scripts/gen_adr_index.py` so
 `docs/decisions/README.md` gains the `0100` row (else the `adr-index` CI check goes red). This header
 uses the canonical list dialect (`Status` / `Date` / `human_fork` / `person_affecting` on the header
-lines the generator parses), so the regenerated row reads `PROPOSED | 2026-07-04 | false | false`.
+lines the generator parses), so the regenerated row reads `ACCEPTED | 2026-07-04 | false | false`.

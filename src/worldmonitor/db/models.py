@@ -8,6 +8,7 @@ mapped candidates onto. The platform is single-tenant (D1, ADR 0042).
 
 from __future__ import annotations
 
+import itertools
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +20,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -421,3 +423,26 @@ class ProjectionCheckpoint(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+# ---------------------------------------------------------------------------
+# SQLite ``seq`` fallback (ADR 0100 D1) — test-dialect compatibility only.
+# ---------------------------------------------------------------------------
+# ``StatementRecord.seq`` / ``DecisionRecord.seq`` are server-generated via Postgres
+# ``GENERATED ... AS IDENTITY`` — durable + monotonic, the projector's outbox watermark. Postgres
+# omits the column from INSERT and the server fills it. SQLite (fast unit tests) does NOT honour
+# ``Identity`` on a non-PK column, so an ORM insert would leave ``seq`` NULL and violate NOT NULL.
+# This ``before_insert`` listener supplies a client-side monotonic fallback for SQLite ONLY; on
+# Postgres it is a no-op (``seq`` stays unset → the server IDENTITY generates it), so the production
+# monotonic/durability guarantee the projector relies on is untouched. It changes no DDL, so the
+# migration and the drift guard are unaffected.
+_sqlite_seq_counter = itertools.count(1)
+
+
+def _assign_sqlite_seq(_mapper: Any, connection: Any, target: Any) -> None:
+    if target.seq is None and connection.dialect.name == "sqlite":
+        target.seq = next(_sqlite_seq_counter)
+
+
+event.listen(StatementRecord, "before_insert", _assign_sqlite_seq)
+event.listen(DecisionRecord, "before_insert", _assign_sqlite_seq)

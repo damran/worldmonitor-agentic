@@ -531,10 +531,17 @@ def test_edge_bearing_ownership_global_referent_rewrite(
         (a for a in all_audits if "co1" in a.source_ids and "co2" in a.source_ids),
         None,
     )
-    if co12_audit is None:
-        # co1+co2 didn't merge (e.g. Splink below threshold) — skip this test
-        # In normal test runs they DO merge (same name+jurisdiction), but defensive guard
-        pytest.skip("co1+co2 did not merge in this run — Splink score below threshold")
+    # co1+co2 (same name + same jurisdiction) MUST merge: the Splink score is deterministic
+    # for identical name/jurisdiction, so a non-merge is a real fold/pipeline regression, not a
+    # flake.  Skipping would self-nullify the edge-rewrite + edge-G1 oracle.
+    # PRE-FIX skip: the original code used pytest.skip, silently dropping the assertion if
+    # Splink drifted — turning a potential regression into a vacuous "pass".
+    assert co12_audit is not None, (
+        "IT-PROJ-3: co1+co2 (identical name='FoldEdge Corp', jurisdiction='us') did NOT merge. "
+        "This is a real regression — co1+co2 must ALWAYS merge when Splink scores identical "
+        "name+jurisdiction pairs. A non-merge means the Splink model, ER pipeline, or MergeAudit "
+        "writing logic has regressed. Investigate, do NOT convert this back to a pytest.skip."
+    )
 
     co12_canonical = co12_audit.canonical_id
 
