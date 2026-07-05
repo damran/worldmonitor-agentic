@@ -333,3 +333,16 @@ Adding this file requires the builder to re-run `python scripts/gen_adr_index.py
 `docs/decisions/README.md` gains the `0100` row (else the `adr-index` CI check goes red). This header
 uses the canonical list dialect (`Status` / `Date` / `human_fork` / `person_affecting` on the header
 lines the generator parses), so the regenerated row reads `ACCEPTED | 2026-07-04 | false | false`.
+
+---
+
+**Erratum (2026-07-05, Gate P1 planning / ADR 0106 — appended note; original body unchanged).** The E2
+parenthetical in D2 ("enrichment runs on the *written* entity **after** the statement dual-write,
+`pipeline.py:437` vs `:483`") is **backwards**: `enrich` at `pipeline.py:437` runs **before**
+`record_statements` at `:483`. The E2 conclusion itself is unchanged — the structural bar is that anchors
+live in the FtM entity **context** while the statement fusion iterates `member.properties` only
+(`merge.py:296`), so no anchor can enter the statement lane regardless of call ordering. Recorded so no
+implementer picks a capture point from the false ordering (the capture point is a separate additive call
+in the same promote block — ADR 0106 §3). Additionally, D3's "**Anchors — not reconstructed (E2)**" note
+and the E2 expected-divergence class are **retired by Gate P1 when ADR 0106 lands**: the fold then
+reconstructs anchors from the `context_claim` lane.
