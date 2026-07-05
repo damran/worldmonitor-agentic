@@ -22,6 +22,30 @@ All three tests are RED at collection time because the module-level import of
 ``project`` from ``worldmonitor.resolution.projector`` fails with ``ImportError``
 — that module does not exist until the builder creates it.  That is the correct,
 intended TDD failure mode.
+
+---
+
+Gate 3a-ii-A (ADR 0101) adds two MANDATORY ``@given`` properties on the INCREMENTAL
+fold path, closing the F3 gap ADR 0100 recorded ("3a-ii must re-read each touched
+survivor's full statement history before writing"):
+
+P-FOLD-2  INCREMENTAL == FULL-REBUILD (byte-identical, no exclusion) — folding a log
+          incrementally across N supersession-monotonic batches (append batch ->
+          project(full_rebuild=False) after each) must reproduce EXACTLY the graph a
+          single project(full_rebuild=True) over the whole log produces. Both sides are
+          the fold (fold-vs-fold, NOT fold-vs-direct), so there is no E-class divergence
+          and no exclusion is needed (ADR 0101 §Context load-bearing clarification).
+
+P-FOLD-5  THIN RE-OBSERVATION MUST NOT CLOBBER — the F3 regression witness: a survivor
+          whose multi-valued prop accumulated a value set V (|V| >= 2), when a LATER
+          batch re-observes only a proper subset of V, must still carry the FULL V after
+          the incremental fold (ADR 0101 Decision A1).
+
+Both are RED against the CURRENT (pre-fix) projector: ``project(full_rebuild=False)``
+folds ONLY the delta rows (``projector.py:244-297``) and ``write_entities``'s
+``SET n += props`` REPLACES any prop key PRESENT in that thinner delta — clobbering a
+previously-accumulated value set down to whatever the last-touching batch alone
+contributed.
 """
 
 from __future__ import annotations
@@ -66,6 +90,12 @@ _SETTINGS = settings(
 # Captures: sorted (node_id, sorted_labels, sorted_node_props) + sorted
 # (edge_type, src_id, dst_id, sorted_edge_props) including prov_*/prov_witnesses/anchors.
 # All values are JSON-serialised for stable cross-run comparison.
+#
+# ``exclude_edge_props`` (Gate 3a-ii-A / ADR 0101 Decision A3, F4): additive parameter,
+# default empty — every existing caller (P-FOLD-1/3/4) is byte-unaffected. Mirrors
+# ``exclude_node_props`` on the edge side, for the same E4 ("datasets") exclusion this
+# time on relationship properties. This copy is kept in sync manually with the twin in
+# ``tests/integration/test_projector.py``.
 # ---------------------------------------------------------------------------
 
 
@@ -79,6 +109,7 @@ def _stable_val(v: Any) -> str:
 def graph_signature(
     client: Neo4jClient,
     exclude_node_props: frozenset[str] = frozenset(),
+    exclude_edge_props: frozenset[str] = frozenset(),
 ) -> tuple[tuple, tuple]:
     """Byte-comparable canonical fingerprint of the full graph in ``client``.
 
@@ -123,7 +154,9 @@ def graph_signature(
                 str(row["dst"] or ""),
                 tuple(
                     sorted(
-                        (_stable_val(k), _stable_val(v)) for k, v in (row["rprops"] or {}).items()
+                        (_stable_val(k), _stable_val(v))
+                        for k, v in (row["rprops"] or {}).items()
+                        if k not in exclude_edge_props
                     )
                 ),
             )
@@ -499,3 +532,276 @@ def test_p_fold_4_dedup_supersession_convergence(
     )
 
     engine.dispose()
+
+
+# ===========================================================================
+# P-FOLD-2 / P-FOLD-5 — Gate 3a-ii-A (ADR 0101): incremental fold correctness
+# ===========================================================================
+#
+# P-FOLD-2  INCREMENTAL == FULL-REBUILD (byte-identical, no exclusion) — folding a log
+#           incrementally across N supersession-monotonic batches must reproduce EXACTLY
+#           the graph a single project(full_rebuild=True) over the whole log produces.
+#           Both sides are the fold (fold-vs-fold, NOT fold-vs-direct — ADR 0101 §Context
+#           load-bearing clarification), so no exclusion is applied.
+#
+# P-FOLD-5  THIN RE-OBSERVATION MUST NOT CLOBBER — the F3 regression witness: a survivor
+#           whose multi-valued prop accumulated V (|V| >= 2), when a LATER batch
+#           re-observes only a proper subset of V, must still carry the FULL V after the
+#           incremental fold (ADR 0101 Decision A1's re-read-full-history fix).
+#
+# Both use DIRECT StatementRecord appends (P-FOLD-4's recipe) for deterministic control of
+# batch boundaries and the thin-re-emit trigger. Neither property ever writes a
+# CanonicalIdLedger row, so survivor_of is the identity map for every id used here — this
+# trivially satisfies the supersession-monotonic bound (ADR 0101 Decision A2): no batch can
+# supersede an already-projected survivor, because no batch supersedes anything.
+
+
+@st.composite
+def _p_fold_2_scenario(draw: st.DrawFn) -> tuple[int, dict[str, list[tuple[int, list[str]]]]]:
+    """Draw ``(n_batches, plan)`` for P-FOLD-2.
+
+    ``plan[survivor]`` is a list of exactly TWO ``(batch_index, values)`` entries, in
+    ascending batch order:
+
+    * entry[0] — the ``intro`` batch: writes the FULL value set ``V`` (2..3 distinct,
+      survivor-namespaced tokens) for the tested prop ``"alias"``.
+    * entry[1] — a STRICTLY LATER ``thin`` batch: re-observes a non-empty PROPER SUBSET
+      of ``V`` (the F3 trigger — "a thinner value subset").
+
+    No ``CanonicalIdLedger`` row is ever written for these ids, so the supersession-
+    monotonic bound (ADR 0101 Decision A2) holds trivially.
+    """
+    n_batches = draw(st.integers(min_value=2, max_value=4))
+    n_survivors = draw(st.integers(min_value=1, max_value=3))
+    survivors = [f"pfold2-surv-{i}" for i in range(n_survivors)]
+
+    plan: dict[str, list[tuple[int, list[str]]]] = {}
+    for surv in survivors:
+        v_size = draw(st.integers(min_value=2, max_value=3))
+        full_v = [f"{surv}-val-{i}" for i in range(v_size)]
+        intro_batch = draw(st.integers(min_value=0, max_value=n_batches - 2))
+        thin_batch = draw(st.integers(min_value=intro_batch + 1, max_value=n_batches - 1))
+        thin_size = draw(st.integers(min_value=1, max_value=v_size - 1))
+        shuffled = draw(st.permutations(full_v))
+        thin_values = sorted(shuffled[:thin_size])
+        plan[surv] = [(intro_batch, sorted(full_v)), (thin_batch, thin_values)]
+
+    return n_batches, plan
+
+
+@given(scenario=_p_fold_2_scenario())
+@_SETTINGS
+def test_p_fold_2_incremental_equals_full_rebuild(
+    scenario: tuple[int, dict[str, list[tuple[int, list[str]]]]],
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+) -> None:
+    """P-FOLD-2: incremental fold across N batches == one full_rebuild fold (ADR 0101 A2).
+
+    For any log and any supersession-monotonic ordered partition into batches B1..Bk,
+    folding incrementally (append Bi -> project(full_rebuild=False) after each) yields a
+    graph byte-identical (full graph_signature, NO exclusion) to
+    project(full_rebuild=True) over the whole log.
+
+    PRE-FIX (F3): each incremental project() call folds ONLY its delta rows, and
+    write_entities' ``SET n += props`` REPLACES any prop key present in that thinner
+    delta — so a survivor whose ``thin`` batch is its LAST touch ends up with a clobbered
+    node (both its "alias" prop AND its reconstructed "datasets" prop shrink to only the
+    thin batch's contribution), diverging from the full_rebuild fold. RED for exactly
+    this reason.
+    """
+    n_batches, plan = scenario
+
+    _cleanup_postgres(postgres_dsn)
+    clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+
+    engine = make_engine(postgres_dsn)
+    try:
+        create_all(engine)
+        sessions = session_factory(engine)
+
+        for batch_index in range(n_batches):
+            with sessions() as session:
+                for surv, entries in plan.items():
+                    for entry_batch, values in entries:
+                        if entry_batch != batch_index:
+                            continue
+                        for value in values:
+                            session.add(
+                                StatementRecord(
+                                    id=str(uuid.uuid4()),
+                                    statement_id=str(uuid.uuid4()),
+                                    canonical_id=surv,
+                                    entity_id=f"{surv}-member",
+                                    schema="Company",
+                                    prop="alias",
+                                    value=value,
+                                    dataset=f"pfold2-ds-batch-{batch_index}",
+                                    reliability="B",
+                                    retrieved_at=f"2026-01-{batch_index + 1:02d}T00:00:00Z",
+                                )
+                            )
+                session.commit()
+
+            # Incremental fold after THIS batch — the surface under test.
+            with sessions() as session:
+                project(session, clean_graph, full_rebuild=False)
+
+        sig_incr = graph_signature(clean_graph)
+
+        # Wipe and fold the WHOLE log in one full_rebuild pass — the oracle.
+        clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+        with sessions() as session:
+            project(session, clean_graph, full_rebuild=True)
+        sig_full = graph_signature(clean_graph)
+
+        assert sig_incr == sig_full, (
+            "P-FOLD-2 VIOLATED: incremental fold (per-batch project(full_rebuild=False)) != "
+            "one project(full_rebuild=True) over the whole log.\n"
+            f"  sig_incr: {len(sig_incr[0])} nodes, {len(sig_incr[1])} edges\n"
+            f"  sig_full: {len(sig_full[0])} nodes, {len(sig_full[1])} edges\n"
+            f"  plan: {plan!r}\n"
+            "Incremental fold must re-read each touched survivor's FULL statement history "
+            "before writing (ADR 0101 Decision A1) — a thinner-batch clobber of an "
+            "accumulated multi-valued prop (or of the reconstructed 'datasets') breaks this "
+            "equality."
+        )
+    finally:
+        engine.dispose()
+
+
+@st.composite
+def _p_fold_5_scenario(draw: st.DrawFn) -> tuple[list[str], str]:
+    """Draw ``(V, v)`` for P-FOLD-5: ``V`` (>=2 distinct values) and one ``v in V`` to
+    re-observe alone in the thin incremental batch."""
+    v_size = draw(st.integers(min_value=2, max_value=4))
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    full_v = draw(
+        st.lists(
+            st.text(alphabet=alphabet, min_size=1, max_size=8),
+            min_size=v_size,
+            max_size=v_size,
+            unique=True,
+        )
+    )
+    reobserve_value = draw(st.sampled_from(full_v))
+    return full_v, reobserve_value
+
+
+@given(scenario=_p_fold_5_scenario())
+@_SETTINGS
+def test_p_fold_5_thin_incremental_no_clobber(
+    scenario: tuple[list[str], str],
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+) -> None:
+    """P-FOLD-5: a thin re-observation of an accumulated multi-valued prop must NOT clobber
+    it (the F3 regression witness, ADR 0101 Decision A1).
+
+    Seeds V (|V|>=2) as distinct StatementRecord rows for survivor S's prop "alias";
+    project(full_rebuild=False) (node p == V). Then appends ONE higher-seq row
+    re-observing p=v for some v in V (a thinner re-emit touching S);
+    project(full_rebuild=False) again.
+
+    Oracle: sorted(node(S).props["alias"]) == sorted(V), AND equals the
+    project(full_rebuild=True) node for S.
+
+    PRE-FIX RED: the thin delta-fold (projector.py's incremental branch folds ONLY the
+    delta) clobbers "alias" down to {v} via write_entities' additive-but-key-replacing
+    ``SET n += props``.
+    """
+    full_v, reobserve_value = scenario
+    survivor = "pfold5-survivor"
+
+    _cleanup_postgres(postgres_dsn)
+    clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+
+    engine = make_engine(postgres_dsn)
+    try:
+        create_all(engine)
+        sessions = session_factory(engine)
+
+        # --- Seed V as distinct StatementRecord rows, one per value ---
+        with sessions() as session:
+            for value in full_v:
+                session.add(
+                    StatementRecord(
+                        id=str(uuid.uuid4()),
+                        statement_id=str(uuid.uuid4()),
+                        canonical_id=survivor,
+                        entity_id=f"{survivor}-member",
+                        schema="Company",
+                        prop="alias",
+                        value=value,
+                        dataset="pfold5-ds-seed",
+                        reliability="B",
+                        retrieved_at="2026-01-01T00:00:00Z",
+                    )
+                )
+            session.commit()
+
+        # First incremental fold: node p == V (nothing to clobber yet — this is the FIRST
+        # project() call ever, watermark starts at 0, so the delta IS the whole seed).
+        with sessions() as session:
+            project(session, clean_graph, full_rebuild=False)
+
+        # --- Append ONE higher-seq row: a thinner re-emit of a single v in V ---
+        with sessions() as session:
+            session.add(
+                StatementRecord(
+                    id=str(uuid.uuid4()),
+                    statement_id=str(uuid.uuid4()),
+                    canonical_id=survivor,
+                    entity_id=f"{survivor}-member",
+                    schema="Company",
+                    prop="alias",
+                    value=reobserve_value,
+                    dataset="pfold5-ds-thin",
+                    reliability="B",
+                    retrieved_at="2026-01-02T00:00:00Z",
+                )
+            )
+            session.commit()
+
+        # Second incremental fold — the surface under test (F3 trigger).
+        with sessions() as session:
+            project(session, clean_graph, full_rebuild=False)
+
+        incr_rows = clean_graph.execute_read(
+            "MATCH (n {id: $sid}) RETURN properties(n) AS props", sid=survivor
+        )
+        assert len(incr_rows) == 1, (
+            f"P-FOLD-5: expected exactly 1 node for survivor={survivor!r}, got {len(incr_rows)}"
+        )
+        incr_alias = sorted(incr_rows[0]["props"].get("alias") or [])
+
+        assert incr_alias == sorted(full_v), (
+            "P-FOLD-5 CLOBBER VIOLATED: after a thin incremental re-observation of "
+            f"prop='alias' (value={reobserve_value!r}), survivor={survivor!r}'s node carries "
+            f"alias={incr_alias!r} — expected the FULL accumulated set {sorted(full_v)!r}.\n"
+            "The incremental fold must re-read the survivor's FULL statement history before "
+            "writing (ADR 0101 Decision A1), not just the delta rows since the last "
+            "watermark — a thinner re-emit must never shrink an accumulated multi-valued prop."
+        )
+
+        # --- Oracle cross-check: must equal the full_rebuild node for S ---
+        clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+        with sessions() as session:
+            project(session, clean_graph, full_rebuild=True)
+
+        full_rows = clean_graph.execute_read(
+            "MATCH (n {id: $sid}) RETURN properties(n) AS props", sid=survivor
+        )
+        assert len(full_rows) == 1, (
+            f"P-FOLD-5: expected exactly 1 node for survivor={survivor!r} after full_rebuild, "
+            f"got {len(full_rows)}"
+        )
+        full_alias = sorted(full_rows[0]["props"].get("alias") or [])
+
+        assert incr_alias == full_alias, (
+            f"P-FOLD-5: incremental-fold alias={incr_alias!r} != full_rebuild-fold "
+            f"alias={full_alias!r} for survivor={survivor!r} — the incremental result must "
+            "match the full_rebuild oracle exactly."
+        )
+    finally:
+        engine.dispose()

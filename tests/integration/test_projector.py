@@ -38,6 +38,15 @@ IT-PROJ-3  Edge-bearing fixture: an Ownership edge between two Companies with on
            SURVIVOR nodes and carries prov_* (G1 on the edge); the referent was
            globally rewritten via the ledger.
 
+IT-PROJ-4  (Gate 3a-ii-A / ADR 0101, F4) MANDATORY single-batch fold-vs-direct edge
+           byte-equivalence, proven NON-VACUOUSLY: a NEW single-batch, single-source,
+           edge-bearing fixture (an Ownership edge between two unrelated Companies,
+           neither a merge candidate) so the edge set on both sides is non-empty. The
+           projector's graph_signature (nodes AND edges, excluding 'datasets' on both —
+           E4-on-edges) equals the direct writer's EXACTLY. IT-PROJ-2's _candidates()
+           corpus has 0 edges, so its edge-equivalence claim is vacuous (F4); this test
+           closes that gap.
+
 All tests are RED at collection time: the module-level imports of ``project``,
 ``ProjectionResult`` from ``worldmonitor.resolution.projector`` and
 ``ProjectionCheckpoint`` from ``worldmonitor.db.models`` fail with ``ImportError``
@@ -70,6 +79,11 @@ pytestmark = pytest.mark.integration
 
 # ---------------------------------------------------------------------------
 # graph_signature — shared with test_prop_fold_engine.py (kept in sync manually)
+#
+# ``exclude_edge_props`` (Gate 3a-ii-A / ADR 0101 Decision A3, F4): additive parameter,
+# default empty — every existing caller (IT-PROJ-1/2/3) is byte-unaffected. Mirrors
+# ``exclude_node_props`` on the edge side (E4-on-edges: excluding 'datasets' from
+# relationship properties the same way it is already excluded from node properties).
 # ---------------------------------------------------------------------------
 
 
@@ -83,6 +97,7 @@ def _stable_val(v: Any) -> str:
 def graph_signature(
     client: Neo4jClient,
     exclude_node_props: frozenset[str] = frozenset(),
+    exclude_edge_props: frozenset[str] = frozenset(),
 ) -> tuple[tuple, tuple]:
     """Byte-comparable canonical fingerprint of the full graph in ``client``.
 
@@ -127,7 +142,9 @@ def graph_signature(
                 str(row["dst"] or ""),
                 tuple(
                     sorted(
-                        (_stable_val(k), _stable_val(v)) for k, v in (row["rprops"] or {}).items()
+                        (_stable_val(k), _stable_val(v))
+                        for k, v in (row["rprops"] or {}).items()
+                        if k not in exclude_edge_props
                     )
                 ),
             )
@@ -219,6 +236,41 @@ def _candidates() -> list[dict[str, object]]:
                 "name": ["Vladimir Example"],
                 "nationality": ["ru"],
                 "birthDate": ["1960-01-01"],
+            },
+            "datasets": ["t"],
+        },
+    ]
+
+
+def _edge_candidates() -> list[dict[str, object]]:
+    """NEW single-batch, single-source, edge-bearing fixture (Gate 3a-ii-A F4 / IT-PROJ-4).
+
+    Two DISTINCT Companies with clearly different names + jurisdictions (NOT a merge
+    candidate pair — no ER ambiguity to resolve) plus an Ownership edge between them.
+    Single batch, ONE shared source 'src:statement-spine-test' (same provenance shape as
+    _candidates()) => E1/E2/E3 are null exactly as in IT-PROJ-2. Deliberately a SEPARATE
+    fixture, NOT a mutation of the shared _candidates() (test_statement_spine.py depends
+    on that one verbatim).
+    """
+    return [
+        {
+            "id": "edgeowner",
+            "schema": "Company",
+            "properties": {"name": ["Edge Owner Corp"], "jurisdiction": ["us"]},
+            "datasets": ["t"],
+        },
+        {
+            "id": "edgeasset",
+            "schema": "Company",
+            "properties": {"name": ["Edge Asset Corp"], "jurisdiction": ["gb"]},
+            "datasets": ["t"],
+        },
+        {
+            "id": "edge-own-A",
+            "schema": "Ownership",
+            "properties": {
+                "owner": ["edgeowner"],
+                "asset": ["edgeasset"],
             },
             "datasets": ["t"],
         },
@@ -594,5 +646,85 @@ def test_edge_bearing_ownership_global_referent_rewrite(
     )
     co3_node = clean_graph.execute_read("MATCH (n {id: 'co3'}) RETURN count(n) AS cnt")
     assert int(co3_node[0]["cnt"]) == 1, "IT-PROJ-3: node for co3 not found in projected graph"
+
+    engine.dispose()
+
+
+# ===========================================================================
+# IT-PROJ-4: MANDATORY single-batch EDGE byte-equivalence (Gate 3a-ii-A F4)
+# ===========================================================================
+
+
+def test_single_batch_edge_fold_vs_direct_equivalence(
+    clean_graph: Neo4jClient,
+    postgres_dsn: str,
+) -> None:
+    """IT-PROJ-4 (MANDATORY, ADR 0101 Decision A3 / F4): fold == direct, byte-identical,
+    on a NON-VACUOUS edge-bearing corpus.
+
+    IT-PROJ-2's edge-equivalence claim is VACUOUS: its ``_candidates()`` corpus has 0
+    edges (``edge_sigs`` compares two empty tuples). This test uses the NEW
+    ``_edge_candidates()`` fixture (single batch, one shared source, an Ownership edge
+    between two UNRELATED — not merge-candidate — Companies), so E1/E2/E3 are null
+    exactly as IT-PROJ-2 and the edge comparison is a REAL, non-empty one.
+
+    Steps:
+    1. resolve_pending writes the direct graph; capture
+       direct = graph_signature(exclude_node_props={"datasets"}, exclude_edge_props={"datasets"}).
+    2. Wipe graph.
+    3. project(full_rebuild=True); capture fold the same way.
+    4. Assert fold == direct (nodes AND edges) AND len(direct[1]) >= 1 (non-vacuous).
+
+    E4-on-edges: excluding 'datasets' from edge props mirrors the node exclusion (ADR 0100
+    E4); if the edge carries no 'datasets' property the exclusion is a harmless no-op —
+    the assertion still observes the direct-write edge's actual (non-empty) properties.
+    """
+    engine = make_engine(postgres_dsn)
+    create_all(engine)
+    sessions = session_factory(engine)
+
+    with sessions() as session:
+        for candidate in _edge_candidates():
+            session.add(_queue_item(candidate))
+        session.commit()
+
+    with sessions() as session:
+        resolve_pending(session=session, neo4j=clean_graph, guard_mode="block")
+
+    _EXCL_NODE = frozenset({"datasets"})
+    _EXCL_EDGE = frozenset({"datasets"})
+
+    # (1) Capture the DIRECT graph
+    direct = graph_signature(
+        clean_graph, exclude_node_props=_EXCL_NODE, exclude_edge_props=_EXCL_EDGE
+    )
+
+    assert len(direct[1]) >= 1, (
+        f"IT-PROJ-4 precondition: direct graph has {len(direct[1])} edge(s) — expected >= 1. "
+        "The Ownership fixture (_edge_candidates()) must produce a NON-VACUOUS edge corpus "
+        "(F4 requires a real edge to compare, not IT-PROJ-2's 0-edge vacuous base)."
+    )
+
+    # (2) Wipe the graph
+    clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+
+    # (3) project(full_rebuild=True) — reads the statement log, folds, writes
+    with sessions() as session:
+        project(session, clean_graph, full_rebuild=True)
+
+    fold = graph_signature(
+        clean_graph, exclude_node_props=_EXCL_NODE, exclude_edge_props=_EXCL_EDGE
+    )
+
+    # (4) BYTE-IDENTICAL assertion, nodes AND edges, non-vacuously
+    assert fold == direct, (
+        "IT-PROJ-4 MANDATORY EDGE EQUIVALENCE VIOLATED: fold graph != direct graph on the "
+        "_edge_candidates() single-batch, single-source, edge-bearing corpus.\n\n"
+        f"  direct: {len(direct[0])} nodes, {len(direct[1])} edges\n"
+        f"  fold:   {len(fold[0])} nodes, {len(fold[1])} edges\n\n"
+        "On a SINGLE BATCH with ONE shared source and NO anchors/enrichment (E1/E2/E3 all "
+        "null, same as IT-PROJ-2), the fold engine MUST reproduce the direct-write graph "
+        "byte-identically INCLUDING edges (ADR 0101 Decision A3 / F4)."
+    )
 
     engine.dispose()
