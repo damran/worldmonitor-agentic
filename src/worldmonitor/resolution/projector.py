@@ -68,6 +68,10 @@ class ProjectionResult:
     """Number of statement rows read from the log before deduplication."""
     statements_deduped: int
     """Number of duplicate-``statement_id`` rows removed during deduplication (ADR 0100 D3)."""
+    statements_refolded: int = 0
+    """Rows actually folded this call (ADR 0101 A1 observability). ``full_rebuild`` ==
+    ``statements_read``; incremental == the full re-read of each touched survivor's history
+    (``>= len(delta rows)``, 0 on a 0-delta no-op). Does NOT change ``statements_read``."""
 
 
 def reconstruct_entities(
@@ -293,8 +297,34 @@ def project(
             current = alias_map[current]
         return current
 
+    # --- Determine the rows to fold ---
+    # full_rebuild folds every row. Incremental (F3 fix, ADR 0101 A1): fold each TOUCHED
+    # survivor's COMPLETE statement history — not just the delta — so the additive
+    # `SET n += props` write restores full multi-valued props (a thinner delta re-emit of an
+    # already-accumulated property would otherwise clobber it down to the last batch's values).
+    if full_rebuild:
+        fold_rows = statement_rows
+    else:
+        touched = {survivor_of(str(row.canonical_id)) for row in statement_rows}
+        if not touched:
+            fold_rows = []  # 0-delta no-op (preserves P-FOLD-3 statements_read==0)
+        else:
+            # every canonical_id (survivor OR superseded alias) that folds into a touched survivor
+            preimage = set(touched) | {
+                alias for alias in alias_map if survivor_of(alias) in touched
+            }
+            fold_rows = list(
+                session.execute(
+                    select(StatementRecord)
+                    .where(StatementRecord.canonical_id.in_(preimage))
+                    .order_by(StatementRecord.seq)
+                )
+                .scalars()
+                .all()
+            )
+
     # --- Fold: reconstruct entities from the statement log ---
-    entities = reconstruct_entities(statement_rows, survivor_of)
+    entities = reconstruct_entities(fold_rows, survivor_of)
 
     # --- Compute max seqs consumed (default = existing watermark so it never goes backward) ---
     max_stmt_seq = max((int(row.seq) for row in statement_rows), default=last_stmt_seq)
@@ -327,4 +357,5 @@ def project(
         last_decision_seq=max_dec_seq,
         statements_read=statements_read,
         statements_deduped=statements_deduped,
+        statements_refolded=len(fold_rows),
     )
