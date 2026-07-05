@@ -4,13 +4,17 @@ Exposes the in-process ``LLMGateway`` over HTTP so the remote Hermes container
 routes every model call through the sovereignty choke point (S2 egress audit +
 confidential selector).
 
-Route: ``POST /v1/chat/completions`` — auth-gated (``Depends(get_principal)``).
+Route: ``POST /v1/chat/completions`` — auth-gated (``Depends(require_llm_role)``): a valid
+Zitadel bearer (401 otherwise) AND the dedicated ``worldmonitor:llm`` project role (403
+otherwise) (ADR 0104 item 5, Gate L1-b).
 
 INV-S3a-GATEWAY: the ONLY path to an LLM is ``LLMGateway.chat()``.  This module
 does NOT import ``litellm``; all egress goes through the injected gateway.
 
-INV-S3a-AUTH: bearer-gated — 401 without a valid Zitadel token (same gate as
-``api/graph.py``; the Hermes service-principal bearer satisfies it).
+INV-S3a-AUTH: bearer-gated — 401 without a valid Zitadel token, 403 without the
+``worldmonitor:llm`` role (same underlying gate as ``api/graph.py``, extended
+with the dedicated role check; the Hermes service-principal bearer satisfies
+it once granted the role).
 
 INV-S3a-NOSTREAM: ``stream: true`` returns an explicit 400 (SSE streaming is
 deferred to S5, the operator console).
@@ -37,7 +41,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from worldmonitor.api.deps import get_llm_gateway, get_principal
+from worldmonitor.api.deps import get_llm_gateway, require_llm_role
 from worldmonitor.authz.oidc import Principal
 from worldmonitor.llm.gateway import LLMGateway, LLMGatewayError
 
@@ -83,7 +87,7 @@ class _ChatCompletionRequest(BaseModel):
 @router.post("/v1/chat/completions")
 async def chat_completions(
     request: _ChatCompletionRequest,
-    _principal: Annotated[Principal, Depends(get_principal)],
+    _principal: Annotated[Principal, Depends(require_llm_role)],
     gateway: Annotated[LLMGateway, Depends(get_llm_gateway)],
 ) -> dict[str, Any]:
     """OpenAI-compatible chat completion (ADR 0092, Phase-3 S3a).
@@ -123,12 +127,15 @@ async def chat_completions(
     # INV-S3a-GATEWAY: the only path to a model is via the injected gateway.
     # mode=None — the server-side Settings.llm_mode selector decides the backend;
     # the client model field is deliberately NOT translated to a gateway mode.
-    # caller_tag="hermes" — egress audit attributes every Hermes model call.
+    # caller_tag — the egress audit attributes every call to the authenticated
+    # principal's subject (ADR 0104 item 4, Gate L1-b); falls back to "hermes"
+    # only when the subject is empty (e.g. a service principal with no `sub`).
+    caller_tag = _principal.subject or "hermes"
     try:
-        resp = await run_in_threadpool(gateway.chat, messages, caller_tag="hermes")
+        resp = await run_in_threadpool(gateway.chat, messages, caller_tag=caller_tag)
     except LLMGatewayError:
         # Typed gateway error → clean 502.  No provider internals, no traceback.
-        _LOG.warning("LLMGatewayError from gateway.chat (caller_tag=hermes)")
+        _LOG.warning("LLMGatewayError from gateway.chat (caller_tag=%s)", caller_tag)
         raise HTTPException(
             status_code=502,
             detail="LLM gateway error — upstream provider unavailable",
