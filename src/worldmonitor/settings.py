@@ -302,6 +302,12 @@ class Settings(BaseSettings):
     # Master egress-log toggle. When False, emit() is skipped; the write-before-call
     # ordering invariant is never bypassed (ADR 0091 §3). Default True.
     llm_egress_log_enabled: bool = True
+    # Durable, append-only LLM-egress audit (ADR 0105 / F2). When True (and the master
+    # llm_egress_log_enabled is also True), each crossing writes a durable Postgres row; an
+    # EXTERNAL crossing is fail-closed on that write (DB down / sink unwired ⇒ refuse). Default
+    # False: DORMANT — behaviour is byte-identical to L1 until an operator enables it after
+    # applying migration 0011 and confirming the Postgres sink.
+    llm_egress_durable_enabled: bool = False
 
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in

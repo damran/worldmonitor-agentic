@@ -121,4 +121,5 @@
 | [0102](0102-projection-rebuild-diff-guard.md) | Projection rebuild-and-diff guard (Gate 3a-ii-B): scheduled full-fold divergence measure | ACCEPTED | 2026-07-05 | false | false |
 | [0103](0103-review-queue-web-ui.md) | Review-queue web UI (Gate 1): promote the sign-off CLI to a server-rendered HTMX surface | ACCEPTED | 2026-07-05 | false | false |
 | [0104](0104-llm-egress-chokepoint-hardening.md) | LLM-egress choke-point hardening (L1): make the advisory-sovereignty model honest, non-bypassable, and auditable | ACCEPTED | 2026-07-05 | false | false |
+| [0105](0105-durable-llm-egress-audit.md) | Durable, append-only LLM-egress audit (F2): move the accountability record off ephemeral stdlib logging onto a tamper-evident Postgres spine | PROPOSED | 2026-07-05 | false | false |
 <!-- END GENERATED ADR INDEX -->
