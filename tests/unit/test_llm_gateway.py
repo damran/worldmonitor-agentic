@@ -2,7 +2,9 @@
 
 Covers spec §4b:
 - default Settings → LOCAL mode (Ollama loopback, data_left_perimeter=False);
-- a successful call writes exactly one egress record enriched with token usage;
+- a successful call writes exactly TWO egress records (pre-call, no usage; post-call, usage
+  attached) — updated for Gate L1-a / ADR 0104 item 2 (§2.5 of
+  docs/reviews/GATE_L1_LLM_EGRESS_HARDENING_SPEC.md);
 - a provider exception still leaves a record AND surfaces a typed LLMGatewayError;
 - per-call mode= override routes to that mode and records its flags;
 - no-secret-leak: openrouter_api_key bytes and message content absent from log;
@@ -21,7 +23,9 @@ BUILDER CONTRACT (names the implementation MUST match):
                           litellm.completion(...).
                 CONTRACT: import litellm (whole module) so `litellm.completion` patch works.
                 CONTRACT: raises LLMGatewayError (not a raw litellm exception) on failure.
-                CONTRACT: exactly one emit() call per chat() invocation.
+                CONTRACT (ADR 0104 item 2): on a SUCCESSFUL call, emit() is called TWICE —
+                          once BEFORE the provider call (usage=None) and once AFTER (usage
+                          populated), enriching the SAME EgressRecord object in place.
 
         LLMGatewayError(Exception)
 
@@ -47,6 +51,8 @@ BUILDER CONTRACT (names the implementation MUST match):
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import subprocess
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -189,9 +195,12 @@ def test_default_local_mode_uses_ollama_loopback_and_no_egress(caplog: Any) -> N
         f"Spec §7: api_base='http://localhost:11434'."
     )
 
-    # The egress record must say data_left_perimeter=False.
-    assert len(captured_records) == 1, (
-        f"exactly one egress record expected for one chat() call; got {len(captured_records)}"
+    # The egress record must say data_left_perimeter=False. One emitted record is
+    # sufficient for THIS assertion (data_left_perimeter is set identically on both the
+    # pre-call and post-call record) — the exact emit COUNT is covered by the dedicated
+    # two-record test below (ADR 0104 item 2).
+    assert len(captured_records) >= 1, (
+        f"expected at least 1 egress record for one chat() call; got {len(captured_records)}"
     )
     rec = captured_records[0]
     assert rec.data_left_perimeter is False, (
@@ -201,25 +210,37 @@ def test_default_local_mode_uses_ollama_loopback_and_no_egress(caplog: Any) -> N
     )
 
 
-# ── INV-S2-EGRESS: exactly-one-record on success, enriched with token usage ───────────
+# ── INV-USAGE (ADR 0104 item 2): success emits TWO records — pre-call (no usage), then
+#    post-call (usage attached), the SAME mutated EgressRecord object ────────────────────
 
 
-def test_successful_call_writes_exactly_one_egress_record_with_token_usage() -> None:
-    """INV-S2-EGRESS: a successful chat() emits exactly one record enriched with token usage.
+def test_successful_call_writes_two_egress_records_pre_and_post_with_token_usage() -> None:
+    """INV-USAGE (ADR 0104 item 2): a successful chat() emits exactly TWO records — the
+    pre-call completeness record (usage=None) and a post-call record enriched with token
+    usage. The gateway mutates ONE EgressRecord in place (so the FROZEN completeness test
+    stays green), so the spy snapshots each record AT EMIT TIME (``copy.copy``) to capture
+    the state the audit actually observed at each emit — inspecting the live reference after
+    chat() returns would see only the final, enriched state (a shared-object artifact, not
+    what was logged).
 
     Verifies that:
-    1. emit() is called exactly once per chat() invocation.
-    2. After the call, the record (enriched in-place, CONTRACT: mutable EgressRecord)
-       carries the token counts from the mocked ModelResponse.
+    1. emit() is called exactly TWICE per successful chat(): BEFORE the provider call
+       (INV-S2-EGRESS completeness — usage None) and AFTER (INV-USAGE — usage set).
+    2. The post-call record is the pre-call record ENRICHED WITH USAGE and nothing else —
+       ``replace(pre, usage=post.usage) == post`` (i.e. they are the same logical crossing,
+       not two independently-constructed records; field-agnostic, snapshot-safe).
+    3. The enriched record's usage carries the mocked ModelResponse's token counts.
 
-    # CONTRACT: EgressRecord is MUTABLE.  The gateway enriches .usage in-place after the
-    # provider call succeeds; the single emit() call happens BEFORE the provider, so the
-    # spy captures the same object reference that is later enriched.
+    Supersedes the previous "exactly ONE record" assertion (pre-L1-a): fixing the
+    ADR-0104-item-2 token-usage audit bug requires a second, post-call emit so a call's token
+    spend actually lands in the audit (it previously never did — the record was enriched
+    after the log line had already been written and was never re-emitted).
     """
     captured_records: list[Any] = []
 
     def _emit_spy(record: Any) -> None:
-        captured_records.append(record)
+        # Snapshot the record's state AT EMIT TIME (the gateway mutates one record in place).
+        captured_records.append(copy.copy(record))
 
     fake_response = _make_fake_response(prompt_tokens=11, completion_tokens=22, total_tokens=33)
 
@@ -230,20 +251,30 @@ def test_successful_call_writes_exactly_one_egress_record_with_token_usage() -> 
         gw = LLMGateway(_local_settings())
         gw.chat(messages=[{"role": "user", "content": "hello"}])
 
-    assert len(captured_records) == 1, (
-        f"expected exactly 1 egress record per successful call; "
-        f"got {len(captured_records)}.  "
-        "INV-S2-EGRESS: the gateway writes exactly one record per chat() invocation."
+    assert len(captured_records) == 2, (
+        f"expected exactly 2 egress records for a successful call "
+        f"(pre-call completeness record + post-call usage record, ADR 0104 item 2); "
+        f"got {len(captured_records)}."
     )
 
-    rec = captured_records[0]
-    # After the call completes, .usage must be populated (enriched in-place).
-    assert rec.usage is not None, (
-        "EgressRecord.usage must be non-None after a successful provider call.  "
-        "The gateway must enrich the record with token usage from the ModelResponse."
+    pre_record, post_record = captured_records[0], captured_records[1]
+
+    assert pre_record.usage is None, (
+        "the PRE-call record (captured_records[0]) must have usage=None — the provider "
+        f"has not responded yet at that point; got {pre_record.usage!r}."
     )
-    # Check specific counts match the mocked response.
-    usage = rec.usage
+    assert post_record.usage is not None, (
+        "the POST-call record (captured_records[1]) must have usage populated with the "
+        "response's token counts after a successful provider call."
+    )
+    assert dataclasses.replace(pre_record, usage=post_record.usage) == post_record, (
+        "the post-call record must be the pre-call record enriched with usage and NOTHING "
+        "else (same logical crossing — same mode/target/model/caller/timestamp), not a "
+        f"distinct independently-built record — pre={pre_record!r} vs post={post_record!r}."
+    )
+
+    # Check specific counts match the mocked response, on the final (enriched) record.
+    usage = post_record.usage
     assert usage.total_tokens == 33, (
         f"EgressRecord.usage.total_tokens must match the ModelResponse; "
         f"expected 33, got {usage.total_tokens!r}."
@@ -268,6 +299,10 @@ def test_provider_exception_surfaces_as_gateway_error_and_record_still_exists() 
 
     Leaking provider internals (e.g. ``litellm.exceptions.ServiceUnavailableError``) would
     expose implementation details to callers and break the abstraction boundary.
+
+    UNCHANGED by ADR 0104 item 2: a failing call still emits exactly the ONE pre-call
+    record (no post-call emit happens because the provider call never succeeded) — the
+    ``>= 1`` assertion below deliberately stays as-is, not weakened.
     """
     captured_records: list[Any] = []
 
@@ -335,8 +370,9 @@ def test_per_call_mode_override_routes_to_specified_mode_and_records_flags() -> 
         f"per-call OPENROUTER override must route to 'openrouter/...' model; got {model_arg!r}."
     )
 
-    # The egress record must reflect the overridden mode's flags.
-    assert len(captured_records) == 1
+    # The egress record must reflect the overridden mode's flags. At least one record is
+    # emitted (exact count is covered by the dedicated two-record test above).
+    assert len(captured_records) >= 1
     rec = captured_records[0]
     assert rec.data_left_perimeter is True, (
         f"OPENROUTER override: data_left_perimeter must be True in the egress record; "
@@ -367,7 +403,7 @@ def test_absent_mode_override_falls_back_to_settings_default() -> None:
         gw = LLMGateway(_local_settings())
         gw.chat(messages=[{"role": "user", "content": "no override"}])  # no mode= kwarg
 
-    assert len(captured_records) == 1
+    assert len(captured_records) >= 1
     rec = captured_records[0]
     assert rec.data_left_perimeter is False, (
         f"absent mode= override must use LOCAL (Settings default); "
@@ -467,7 +503,7 @@ def test_api_key_is_not_logged_in_egress_record_extra() -> None:
             mode=LLMMode.OPENROUTER,
         )
 
-    assert len(captured_records) == 1
+    assert len(captured_records) >= 1
     rec = captured_records[0]
     # Serialize the record to a string and check for key leakage.
     record_str = str(vars(rec)) if hasattr(rec, "__dict__") else str(rec)

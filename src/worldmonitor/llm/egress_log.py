@@ -40,12 +40,60 @@ class EgressRecord:
     usage: object | None = field(default=None)
 
 
+def _extract_usage_tokens(usage: object) -> dict[str, int | None]:
+    """Defensively extract token counts from a provider-shaped ``usage`` object.
+
+    ``usage`` is typically a litellm/OpenAI ``Usage`` object (or a test double); we never
+    assume its exact type, only that it MAY carry these three attributes (ADR 0104 item 2).
+    """
+    return {
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
+
+
 def emit(record: EgressRecord) -> None:
     """Emit a structured per-call egress audit record via stdlib logging.
 
     Mirrors the structured ``extra=`` style from ``sandbox/container_runner.py``.
     NEVER emits the API key or message content (INV-S2-EGRESS + ADR 0091 §3).
+
+    When ``record.usage`` is populated (the post-call record, ADR 0104 item 2), the token
+    counts are serialized into BOTH the log line and ``extra=`` so a call's spend actually
+    lands in the audit. When ``record.usage`` is ``None`` (the pre-call completeness
+    record), the line is well-formed with no usage token/noise.
     """
+    extra: dict[str, object] = {
+        "llm_mode": record.mode.value,
+        "llm_confidentiality": record.confidentiality,
+        "llm_target_host": record.target_host,
+        "llm_data_left_perimeter": record.data_left_perimeter,
+        "llm_model": record.model,
+        "llm_timestamp": record.timestamp.isoformat(),
+        "llm_caller_tag": record.caller_tag,
+    }
+
+    if record.usage is not None:
+        tokens = _extract_usage_tokens(record.usage)
+        extra["llm_usage_prompt_tokens"] = tokens["prompt_tokens"]
+        extra["llm_usage_completion_tokens"] = tokens["completion_tokens"]
+        extra["llm_usage_total_tokens"] = tokens["total_tokens"]
+        logger.info(
+            "llm-egress mode=%s target=%s data_left_perimeter=%s model=%s caller=%s "
+            "usage=(prompt=%s, completion=%s, total=%s)",
+            record.mode.value,
+            record.target_host,
+            record.data_left_perimeter,
+            record.model,
+            record.caller_tag,
+            tokens["prompt_tokens"],
+            tokens["completion_tokens"],
+            tokens["total_tokens"],
+            extra=extra,
+        )
+        return
+
     logger.info(
         "llm-egress mode=%s target=%s data_left_perimeter=%s model=%s caller=%s",
         record.mode.value,
@@ -53,13 +101,5 @@ def emit(record: EgressRecord) -> None:
         record.data_left_perimeter,
         record.model,
         record.caller_tag,
-        extra={
-            "llm_mode": record.mode.value,
-            "llm_confidentiality": record.confidentiality,
-            "llm_target_host": record.target_host,
-            "llm_data_left_perimeter": record.data_left_perimeter,
-            "llm_model": record.model,
-            "llm_timestamp": record.timestamp.isoformat(),
-            "llm_caller_tag": record.caller_tag,
-        },
+        extra=extra,
     )
