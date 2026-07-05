@@ -233,6 +233,29 @@ class Settings(BaseSettings):
     landing_gc_delete_enabled: bool = False
     landing_gc_min_age_seconds: float = Field(default=86400.0, ge=0.0)
 
+    # --- Projection rebuild-and-diff guard (ADR 0102 D2 / Gate 3a-ii-B) ---
+    # The scheduled full-fold divergence guard: on its own cadence, folds the WHOLE statement
+    # log (project(full_rebuild=True)) into an operator-provisioned, ISOLATED second Neo4j and
+    # measures how much of the LIVE graph the fold cannot explain. DORMANT by default — a
+    # runtime no-op, NOT a boot failure (no model_validator; validate_production_secrets stays
+    # untouched, ADR 0061 FROZEN). Neo4j Community is single-database (ADR 0094 D5): there is no
+    # free shadow DB on the live instance, so a distinct target MUST be a distinct instance.
+    #
+    #   projection_diff_enabled          — master gate; the guard runs ONLY when this is True
+    #                                       AND projection_diff_neo4j_uri is non-empty.
+    #   projection_diff_neo4j_uri        — the isolated diff target's Neo4j URI. Empty (default)
+    #                                       ⇒ dormant no-op even if enabled=True (D2 B1 posture).
+    #   projection_diff_neo4j_user       — the diff target's Neo4j user.
+    #   projection_diff_neo4j_password   — SecretStr so it never echoes in repr/log/traceback;
+    #                                       needed at USE, not boot (like sandbox_runner_secret).
+    #   projection_diff_cadence_seconds  — minimum seconds between guard runs. DEFAULT 86400
+    #                                       (daily; a full fold is O(log size), so daily is ample).
+    projection_diff_enabled: bool = False
+    projection_diff_neo4j_uri: str = ""
+    projection_diff_neo4j_user: str = ""
+    projection_diff_neo4j_password: SecretStr = SecretStr("")
+    projection_diff_cadence_seconds: float = Field(default=86400.0, gt=0)
+
     # --- ACTIVE heavy-tool sandbox gate (ADR 0072 §1) ---
     # A CliTool connector declares a ``sandbox`` level ("subprocess" | "container"). A
     # ``sandbox=="container"`` connector (e.g. nmap — an un-sandboxed network scanner from the host

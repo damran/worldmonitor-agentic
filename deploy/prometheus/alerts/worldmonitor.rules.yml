@@ -1,6 +1,7 @@
-# WorldMonitor alert rules (ADR 0078 D2).
+# WorldMonitor alert rules (ADR 0078 D2 + ADR 0102).
 #
-# One group, 7 alerts: 2 critical (page immediately) + 5 warning (operator ticket).
+# One group, 8 alerts: 2 critical (page immediately) + 6 warning (operator ticket). The 8th
+# (ProjectionDivergenceHigh, ADR 0102 / Gate 3a-ii-B) is additive — the original 7 are unchanged.
 # Every alert carries:
 #   labels.severity in {critical, warning}
 #   annotations.summary  — one-line human label
@@ -135,3 +136,24 @@ groups:
             state. These merges require human sign-off before being applied (the guard fires when
             a merge crosses the sensitivity/size threshold). Review and approve or reject from the
             Integrations UI. ADR 0024 / ADR 0031.
+
+      - alert: ProjectionDivergenceHigh
+        # The scheduled projection rebuild-and-diff guard (ADR 0102, Gate 3a-ii-B): a positive
+        # value means the whole-log fold could NOT explain one or more live-graph nodes/edges —
+        # a projection-integrity signal, not an ER-quality claim. The -1 sentinel (guard
+        # never-run / disabled, the DEFAULT posture) is < 0 so it never fires; 0 means the last
+        # run was clean.
+        expr: worldmonitor_projection_divergence > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Projection divergence detected — the fold cannot explain the live graph (ADR 0102)"
+          description: >
+            The scheduled projection rebuild-and-diff guard folded the whole statement log into
+            an isolated Neo4j and found one or more live-graph nodes/edges it could not explain
+            for 15 minutes. On a pre-Gate-2b deployment this MAY be the documented thin-signal
+            caveat (pre-log graph nodes never written to the statement log); on a fresh
+            post-Gate-2a deployment this signals genuine projection rot — an un-logged live
+            mutation. Check worldmonitor_projection_divergence_last_run_timestamp for guard
+            liveness and inspect the diff target before treating this as an incident. ADR 0102.
