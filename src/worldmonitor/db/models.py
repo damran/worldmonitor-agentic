@@ -14,9 +14,11 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Float,
     Identity,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -423,6 +425,66 @@ class ProjectionCheckpoint(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class LlmEgressRecord(Base):
+    """Durable, append-only LLM-egress audit row (Gate F2 / ADR 0105).
+
+    Makes the LLM-egress accountability record (ADR 0104's L1 stdlib-logging audit) durable
+    and tamper-evident: an INSERT-only Postgres table sitting ALONGSIDE ``egress_log.emit()``
+    (unchanged), written by the same single gateway choke point at the same two points
+    (pre-call, post-call).
+
+    Two row kinds per crossing (``phase``), correlated by a shared ``call_id``:
+
+    * an **attempt** row (pre-call): ``content_fingerprint`` (a sha256 hex digest over the
+      canonicalized outbound messages — NEVER the message content itself) and an optional,
+      **caller-declared** ``entity_manifest`` (never content-derived, SF-2); token columns
+      NULL.
+    * a **completed** row (post-call): token usage from the response; ``content_fingerprint``
+      / ``entity_manifest`` NULL.
+
+    Append-only invariants (mirrors the ADR-0099 statement/decision spine idiom):
+    * Only ``session.add`` INSERTs are ever issued for this table — no UPDATE, no DELETE,
+      no ``session.delete``, ever (see :mod:`worldmonitor.llm.egress_audit`).
+    * No column ever holds message content or the api key (ADR 0091 §3, extended);
+      ``content_fingerprint`` is the durable, non-leaking stand-in.
+
+    **No ``seq`` IDENTITY column** (SF-3): nothing consumes an ordering watermark over this
+    table (no projector, no incremental exporter); ``created_at`` + ``call_id`` suffice for
+    ordering display and pre/post correlation. Deliberately avoids ADR 0100's dialect-guarded
+    ``before_insert`` SQLite fallback trap — do NOT register a ``before_insert`` listener for
+    this model.
+
+    This model and migration ``0011_llm_egress_audit`` MUST agree byte-for-byte
+    (``tests/integration/test_migrations.py`` drift guard, ADR 0030).
+    """
+
+    __tablename__ = "llm_egress"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Shared uuid4 correlating the attempt + completed rows of ONE crossing.
+    call_id: Mapped[str] = mapped_column(String(64), index=True)
+    # "attempt" (pre-call) | "completed" (post-call)
+    phase: Mapped[str] = mapped_column(String(16), index=True)
+    mode: Mapped[str] = mapped_column(String(32))
+    # Text, not a bounded String: the ADR-0091 registry's confidentiality LABELS are prose
+    # (CLAUDE_HEADLESS's is 153 chars) and caller_tag carries an unbounded JWT subject —
+    # a bounded column would truncation-refuse the fail-closed external write and brick a
+    # whole mode (adversarial-verify fix round, ADR 0105 §Adversarial-verification findings).
+    confidentiality: Mapped[str] = mapped_column(Text)
+    target_host: Mapped[str] = mapped_column(String(255))
+    data_left_perimeter: Mapped[bool] = mapped_column(Boolean)
+    model: Mapped[str] = mapped_column(String(255))
+    caller_tag: Mapped[str] = mapped_column(Text)
+    # Attempt-row columns — NULL on a completed row.
+    content_fingerprint: Mapped[str | None] = mapped_column(String(64), default=None)
+    entity_manifest: Mapped[list[str] | None] = mapped_column(JSONB, default=None)
+    # Completed-row columns — NULL on an attempt row.
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, default=None)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, default=None)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # ---------------------------------------------------------------------------

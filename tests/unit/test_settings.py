@@ -207,3 +207,20 @@ def test_sandbox_runner_secret_is_not_leaked_in_repr() -> None:
     assert value not in repr(settings)
     # The plaintext is still retrievable via the explicit accessor (so routing can send it).
     assert settings.sandbox_runner_secret.get_secret_value() == value
+
+
+# -- Durable LLM-egress audit flag (ADR 0105 / Gate F2, spec §2.5) ------------------------------ #
+#
+# Additive: default False (DORMANT — behaviour is byte-identical to L1 until an operator opts in
+# after applying migration 0011 and confirming the Postgres sink); an explicit override is honoured.
+
+
+def test_llm_egress_durable_enabled_defaults_to_false() -> None:
+    """Dormant by construction (ADR 0105 / INV-DORMANT): no operator opt-in required to get
+    L1's byte-identical behaviour."""
+    assert Settings(_env_file=None).llm_egress_durable_enabled is False  # type: ignore[call-arg]
+
+
+def test_llm_egress_durable_enabled_accepts_override() -> None:
+    settings = Settings(llm_egress_durable_enabled=True)  # type: ignore[call-arg]
+    assert settings.llm_egress_durable_enabled is True

@@ -25,20 +25,33 @@ INV-CHOKE (ADR 0104 item 1): machine-enforced (not just documented) — no
 ``src/worldmonitor`` module outside ``llm/`` may import ``litellm``/``openai``/``anthropic``
 (``tests/test_llm_egress_chokepoint.py``). The gateway is the ONLY public LLM egress
 surface; there is no bypass.
+
+Durable audit (ADR 0105, Gate F2): a new, DEFAULT-OFF ``llm_egress_durable_enabled`` flag
+makes the accountability record durable and tamper-evident on top of the stdlib emits above
+(byte-unchanged, still firing). When the flag is off (the default) behaviour is byte-identical
+to L1 — see :mod:`worldmonitor.llm.egress_audit` for the writer + the invariants it adds
+(INV-DURABLE-COMPLETE, INV-DURABLE-APPENDONLY, INV-DURABLE-FAILCLOSED, INV-DURABLE-USAGE).
 """
 
 from __future__ import annotations
 
+import logging
 import urllib.parse
+import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
 import litellm
+from sqlalchemy.orm import Session
 
+import worldmonitor.llm.egress_audit as egress_audit
 import worldmonitor.llm.egress_log as egress_log
 from worldmonitor.llm.egress_log import EgressRecord
 from worldmonitor.llm.modes import REGISTRY, LLMMode
 from worldmonitor.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class LLMGatewayError(Exception):
@@ -56,9 +69,24 @@ class LLMGateway:
     No public method other than those two reaches ``litellm.completion``.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        session_factory: Callable[[], Session] | None = None,
+    ) -> None:
         self._settings = settings
         self._active_mode = LLMMode(settings.llm_mode)
+        # Durable-audit DB seam (ADR 0105 / Gate F2): a sessionmaker injected at construction.
+        # Default None preserves every existing (pre-F2) gateway construction unchanged.
+        self._session_factory = session_factory
+        # Observability (adversarial-verify fix round): durable-enabled-but-unwired is LOUD
+        # for external calls (fail-closed refuse) yet would be SILENT for LOCAL — one warning
+        # at construction makes a mis-wired LOCAL-only process visible in the logs.
+        if settings.llm_egress_durable_enabled and session_factory is None:
+            logger.warning(
+                "llm_egress_durable_enabled=True but no session_factory is wired — durable "
+                "egress rows will NOT be written (external calls will refuse fail-closed)"
+            )
         # Register the claude shim ONLY when CLAUDE_HEADLESS mode is active (off by default).
         if self._active_mode is LLMMode.CLAUDE_HEADLESS:
             self._register_claude_shim()
@@ -69,6 +97,7 @@ class LLMGateway:
         *,
         mode: LLMMode | None = None,
         caller_tag: str = "gateway",
+        entity_ids: list[str] | None = None,
     ) -> Any:
         """Route an LLM completion through the egress choke point.
 
@@ -80,6 +109,19 @@ class LLMGateway:
         the call before any emit or provider contact.
         INV-S2-DEFAULT: defaults to the settings-configured mode (``LOCAL`` by default).
         Raises ``LLMGatewayError`` on provider failure — never the raw exception.
+
+        ``entity_ids`` (ADR 0105 / Gate F2): an OPTIONAL, caller-declared list of canonical
+        entity ids whose data the caller asserts is in ``messages`` — recorded honestly on
+        the durable attempt row's ``entity_manifest`` (``None`` when not declared, e.g. every
+        ``/v1`` wire caller; never content-derived, SF-2). No effect when the durable audit
+        is off (the default).
+
+        INV-DURABLE-COMPLETE / INV-DURABLE-FAILCLOSED (ADR 0105 / Gate F2): when
+        ``llm_egress_durable_enabled`` is also on, a durable Postgres "attempt" row commits
+        before the provider is contacted; for an EXTERNAL mode that commit (or an unwired
+        sink) is fail-closed (no durable audit ⇒ no egress) — LOCAL proceeds best-effort. A
+        second, best-effort "completed" row carries token usage post-call for both modes.
+        With the flag off (the default) behaviour is byte-identical to L1.
 
         ``import litellm`` (whole module) is required here so that patching
         ``litellm.completion`` in tests intercepts every gateway call.
@@ -100,6 +142,22 @@ class LLMGateway:
                 "no egress"
             )
 
+        # ADR 0105 / Gate F2: the durable obligation is a SEPARATE flag (SF-4) — it only
+        # tightens once the master llm_egress_log_enabled is already on.
+        durable_on = (
+            self._settings.llm_egress_log_enabled and self._settings.llm_egress_durable_enabled
+        )
+
+        # ── INV-DURABLE-FAILCLOSED (ADR 0105 / Gate F2) — the durable obligation is active
+        # for an EXTERNAL mode but no durable sink is wired: refuse before any provider
+        # contact (an unwired gateway cannot silently egress unaudited).
+        if external and durable_on and self._session_factory is None:
+            raise LLMGatewayError(
+                "external LLM egress refused: durable audit is enabled "
+                "(llm_egress_durable_enabled=True) but no durable sink is wired — "
+                "no durable audit, no egress"
+            )
+
         # The per-call override (which the S5 operator console drives) may select
         # CLAUDE_HEADLESS on a gateway built in another mode; ensure the shim is
         # registered for whichever mode is actually resolved (idempotent, off otherwise).
@@ -108,6 +166,8 @@ class LLMGateway:
 
         model, api_base, api_key = self._resolve_call_params(active_mode)
         target_host = _extract_target_host(api_base, active_mode)
+
+        call_id = str(uuid.uuid4())
 
         # INV-S2-EGRESS: write the record BEFORE the provider call.
         # A crashing / timing-out provider call is still audited.
@@ -122,6 +182,44 @@ class LLMGateway:
         )
         if self._settings.llm_egress_log_enabled:
             egress_log.emit(record)
+
+        # ── ADR 0105 / Gate F2 — durable PRE-call ("attempt") row. The row BUILD (incl.
+        # the fingerprint) sits INSIDE the guarded blocks so an audit-side failure follows
+        # the same per-mode policy as the write itself: external ⇒ typed fail-closed
+        # refusal, LOCAL ⇒ best-effort (SF-5). An escape here would be a raw untyped
+        # exception past the gateway contract (adversarial-verify fix round, ADR 0105).
+        if durable_on and self._session_factory is not None:
+            if external:
+                # Fail-closed: the commit MUST succeed BEFORE the provider call.
+                try:
+                    attempt_row = egress_audit.build_attempt_row(
+                        call_id,
+                        record,
+                        egress_audit.fingerprint_messages(messages),
+                        entity_ids,
+                    )
+                    egress_audit.write_row(self._session_factory, attempt_row)
+                except Exception as exc:
+                    raise LLMGatewayError(
+                        "external LLM egress refused: durable audit write failed — "
+                        "no durable audit, no egress"
+                    ) from exc
+            else:
+                # LOCAL best-effort: a sink failure must not break a confidential,
+                # on-perimeter call (SF-5, the fail-closed asymmetry).
+                try:
+                    attempt_row = egress_audit.build_attempt_row(
+                        call_id,
+                        record,
+                        egress_audit.fingerprint_messages(messages),
+                        entity_ids,
+                    )
+                    egress_audit.write_row(self._session_factory, attempt_row)
+                except Exception:
+                    logger.warning(
+                        "durable egress audit write failed (LOCAL, best-effort)",
+                        exc_info=True,
+                    )
 
         # Call litellm — WHOLE-MODULE import so `litellm.completion` is patchable by tests.
         # Do NOT `from litellm import completion` — that would break the monkeypatch.
@@ -150,6 +248,20 @@ class LLMGateway:
         # external success always produces exactly two records.
         if self._settings.llm_egress_log_enabled:
             egress_log.emit(record)
+
+        # ── ADR 0105 / Gate F2 — durable POST-call ("completed") row, best-effort for BOTH
+        # modes: a sink failure here must never undo an already-audited crossing.
+        if durable_on and self._session_factory is not None:
+            try:
+                egress_audit.write_row(
+                    self._session_factory,
+                    egress_audit.build_completed_row(call_id, record),
+                )
+            except Exception:
+                logger.warning(
+                    "durable egress usage row write failed (best-effort; crossing already audited)",
+                    exc_info=True,
+                )
 
         return response
 

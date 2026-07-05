@@ -119,7 +119,7 @@ def create_app(
     if registry is None:
         registry = _discover_registry()
     if llm_gateway is None:
-        llm_gateway = LLMGateway(settings)
+        llm_gateway = LLMGateway(settings, session_factory=db_sessions)
     check_readiness = readiness
 
     app = FastAPI(title="WorldMonitor API", version="0.0.1")
