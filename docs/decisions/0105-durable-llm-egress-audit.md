@@ -1,6 +1,6 @@
 # 0105 — Durable, append-only LLM-egress audit (F2): move the accountability record off ephemeral stdlib logging onto a tamper-evident Postgres spine
 
-- **Status:** PROPOSED (2026-07-05)
+- **Status:** ACCEPTED (2026-07-05)
 - **Date:** 2026-07-05
 - **human_fork:** false
 - **person_affecting:** false
