@@ -98,7 +98,10 @@ class _FakeVerifier:
     def verify(self, token: str) -> Mapping[str, Any]:
         if token != "good":
             raise InvalidTokenError("bad token")
-        return {"sub": "user-123"}
+        return {
+            "sub": "user-123",
+            "urn:zitadel:iam:org:project:roles": {"worldmonitor:llm": {}},
+        }
 
 
 class _RejectingVerifier:

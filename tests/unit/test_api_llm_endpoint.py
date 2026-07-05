@@ -137,7 +137,10 @@ class _FakeVerifier:
     def verify(self, token: str) -> Mapping[str, Any]:
         if token != "good":
             raise InvalidTokenError("bad token")
-        return {"sub": "user-123"}
+        return {
+            "sub": "user-123",
+            "urn:zitadel:iam:org:project:roles": {"worldmonitor:llm": {}},
+        }
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────────────
@@ -496,21 +499,27 @@ def test_sync_spy_does_not_deadlock_test_client() -> None:
     assert len(slow_spy.calls) == 1, "slow spy must have been called exactly once"
 
 
-# ── caller_tag: the route uses the documented hermes tag ──────────────────────────────
+# ── caller_tag: the route attributes the authenticated principal's subject ────────────
 
 
-def test_route_uses_hermes_caller_tag() -> None:
-    """The route must pass caller_tag='hermes' so egress audit attributes Hermes calls.
+def test_route_uses_authenticated_subject_as_caller_tag() -> None:
+    """The route must pass caller_tag=<principal.subject> so egress audit attributes calls
+    to the authenticated caller, not a hardcoded constant (ADR 0104 item 4, Gate L1-b;
+    supersedes the ADR 0092 hardcoded caller_tag='hermes').
 
-    ADR 0092 §1 / spec §3: caller_tag='hermes' (or a constant equal to 'hermes') is
-    used so the per-call egress audit record attributes every Hermes model call.
+    ``_FakeVerifier.verify`` (this file) returns ``sub='user-123'``, so the authenticated
+    principal's subject is ``'user-123'`` and that is exactly what must reach the gateway
+    (the ``'hermes'`` fallback only applies when the subject is empty — see
+    ``tests/property/test_prop_llm_role_and_caller.py::test_caller_tag_is_authenticated_subject_with_hermes_fallback``
+    for the exhaustive property covering both branches).
     """
     spy = _SpyGateway()
     c = _client(spy)
     resp = c.post("/v1/chat/completions", json=_valid_body(), headers=_auth())
     assert resp.status_code == 200
     assert len(spy.calls) == 1
-    assert spy.calls[0]["caller_tag"] == "hermes", (
-        f"route must pass caller_tag='hermes', got {spy.calls[0]['caller_tag']!r}; "
-        "the egress audit must attribute every Hermes model call with 'hermes'"
+    assert spy.calls[0]["caller_tag"] == "user-123", (
+        f"route must pass caller_tag=<principal.subject> ('user-123' for this fake "
+        f"verifier), got {spy.calls[0]['caller_tag']!r}; the egress audit must attribute "
+        "every call to the authenticated caller, not a hardcoded constant"
     )

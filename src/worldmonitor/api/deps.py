@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
 from worldmonitor.authz.oidc import Principal
+from worldmonitor.authz.roles import WM_LLM_ROLE, principal_has_role
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.llm.gateway import LLMGateway
 
@@ -56,4 +58,18 @@ def get_principal(request: Request) -> Principal:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=401, detail="Not authenticated")
+    return principal
+
+
+def require_llm_role(request: Request) -> Principal:
+    """Return the authenticated principal, requiring the ``worldmonitor:llm`` project role.
+
+    Gate L1-b (ADR 0104 item 5). Resolves the principal via :func:`get_principal` first, so
+    an unauthenticated request 401s exactly as it always has (unauthenticated != forbidden) —
+    ``get_principal`` itself is untouched. Only once a principal is present is the
+    ``worldmonitor:llm`` role checked; missing it is a 403, not a silent 401 swallow.
+    """
+    principal = get_principal(request)
+    if not principal_has_role(principal, WM_LLM_ROLE):
+        raise HTTPException(status_code=403, detail=f"Missing required role: {WM_LLM_ROLE}")
     return principal
