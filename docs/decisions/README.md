@@ -122,4 +122,7 @@
 | [0103](0103-review-queue-web-ui.md) | Review-queue web UI (Gate 1): promote the sign-off CLI to a server-rendered HTMX surface | ACCEPTED | 2026-07-05 | false | false |
 | [0104](0104-llm-egress-chokepoint-hardening.md) | LLM-egress choke-point hardening (L1): make the advisory-sovereignty model honest, non-bypassable, and auditable | ACCEPTED | 2026-07-05 | false | false |
 | [0105](0105-durable-llm-egress-audit.md) | Durable, append-only LLM-egress audit (F2): move the accountability record off ephemeral stdlib logging onto a tamper-evident Postgres spine | ACCEPTED | 2026-07-05 | false | false |
+| [0106](0106-context-claim-capture-lane.md) | Context-claim capture lane (Gate P1): bank anchor/enricher evidence into the SoR spine as provenance-stamped claims, and make the fold reproduce anchors | PROPOSED | 2026-07-05 | false | false |
+| [0107](0107-erasure-reaches-sor.md) | Right-to-forget reaches the SoR (Gate P2): scrub all three log lanes, keep a defined live-removal mechanism, reconcile granularities | PROPOSED | 2026-07-05 | false | true |
+| [0108](0108-signoff-spine-durability.md) | Human-decision lane durability (Gate P3): route sign-off through the SoR spine | PROPOSED | 2026-07-05 | false | true |
 <!-- END GENERATED ADR INDEX -->

@@ -383,3 +383,18 @@ Adding this PROPOSED ADR requires the **3a-ii-B builder** to re-run
 `adr-index` CI check goes red); `docs/decisions/README.md` is in the gate scope for exactly this reason.
 The header uses the list dialect the generator parses, so the regenerated row reads
 `PROPOSED | 2026-07-05 | false | false` until the accept-time flip.
+
+---
+
+**Erratum (2026-07-05, Gate P1 planning / ADR 0106 — appended note; original body unchanged).** D6's
+compared-property exclusion text records the **wrong key shape** for E2: it excludes
+`p.startswith("wm_anchor_")`, but written nodes carry the **bare** anchor keys (`wikidata_id` /
+`geonames_id` / `lei` / `opencorporates_id` = `anchors.CANONICAL_ID_FIELDS`; `graph/writer.py` projects
+via `get_anchors`, which strips the `wm_anchor_` context prefix — `ontology/anchors.py:99-123`). The
+shipped predicate branch is therefore **dead code**, and the guard **compares anchor properties today**
+against a fold that (pre-P1) cannot reconstruct them — on any anchored corpus every anchored live node
+counts UNEXPLAINED (fails safe: false alarms, not hidden rot). The property test used a synthetic
+`wm_anchor_qid` node key that never occurs in production (`test_prop_projection_divergence.py:128`),
+which is how the dead branch stayed green. Gate P1 (ADR 0106 §5) deletes the branch, excludes the bare
+`CANONICAL_ID_FIELDS` keys (the pick-semantics arm of ADR 0106 Sub-fork A), and re-points both divergence
+suites (unit + property) at bare keys.
