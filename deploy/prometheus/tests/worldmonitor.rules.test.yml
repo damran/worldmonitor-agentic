@@ -1,12 +1,13 @@
 # promtool unit tests for worldmonitor.rules.yml (ADR 0078 D3).
 #
-# Run manually (promtool not wired to CI — out of scope per ADR 0078 §Consequences):
+# Runs in CI via the `alert-rules` job (promtool check+test, ADR 0088); locally:
 #   promtool test rules deploy/prometheus/tests/worldmonitor.rules.test.yml
 #
-# Covers all 7 alerts (DriverDown, ResolutionWedged, ConnectorInstanceHardDisabled,
-# ResolvePassTimingOut, ErQueueBacklogHigh, IngestDeadLettersPresent, MergesParkedForReview)
-# with fire + no-fire cases. exp_alerts assert the FULL alert (labels AND annotations) — promtool
-# compares both, so the rendered summary/description here must match the rule verbatim. The folded
+# Covers all 8 alerts (DriverDown, ResolutionWedged, ConnectorInstanceHardDisabled,
+# ResolvePassTimingOut, ErQueueBacklogHigh, IngestDeadLettersPresent, MergesParkedForReview,
+# ProjectionDivergenceHigh (ADR 0102)) with fire + no-fire cases. exp_alerts assert the FULL alert
+# (labels AND annotations) — promtool compares both, so the rendered summary/description here
+# must match the rule verbatim. The folded
 # (`>`) annotation blocks render identically to the rule (lines joined by spaces + one trailing \n).
 #
 # Value notation: space-separated sample values at each evaluation_interval step.
@@ -258,4 +259,51 @@ tests:
     alert_rule_test:
       - eval_time: 15m
         alertname: MergesParkedForReview
+        exp_alerts: []
+
+  # -----------------------------------------------------------------------
+  # ProjectionDivergenceHigh — fires when divergence > 0 for 15m (ADR 0102)
+  # -----------------------------------------------------------------------
+  - name: "ProjectionDivergenceHigh fires after divergence > 0 sustained for 15m"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_projection_divergence"
+        # 5 unexplained live nodes/edges held for 16 minutes
+        values: "5+0x15"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ProjectionDivergenceHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Projection divergence detected — the fold cannot explain the live graph (ADR 0102)"
+              description: >
+                The scheduled projection rebuild-and-diff guard folded the whole statement log into
+                an isolated Neo4j and found one or more live-graph nodes/edges it could not explain
+                for 15 minutes. On a pre-Gate-2b deployment this MAY be the documented thin-signal
+                caveat (pre-log graph nodes never written to the statement log); on a fresh
+                post-Gate-2a deployment this signals genuine projection rot — an un-logged live
+                mutation. Check worldmonitor_projection_divergence_last_run_timestamp for guard
+                liveness and inspect the diff target before treating this as an incident. ADR 0102.
+
+  - name: "ProjectionDivergenceHigh does NOT fire on the -1 never-run sentinel"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_projection_divergence"
+        # -1 = the guard has never run / is disabled (the DEFAULT dormant posture) — must never fire.
+        values: "-1+0x15"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ProjectionDivergenceHigh
+        exp_alerts: []
+
+  - name: "ProjectionDivergenceHigh does NOT fire when divergence is 0 (clean fold)"
+    interval: 1m
+    input_series:
+      - series: "worldmonitor_projection_divergence"
+        values: "0+0x15"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ProjectionDivergenceHigh
         exp_alerts: []

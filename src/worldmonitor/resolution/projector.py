@@ -214,11 +214,65 @@ def reconstruct_entities(
 _TARGET_ID = "neo4j"
 
 
+def _load_alias_map(session: Session) -> dict[str, str]:
+    """The SUPERSESSION-only ``canonical_alias -> canonical_id`` map (ADR 0100 D2 / F2).
+
+    One query over the complete ``canonical_id_ledger``, avoiding N per-row round-trips. F2
+    (determinism): build the map from SUPERSESSION rows ONLY (``canonical_id != canonical_alias``)
+    and read them in a deterministic ``ORDER BY``. Excluding self-rows (``canonical == alias``)
+    is load-bearing: an id that is BOTH a live canonical (its self-row) AND later superseded (an
+    alias row -> its survivor) must resolve to the SURVIVOR, not to itself by unordered last-wins.
+    Otherwise a fresh Postgres / DR rebuild (the scenario the projector exists for) could flip the
+    row order and leave an orphan node under the superseded id — the exact ADR-0095
+    fold-under-re-canonicalisation guarantee this projector claims to enforce.
+    """
+    ledger_rows = session.execute(
+        select(CanonicalIdLedger.canonical_alias, CanonicalIdLedger.canonical_id).order_by(
+            CanonicalIdLedger.canonical_alias, CanonicalIdLedger.canonical_id
+        )
+    ).all()
+    return {
+        str(alias): str(canonical)
+        for alias, canonical in ledger_rows
+        if str(alias) != str(canonical)
+    }
+
+
+def build_survivor_of(session: Session) -> Callable[[str], str]:
+    """Build the transitive ``survivor_of`` resolver over the FULL canonical_id_ledger.
+
+    A pure extraction (ADR 0102 D9) of the F2 deterministic supersession-only ledger read +
+    the cycle-guarded fixed-point walk :func:`project` uses to fold the log. Exported so the
+    projection rebuild-and-diff guard (``runner.driver``) can apply the IDENTICAL referent
+    semantics as the fold when measuring divergence — no second, drifting implementation.
+    :func:`worldmonitor.resolution.canonical.resolve_durable` is single-hop/per-alias and is
+    NOT usable here (the transitive walk below is required).
+    """
+    alias_map = _load_alias_map(session)
+
+    def survivor_of(cid: str) -> str:
+        """Resolve a (possibly superseded) canonical_id to its durable survivor.
+
+        Follows the supersession chain transitively (a → b → c) to a fixed point, with a
+        visited-guard against a pathological cycle. Deterministic: the map holds supersession
+        rows only, so a coexisting self-row never shadows the survivor mapping.
+        """
+        seen: set[str] = set()
+        current = cid
+        while current in alias_map and current not in seen:
+            seen.add(current)
+            current = alias_map[current]
+        return current
+
+    return survivor_of
+
+
 def project(
     session: Session,
     target: Neo4jClient,
     *,
     full_rebuild: bool = False,
+    checkpoint_id: str = _TARGET_ID,
 ) -> ProjectionResult:
     """Fold the statement + decision log into the isolated ``target`` Neo4j.
 
@@ -231,11 +285,17 @@ def project(
                           consecutive ``full_rebuild`` calls followed by an incremental
                           ``project(full_rebuild=False)`` must return ``statements_read == 0``
                           (P-FOLD-3, ADR 0100 D1).
+    :param checkpoint_id: The :class:`ProjectionCheckpoint` row id to read/upsert (ADR 0102 D5).
+                          Defaults to the module constant ``_TARGET_ID`` ("neo4j"), keeping
+                          every existing caller byte-behaviour-identical. The projection
+                          rebuild-and-diff guard passes ``"projection-diff"`` — a SEPARATE
+                          row — so its full-rebuild fold NEVER advances the live projector's
+                          own watermark.
     :returns: :class:`ProjectionResult` with counts for the tests + future observability.
     """
     # --- Read current checkpoint ---
     checkpoint = session.execute(
-        select(ProjectionCheckpoint).where(ProjectionCheckpoint.id == _TARGET_ID)
+        select(ProjectionCheckpoint).where(ProjectionCheckpoint.id == checkpoint_id)
     ).scalar_one_or_none()
 
     if checkpoint is None or full_rebuild:
@@ -263,39 +323,8 @@ def project(
     unique_stmt_ids = len({row.statement_id for row in statement_rows})
     statements_deduped = statements_read - unique_stmt_ids
 
-    # --- Full ledger read: build survivor_of (ADR 0100 D2 global-fold-is-truth) ---
-    # One query over the complete canonical_id_ledger, avoiding N per-row round-trips.
-    # F2 (determinism): build the map from SUPERSESSION rows ONLY (canonical_id != canonical_alias)
-    # and read them in a deterministic ORDER BY. Excluding self-rows (canonical == alias) is
-    # load-bearing: an id that is BOTH a live canonical (its self-row) AND later superseded (an
-    # alias row → its survivor) must resolve to the SURVIVOR, not to itself by unordered last-wins.
-    # Otherwise a fresh Postgres / DR rebuild (the scenario the projector exists for) could flip the
-    # row order and leave an orphan node under the superseded id — the exact ADR-0095
-    # fold-under-re-canonicalisation guarantee this projector claims to enforce.
-    ledger_rows = session.execute(
-        select(CanonicalIdLedger.canonical_alias, CanonicalIdLedger.canonical_id).order_by(
-            CanonicalIdLedger.canonical_alias, CanonicalIdLedger.canonical_id
-        )
-    ).all()
-    alias_map: dict[str, str] = {
-        str(alias): str(canonical)
-        for alias, canonical in ledger_rows
-        if str(alias) != str(canonical)
-    }
-
-    def survivor_of(cid: str) -> str:
-        """Resolve a (possibly superseded) canonical_id to its durable survivor.
-
-        Follows the supersession chain transitively (a → b → c) to a fixed point, with a
-        visited-guard against a pathological cycle. Deterministic: the map holds supersession
-        rows only, so a coexisting self-row never shadows the survivor mapping.
-        """
-        seen: set[str] = set()
-        current = cid
-        while current in alias_map and current not in seen:
-            seen.add(current)
-            current = alias_map[current]
-        return current
+    # --- Build survivor_of (ADR 0100 D2 global-fold-is-truth; extracted, ADR 0102 D9) ---
+    survivor_of = build_survivor_of(session)
 
     # --- Determine the rows to fold ---
     # full_rebuild folds every row. Incremental (F3 fix, ADR 0101 A1): fold each TOUCHED
@@ -310,6 +339,7 @@ def project(
             fold_rows = []  # 0-delta no-op (preserves P-FOLD-3 statements_read==0)
         else:
             # every canonical_id (survivor OR superseded alias) that folds into a touched survivor
+            alias_map = _load_alias_map(session)
             preimage = set(touched) | {
                 alias for alias in alias_map if survivor_of(alias) in touched
             }
@@ -339,7 +369,7 @@ def project(
     if checkpoint is None:
         session.add(
             ProjectionCheckpoint(
-                id=_TARGET_ID,
+                id=checkpoint_id,
                 last_statement_seq=max_stmt_seq,
                 last_decision_seq=max_dec_seq,
             )

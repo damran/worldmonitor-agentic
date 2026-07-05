@@ -27,6 +27,7 @@ from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.runner.smoke_metrics import collect_snapshot
 
 if TYPE_CHECKING:
+    from worldmonitor.resolution.divergence import ProjectionDivergence
     from worldmonitor.runner.gc import GcStats
 
 # The worldmonitor_task_runs{kind,status} cross-product: every series is emitted on each scrape,
@@ -56,6 +57,7 @@ class DriverMetricsCollector:
         neo4j: Neo4jClient,
         skip_counter: Callable[[], int],
         gc_stats: Callable[[], GcStats | None] | None = None,
+        projection_divergence: Callable[[], ProjectionDivergence | None] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._neo4j = neo4j
@@ -65,6 +67,11 @@ class DriverMetricsCollector:
         # accessor (e.g. in tests). Exposes the disk-growth signal (orphan count + bytes)
         # WITHOUT performing an expensive bucket list on every scrape.
         self._gc_stats = gc_stats
+        # Zero-arg accessor onto the driver's cached ProjectionDivergence (ADR 0102 / Gate
+        # 3a-ii-B). ``None`` when the projection-diff guard has never run (dormant/disabled) or
+        # the collector is created without this accessor (e.g. the existing collector tests) —
+        # the gauge reports the ``-1`` sentinel in that case so the alert's ``> 0`` never fires.
+        self._projection_divergence = projection_divergence
 
     def collect(self) -> Iterator[GaugeMetricFamily]:
         """Yield every ``worldmonitor_`` gauge family, computed fresh from the stores."""
@@ -163,6 +170,24 @@ class DriverMetricsCollector:
             "Total bytes of unreferenced landing-zone orphans (disk-growth signal, ADR 0083). "
             "Computed even in report-only mode; 0 until the first GC pass runs.",
             gc.orphan_bytes if gc is not None else 0,
+        )
+
+        # Projection rebuild-and-diff guard gauges (ADR 0102 / Gate 3a-ii-B): the CACHED
+        # ProjectionDivergence from the latest scheduled full-fold divergence measure — no
+        # on-scrape Neo4j fold. -1 sentinel = never-run/disabled (dormant guard), so the
+        # ProjectionDivergenceHigh alert's `> 0` expr never fires while dormant.
+        div = self._projection_divergence() if self._projection_divergence is not None else None
+        yield _gauge(
+            "worldmonitor_projection_divergence",
+            "Live-graph elements the whole-log fold cannot explain (ADR 0102). "
+            "-1 = the projection-diff guard has never run / is disabled (never fires the alert).",
+            div.total if div is not None else -1,
+        )
+        yield _gauge(
+            "worldmonitor_projection_divergence_last_run_timestamp",
+            "Unix timestamp of the latest projection-diff guard run (ADR 0102); "
+            "0 = never run. A liveness signal so a stuck divergence value is detectable.",
+            div.computed_at.timestamp() if div is not None else 0,
         )
 
     def _latest_stopped_reason(self, session: Session) -> str:

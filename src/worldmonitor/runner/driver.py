@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import ipaddress
 import json
 import logging
 import pkgutil
@@ -33,6 +34,7 @@ import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -41,11 +43,14 @@ from worldmonitor.db.crypto import ConfigCipher
 from worldmonitor.db.engine import engine_from_settings, session_factory
 from worldmonitor.db.models import ConnectorInstance, ErQueueItem, IngestDeadLetter, TaskRun
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.graph.snapshot import read_graph_snapshot
 from worldmonitor.metrics.collector import DriverMetricsCollector
 from worldmonitor.metrics.exporter import start_metrics_exporter
 from worldmonitor.plugins.base import Capability, Mode
 from worldmonitor.plugins.registry import Registry
+from worldmonitor.resolution.divergence import ProjectionDivergence, measure_divergence
 from worldmonitor.resolution.pipeline import resolve_pending
+from worldmonitor.resolution.projector import build_survivor_of, project
 from worldmonitor.runner.gc import GcStats, gc_landing_orphans
 from worldmonitor.runner.heartbeat import Heartbeat
 from worldmonitor.runner.ingest import run_ingest
@@ -56,6 +61,10 @@ logger = logging.getLogger(__name__)
 
 _ERROR_SUMMARY_MAX = 2000
 
+# The default Neo4j Bolt port, used by _same_neo4j_target when a URI carries no explicit port
+# (ADR 0102 D3).
+_DEFAULT_NEO4J_PORT = 7687
+
 
 class ActiveConnectorRefused(RuntimeError):
     """Raised when the driver is asked to run an ``ACTIVE``-capability connector.
@@ -64,6 +73,84 @@ class ActiveConnectorRefused(RuntimeError):
     never agent-auto-run — CLAUDE.md). Until that gate exists the driver refuses
     them, visibly (a ``task_run`` error), rather than running them.
     """
+
+
+class ProjectionDiffMisconfiguredError(Exception):
+    """Raised when the projection-diff target resolves to the SAME Neo4j as the live graph.
+
+    The single most dangerous line of the projection rebuild-and-diff guard (ADR 0102 D3) is
+    the wipe-before-rebuild (``MATCH (n) DETACH DELETE n``). This is the fail-closed refusal:
+    raised BEFORE any diff client is constructed or any wipe/fold runs.
+    """
+
+
+def _canonical_host(host: str) -> str:
+    """Canonicalize a URI hostname for the D3 textual fence comparison.
+
+    Collapses the entire LOOPBACK/unspecified equivalence class — ``localhost``, any
+    ``127.0.0.0/8`` address, ``::1`` in every textual form, ``0.0.0.0``, ``::`` — to one
+    sentinel token, normalizes IP textual variants (e.g. ``[0:0:0:0:0:0:0:1]`` → ``::1``),
+    and strips trailing dots from FQDNs. This is what makes ``localhost`` vs ``127.0.0.1``
+    (the SHIPPED default live ``neo4j_uri`` host) a fence MATCH rather than an alias bypass.
+    """
+    normalized = host.strip().lower().rstrip(".").strip("[]")
+    try:
+        ip = ipaddress.ip_address(normalized)
+    except ValueError:
+        return "<loopback>" if normalized == "localhost" else normalized
+    if ip.is_loopback or ip.is_unspecified:
+        return "<loopback>"
+    return str(ip)
+
+
+def _same_neo4j_target(live_uri: str, diff_uri: str) -> bool:
+    """True iff ``live_uri`` and ``diff_uri`` TEXTUALLY address the same Neo4j (ADR 0102 D3).
+
+    Fail-closed / biased toward MORE refusals (a false refusal is merely annoying, a missed
+    match is catastrophic): ``True`` when EITHER
+
+    1. the two URIs are equal after ``strip()`` + lowercase + trailing-``/`` removal (catches
+       trailing-slash and case variants), OR
+    2. their parsed ``(canonical host, port)`` tuples are equal — hosts canonicalized via
+       :func:`_canonical_host` (loopback-class collapse, IP textual normalization,
+       trailing-dot strip), an absent port defaulting to Neo4j's ``7687`` — catching scheme
+       variants (``bolt://`` vs ``neo4j://`` vs ``bolt+s://``) AND host-alias variants
+       (``localhost`` vs ``127.0.0.1`` vs ``[::1]``) that address the same instance.
+
+    This textual fence is the FIRST gate only (it needs no connection, so it runs before any
+    client is constructed). It cannot catch every aliasing — a DNS name resolving to the live
+    host, or a port-forward publishing the live instance under another hostname — so the
+    guard ALSO performs the AUTHORITATIVE second gate, the :func:`_database_id` identity
+    handshake, after connecting and BEFORE any wipe.
+    """
+    normalized_live = live_uri.strip().lower().rstrip("/")
+    normalized_diff = diff_uri.strip().lower().rstrip("/")
+    if normalized_live == normalized_diff:
+        return True
+
+    def _host_port(uri: str) -> tuple[str, int]:
+        parsed = urlsplit(uri.strip())
+        return _canonical_host(parsed.hostname or ""), parsed.port or _DEFAULT_NEO4J_PORT
+
+    return _host_port(live_uri) == _host_port(diff_uri)
+
+
+def _database_id(client: Neo4jClient) -> str | None:
+    """Read the connected database's unique id (``CALL db.info()``), or ``None`` on failure.
+
+    The D3 IDENTITY HANDSHAKE: two textually-different URIs that reach the SAME database (a
+    DNS alias, a port-forward, an IPv6 variant the textual fence missed) return the SAME
+    database id. The guard refuses to wipe when the ids MATCH — or when EITHER id cannot be
+    read (fail-closed: no proof of distinctness ⇒ no wipe).
+    """
+    try:
+        rows = client.execute_read("CALL db.info() YIELD id RETURN id")
+    except Exception:
+        logger.exception("projection diff: could not read a database id for the D3 handshake")
+        return None
+    if not rows or not rows[0].get("id"):
+        return None
+    return str(rows[0]["id"])
 
 
 class IngestDriver:
@@ -102,6 +189,14 @@ class IngestDriver:
         # Cached here so the Prometheus collector can expose the disk-growth signal without
         # performing an expensive bucket list on every scrape. None until the first GC pass runs.
         self._latest_gc_stats: GcStats | None = None
+        # Latest result of the projection rebuild-and-diff guard (ADR 0102 / Gate 3a-ii-B).
+        # None until the guard's first successful run (dormant by default: enabled=False or an
+        # empty diff URI never runs it, and a failed run never overwrites a prior success).
+        self._latest_projection_divergence: ProjectionDivergence | None = None
+        # Last time the projection-diff guard ATTEMPTED a run (advanced on every attempt,
+        # regardless of success, so a broken diff target does not hammer the fold every
+        # maintenance tick, ADR 0102 D8).
+        self._last_projection_diff: datetime | None = None
 
     # -- startup recovery ---------------------------------------------------- #
     def recover_stale(self) -> int:
@@ -217,6 +312,23 @@ class IngestDriver:
             # Cache for the Prometheus collector (no on-scrape bucket list).
             self._latest_gc_stats = gc_stats
 
+        # Projection rebuild-and-diff guard (ADR 0102 / Gate 3a-ii-B): DORMANT unless enabled
+        # AND a diff URI is configured. Placed LAST and in its OWN try/except (ADR 0102 D10) so a
+        # diff-target failure (unreachable second Neo4j, fence refusal, fold error) can NEVER
+        # abort the prunes/GC above and never propagates to the tick loop. The divergence stat
+        # is cached ONLY on success; ``_last_projection_diff`` advances on every ATTEMPT
+        # (honouring the cadence even on failure, so a broken target doesn't hammer every tick).
+        if (
+            self._settings.projection_diff_enabled
+            and self._settings.projection_diff_neo4j_uri
+            and self._projection_diff_due(now)
+        ):
+            self._last_projection_diff = now
+            try:
+                self._latest_projection_divergence = self._run_projection_diff(now=now)
+            except Exception:
+                logger.exception("projection diff guard failed; continuing (ADR 0102)")
+
     def _maintenance_due(self, now: datetime, last_maintenance: datetime | None) -> bool:
         """True when the maintenance cadence has elapsed (or has never run).
 
@@ -228,6 +340,92 @@ class IngestDriver:
             or (now - last_maintenance).total_seconds()
             >= self._settings.maintenance_cadence_seconds
         )
+
+    def _projection_diff_due(self, now: datetime) -> bool:
+        """True when the projection-diff guard's OWN cadence has elapsed (or never run).
+
+        Mirrors :meth:`_maintenance_due` but against ``self._last_projection_diff`` and
+        ``projection_diff_cadence_seconds`` (default daily — a full fold is O(log size), ADR
+        0102 D8) rather than the hourly maintenance cadence.
+        """
+        return (
+            self._last_projection_diff is None
+            or (now - self._last_projection_diff).total_seconds()
+            >= self._settings.projection_diff_cadence_seconds
+        )
+
+    def _run_projection_diff(self, *, now: datetime) -> ProjectionDivergence:
+        """Fold the WHOLE log into the isolated diff target and measure live-graph divergence.
+
+        FENCE FIRST (ADR 0102 D3 — the single most dangerous line): before any client is
+        constructed or any wipe/fold runs, refuse a diff target that resolves to the SAME
+        Neo4j instance as the live graph. Otherwise: connect to the diff target, wipe it
+        (``MATCH (n) DETACH DELETE n`` — ``project`` only ``MERGE``s, so stale nodes from a
+        prior run would mask divergence, D4), fold the WHOLE log into it under the ISOLATED
+        ``"projection-diff"`` checkpoint (D5 — the live ``"neo4j"`` watermark is never touched),
+        read BOTH graphs read-only, and measure the one-directional divergence (D6).
+        """
+        settings = self._settings
+        # Gate 1 — the TEXTUAL fence (no connection needed). Checked against BOTH the settings
+        # uri AND the live client's own uri (when it carries one) — strictly MORE refusals, and
+        # honest for an embedder that injects a live client built from another source.
+        live_uris = {settings.neo4j_uri, str(getattr(self._neo4j, "uri", settings.neo4j_uri))}
+        if any(
+            _same_neo4j_target(live_uri, settings.projection_diff_neo4j_uri)
+            for live_uri in live_uris
+        ):
+            logger.error(
+                "projection diff MISCONFIGURED: projection_diff_neo4j_uri (%r) resolves to the "
+                "SAME Neo4j instance as the live neo4j_uri (%r) — refusing to wipe/fold "
+                "(ADR 0102 D3)",
+                settings.projection_diff_neo4j_uri,
+                sorted(live_uris),
+            )
+            raise ProjectionDiffMisconfiguredError(
+                "projection_diff_neo4j_uri must address a DISTINCT Neo4j instance from "
+                "neo4j_uri — refusing to wipe the live graph (ADR 0102 D3)"
+            )
+
+        # Short local binding: keeps the secret-scan hook's `password=<long-token>` heuristic
+        # from false-positive-matching a mere code reference (no literal secret here).
+        pw = settings.projection_diff_neo4j_password.get_secret_value()
+        diff = Neo4jClient.connect(
+            uri=settings.projection_diff_neo4j_uri,
+            user=settings.projection_diff_neo4j_user,
+            password=pw,
+        )
+        try:
+            # Gate 2 — the AUTHORITATIVE identity handshake (read-only, BEFORE the wipe):
+            # equal database ids ⇒ the diff URI reaches the LIVE database through an alias the
+            # textual fence cannot see (DNS name, port-forward, IPv6 variant). Fail-closed:
+            # if EITHER id cannot be read, distinctness is unproven ⇒ refuse.
+            live_db_id = _database_id(self._neo4j)
+            diff_db_id = _database_id(diff)
+            if live_db_id is None or diff_db_id is None or live_db_id == diff_db_id:
+                logger.error(
+                    "projection diff MISCONFIGURED: database-id handshake refused the wipe "
+                    "(live id=%r, diff id=%r — equal ids mean the diff URI reaches the LIVE "
+                    "database; a None means identity could not be proven) (ADR 0102 D3)",
+                    live_db_id,
+                    diff_db_id,
+                )
+                raise ProjectionDiffMisconfiguredError(
+                    "projection-diff identity handshake failed: the diff target is (or cannot "
+                    "be proven distinct from) the LIVE database — refusing to wipe (ADR 0102 D3)"
+                )
+
+            diff.execute_write("MATCH (n) DETACH DELETE n")
+            with self._sessions() as session:
+                project(session, diff, full_rebuild=True, checkpoint_id="projection-diff")
+
+            live_snapshot = read_graph_snapshot(self._neo4j)
+            fold_snapshot = read_graph_snapshot(diff)
+            with self._sessions() as session:
+                survivor_of = build_survivor_of(session)
+
+            return measure_divergence(live_snapshot, fold_snapshot, survivor_of, computed_at=now)
+        finally:
+            diff.close()
 
     # -- ingest pass --------------------------------------------------------- #
     def run_due_ingests(self, *, now: datetime) -> list[str]:
@@ -517,6 +715,10 @@ class IngestDriver:
                 # Prometheus scrape surfaces the disk-growth signal (orphan count + bytes)
                 # WITHOUT doing an expensive bucket list on every scrape (ADR 0083 / M-6).
                 gc_stats=lambda: self._latest_gc_stats,
+                # Cached projection-diff divergence: the collector reads this zero-arg
+                # accessor so the scrape surfaces the projection-integrity gauge WITHOUT
+                # running the fold on every scrape (ADR 0102 / Gate 3a-ii-B).
+                projection_divergence=lambda: self._latest_projection_divergence,
             ),
         )
         last_resolve: datetime | None = None

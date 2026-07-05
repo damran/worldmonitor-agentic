@@ -118,4 +118,5 @@
 | [0099](0099-statement-spine-step1.md) | Statement spine, step 1: statement + decision tables and the merge-time dual-write | ACCEPTED | 2026-07-04 | false | false |
 | [0100](0100-fold-engine-outbox-projector.md) | Fold engine: log-as-outbox, idempotent projector, checkpoint, and the B-1 resolution | ACCEPTED | 2026-07-04 | false | false |
 | [0101](0101-incremental-fold-correctness-and-rebuild-diff-guard.md) | Incremental fold correctness (F3 / P-FOLD-2 / F4) + the rebuild-and-diff guard roadmap | ACCEPTED | 2026-07-05 | false | false |
+| [0102](0102-projection-rebuild-diff-guard.md) | Projection rebuild-and-diff guard (Gate 3a-ii-B): scheduled full-fold divergence measure | ACCEPTED | 2026-07-05 | false | false |
 <!-- END GENERATED ADR INDEX -->
