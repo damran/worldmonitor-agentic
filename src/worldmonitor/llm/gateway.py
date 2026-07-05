@@ -1,8 +1,19 @@
-"""LLM gateway — single egress choke point for service-side LLM use (ADR 0091, Phase-3 S2).
+"""LLM gateway — single egress choke point for service-side LLM use (ADR 0091, Phase-3 S2;
+hardened by ADR 0104, Gate L1-a).
 
-INV-S2-EGRESS: the gateway writes exactly one egress record BEFORE contacting the provider
-so a failing/timing-out call is still audited.  Provider failures surface as a typed
+INV-S2-EGRESS: the gateway writes an egress record BEFORE contacting the provider so a
+failing/timing-out call is still audited.  Provider failures surface as a typed
 ``LLMGatewayError``; the raw litellm exception never escapes.
+
+INV-USAGE (ADR 0104 item 2): on a SUCCESSFUL call the SAME record is enriched in place with
+the response's token usage and re-emitted — a successful call therefore writes exactly TWO
+egress records (pre-call, usage=None; post-call, usage populated); a failure after the
+pre-call emit writes exactly one.
+
+INV-FAILCLOSED (ADR 0104 item 3): an EXTERNAL mode (``data_left_perimeter is True``) with
+``llm_egress_log_enabled=False`` refuses the call (raises ``LLMGatewayError`` before any
+emit or provider call) — no durable audit, no external egress. LOCAL stays freely
+toggle-able.
 
 INV-S2-DEFAULT: with no operator override, the active mode is ``LOCAL`` (confidential /
 no egress, Ollama loopback).
@@ -10,7 +21,10 @@ no egress, Ollama loopback).
 INV-S2-LABEL: every mode has a non-empty confidentiality status + badge, enforced by the
 registry at construction time (``modes.py``).
 
-The gateway is the ONLY public LLM egress surface; there is no bypass.
+INV-CHOKE (ADR 0104 item 1): machine-enforced (not just documented) — no
+``src/worldmonitor`` module outside ``llm/`` may import ``litellm``/``openai``/``anthropic``
+(``tests/test_llm_egress_chokepoint.py``). The gateway is the ONLY public LLM egress
+surface; there is no bypass.
 """
 
 from __future__ import annotations
@@ -60,6 +74,10 @@ class LLMGateway:
 
         INV-S2-EGRESS: writes the egress record BEFORE contacting the provider so
         even a failing/timing-out call is audited.
+        INV-USAGE (ADR 0104 item 2): on success, re-emits the SAME record after enriching
+        it with token usage — two records total (pre usage=None, post usage populated).
+        INV-FAILCLOSED (ADR 0104 item 3): an external mode with the audit disabled refuses
+        the call before any emit or provider contact.
         INV-S2-DEFAULT: defaults to the settings-configured mode (``LOCAL`` by default).
         Raises ``LLMGatewayError`` on provider failure — never the raw exception.
 
@@ -68,6 +86,19 @@ class LLMGateway:
         """
         active_mode = mode if mode is not None else self._active_mode
         mode_record = REGISTRY[active_mode]
+        external = mode_record.data_left_perimeter
+
+        # ── ADR 0104 item 3 (fail-closed) — BEFORE any emit, BEFORE resolving call params
+        # (so a refused call never even touches a provider secret), and BEFORE the provider
+        # call itself. No durable audit => no external egress. LOCAL remains freely
+        # toggle-able: disabling the audit for a confidential, on-perimeter call affects no
+        # external accountability.
+        if external and not self._settings.llm_egress_log_enabled:
+            raise LLMGatewayError(
+                "external LLM egress refused: audit is disabled "
+                "(llm_egress_log_enabled=False) for an external mode — no durable audit, "
+                "no egress"
+            )
 
         # The per-call override (which the S5 operator console drives) may select
         # CLAUDE_HEADLESS on a gateway built in another mode; ensure the shim is
@@ -112,6 +143,13 @@ class LLMGateway:
         usage_val = getattr(response, "usage", None)
         if usage_val is not None:
             record.usage = usage_val
+
+        # ADR 0104 item 2 — POST-CALL second emit carrying usage, so a call's token spend
+        # actually lands in the audit. Guarded by the same flag as the pre-call emit; the
+        # fail-closed check above guarantees external modes always have it True, so an
+        # external success always produces exactly two records.
+        if self._settings.llm_egress_log_enabled:
+            egress_log.emit(record)
 
         return response
 
