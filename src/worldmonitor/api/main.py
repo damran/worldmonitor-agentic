@@ -30,6 +30,7 @@ from worldmonitor.api.integrations import router as integrations_router
 from worldmonitor.api.llm import router as llm_router
 from worldmonitor.api.middleware import DEFAULT_PUBLIC_PATHS, AuthMiddleware
 from worldmonitor.api.readiness import ReadinessResult, build_default_readiness
+from worldmonitor.api.review import router as review_router
 from worldmonitor.authz.oidc import Principal, TokenVerifier, ZitadelTokenVerifier
 from worldmonitor.db.engine import engine_from_settings, session_factory
 from worldmonitor.graph.neo4j_client import Neo4jClient
@@ -181,4 +182,5 @@ def create_app(
     app.include_router(graph_router)
     app.include_router(integrations_router)
     app.include_router(llm_router)
+    app.include_router(review_router)
     return app

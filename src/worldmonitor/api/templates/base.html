@@ -5,10 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% block title %}WorldMonitor — Integrations{% endblock %}</title>
     <link rel="stylesheet" href="/static/app.css" />
+    {% block head %}{% endblock %}
   </head>
   <body>
     <header class="wm-header">
       <h1><a href="/integrations">WorldMonitor</a></h1>
+      <nav class="wm-nav">
+        <a href="/integrations">Integrations</a>
+        <a href="/review">Review</a>
+      </nav>
     </header>
     <main class="wm-main">{% block content %}{% endblock %}</main>
   </body>

@@ -1,0 +1,57 @@
+<section class="wm-review-card">
+  <header class="wm-review-row-head">
+    {% if sensitive %}
+    <span class="wm-badge-sensitive">sensitive</span>
+    {% endif %}
+  </header>
+  <div class="wm-confidence-band">
+    <span class="wm-confidence-value">{{ "%.3f"|format(score) }}</span>
+  </div>
+  <p class="wm-review-reason">{{ reason }}</p>
+
+  <div class="wm-review-members">
+    {% for member in members %}
+    <div class="wm-review-member">
+      {% if member.parseable %}
+      <h4>{{ member.member_id }} <small>({{ member.schema }})</small></h4>
+      <ul class="wm-review-props">
+        {% for name, values in member.props.items() %}
+        <li><strong>{{ name }}</strong>: {{ values | join(", ") }}</li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <h4>{{ member.member_id }}</h4>
+      <p class="wm-review-unparseable">unparseable raw_entity — cannot render this member's properties</p>
+      {% endif %}
+      <div class="wm-review-source-chip">
+        <span class="wm-source-id">source: {{ member.source_id or "unknown" }}</span>
+        <span class="wm-reliability">reliability: {{ member.reliability or "unknown" }}</span>
+        <span class="wm-retrieved-at">retrieved: {{ member.retrieved_at or "unknown" }}</span>
+        <span class="wm-raw-pointer">raw: {{ member.raw_pointer }}</span>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="wm-diff">
+    <h4>Evidence diff</h4>
+    <table class="wm-diff-table">
+      <thead>
+        <tr><th>Property</th><th>Values by member</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        {% for entry in diff %}
+        <tr class="{{ 'wm-diff-agree' if entry.agree else 'wm-diff-contradict' }}">
+          <td>{{ entry.prop }}</td>
+          <td>
+            {% for member_id, values in entry.member_values.items() %}
+            <div>{{ member_id }}: {{ values | join(", ") }}</div>
+            {% endfor %}
+          </td>
+          <td>{{ "agree" if entry.agree else "contradict" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>

@@ -34,7 +34,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="list parked merges awaiting sign-off")
     for name, helptext in (
         ("approve", "promote a parked merge"),
-        ("reject", "split a parked merge"),
+        ("reject", "reject a parked merge (write its members as separate entities)"),
     ):
         action = sub.add_parser(name, help=helptext)
         action.add_argument("--canonical", required=True)
