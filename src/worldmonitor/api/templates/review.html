@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Review queue — WorldMonitor{% endblock %}
+{% block head %}
+<script src="/static/vendor/htmx.min.js"></script>
+{% endblock %}
+{% block content %}
+<section class="wm-review-queue">
+  <h2>Review queue</h2>
+  <p class="wm-review-summary">{{ rows|length }} parked merge(s) awaiting human sign-off</p>
+  {% if rows %}
+  <ul class="wm-review-list">
+    {% for row in rows %}
+    <li class="wm-review-row">
+      <div class="wm-review-row-head">
+        <span class="wm-review-canonical">{{ row.canonical_id }}</span>
+        <span class="wm-badge-blocked">blocked pending human sign-off</span>
+        {% if row.sensitive %}
+        <span class="wm-badge-sensitive">sensitive</span>
+        {% endif %}
+        {% if row.graph_written %}
+        <span class="wm-review-graph-written">recovery: graph-written (re-run sign-off to complete)</span>
+        {% endif %}
+      </div>
+      <div class="wm-confidence-band">
+        <span class="wm-confidence-value">{{ "%.3f"|format(row.score) }}</span>
+      </div>
+      <p class="wm-review-members">members: {{ row.member_count }}</p>
+      <p class="wm-review-reason">{{ row.reason }}</p>
+      <button
+        type="button"
+        class="wm-review-expand"
+        hx-get="/review/card?canonical_id={{ row.canonical_id | urlencode }}"
+        hx-target="next .wm-review-card-slot"
+        hx-swap="innerHTML"
+      >Review candidates</button>
+      <div class="wm-review-card-slot"></div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="wm-empty">No parked merges awaiting sign-off.</p>
+  {% endif %}
+</section>
+{% endblock %}

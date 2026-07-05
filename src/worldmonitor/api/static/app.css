@@ -86,3 +86,132 @@ body {
 button {
   cursor: pointer;
 }
+
+/* ---------------------------------------------------------------------------------------
+ * Review queue (Gate 1a, ADR 0103) — additive only.
+ * ------------------------------------------------------------------------------------- */
+.wm-nav {
+  margin-left: 1rem;
+  display: inline-flex;
+  gap: 0.75rem;
+}
+
+.wm-review-list {
+  list-style: none;
+  padding: 0;
+}
+
+.wm-review-row {
+  border: 1px solid var(--wm-border);
+  border-radius: 0.4rem;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+  background: #fff;
+}
+
+.wm-review-row-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.wm-review-canonical {
+  font-weight: 600;
+  font-family: monospace;
+}
+
+.wm-badge-blocked {
+  background: #6b7280;
+  color: #fff;
+  border-radius: 0.25rem;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.75rem;
+}
+
+.wm-badge-sensitive {
+  background: #b91c1c;
+  color: #fff;
+  border-radius: 0.25rem;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.75rem;
+}
+
+.wm-review-graph-written {
+  background: #92400e;
+  color: #fff;
+  border-radius: 0.25rem;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.75rem;
+}
+
+.wm-confidence-band {
+  margin: 0.5rem 0;
+  height: 0.6rem;
+  border-radius: 0.3rem;
+  background: linear-gradient(to right, #d23 0%, #f5a623 50%, #2f9e44 100%);
+  position: relative;
+}
+
+.wm-confidence-value {
+  font-size: 0.8rem;
+  color: var(--wm-fg);
+  margin-left: 0.25rem;
+}
+
+.wm-review-reason {
+  color: #4b5563;
+}
+
+.wm-review-members {
+  color: #4b5563;
+  font-size: 0.85rem;
+}
+
+.wm-review-summary {
+  font-weight: 600;
+}
+
+.wm-review-card {
+  border: 1px solid var(--wm-border);
+  border-radius: 0.4rem;
+  padding: 1rem;
+  background: #fff;
+}
+
+.wm-review-member {
+  border-bottom: 1px solid var(--wm-border);
+  padding: 0.5rem 0;
+}
+
+.wm-review-unparseable {
+  color: #b91c1c;
+  font-style: italic;
+}
+
+.wm-review-source-chip {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.wm-diff-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.wm-diff-table th,
+.wm-diff-table td {
+  text-align: left;
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid var(--wm-border);
+}
+
+.wm-diff-agree {
+  background: #ecfdf3;
+}
+
+.wm-diff-contradict {
+  background: #fef2f2;
+}
