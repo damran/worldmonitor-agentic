@@ -7,9 +7,9 @@ file — the HARD RULE for this gate).
 
 Covers (spec §4 UNIT section):
   * ``measure_divergence`` example table: identical graphs -> 0; each exclusion class
-    (wm_anchor_*/datasets/prov_* added to live -> 0; differing labels -> 0); a missing fold node
-    -> 1; a thinner live value-set -> 0; an extra live value -> 1; an edge endpoint alias
-    resolving back -> 0; an edge with no fold counterpart -> 1.
+    (a bare CANONICAL_ID_FIELDS key/datasets/prov_* added to live -> 0; differing labels -> 0);
+    a missing fold node -> 1; a thinner live value-set -> 0; an extra live value -> 1; an edge
+    endpoint alias resolving back -> 0; an edge with no fold counterpart -> 1.
   * ``_same_neo4j_target`` table (``worldmonitor.runner.driver``): exact match, trailing slash,
     case variant, scheme variant (same host:port), default-port handling -> True; different
     port/host -> False.
@@ -24,6 +24,14 @@ collection, ``worldmonitor.runner.driver._same_neo4j_target`` and
 ``worldmonitor.graph.snapshot.read_graph_snapshot``) do not exist yet — the module-level imports
 fail with ``ImportError``. That is the correct, intended TDD failure mode (the Gate 3a-i
 precedent).
+
+Gate P1 (ADR 0106) truth-up: ``test_bare_anchor_key_added_to_live_is_excluded`` (below) REPLACES
+the old ``test_wm_anchor_prop_added_to_live_is_excluded`` — nodes carry BARE
+``CANONICAL_ID_FIELDS`` keys (e.g. ``wikidata_id``), never a ``wm_anchor_``-prefixed property (that
+prefix lives only in FtM entity CONTEXT); the guard's ``_excluded`` predicate is fixed in Gate P1
+to exclude the bare keys instead of the dead ``wm_anchor_`` prefix. This test is RED-by-ASSERTION
+against TODAY's ``_excluded`` (which still checks the dead prefix), not by import — every symbol
+imported below already exists (Gate 3a-ii-B shipped).
 """
 
 from __future__ import annotations
@@ -90,7 +98,21 @@ def test_identical_graphs_zero_divergence() -> None:
     assert result.live_edges == 0
 
 
-def test_wm_anchor_prop_added_to_live_is_excluded() -> None:
+def test_bare_anchor_key_added_to_live_is_excluded() -> None:
+    """Gate P1 / ADR 0106 (REPLACES test_wm_anchor_prop_added_to_live_is_excluded): the dead
+    ``wm_anchor_`` PREFIX exclusion is replaced by an exclusion of the BARE
+    ``CANONICAL_ID_FIELDS`` keys — nodes carry bare keys like ``wikidata_id``, NEVER a
+    ``wm_anchor_``-prefixed property (that prefix lives only in FtM entity CONTEXT, stripped by
+    ``get_anchors`` before the writer ever projects it onto a node). A bare anchor key added to
+    live (and absent from the fold, since the pre-P1 fold never reconstructs anchors) must still
+    be EXCLUDED from the compared-prop set — the guard must not false-alarm on anchored live
+    nodes once Gate P1's capture lane lands.
+
+    RED today (assertion, not import): ``_excluded`` still checks
+    ``prop.startswith("wm_anchor_")``, which a bare key like ``'wikidata_id'`` never matches, so
+    this extra live prop is (wrongly) COMPARED; the missing fold counterpart makes the node
+    UNEXPLAINED (``total == 1``), violating the E2 tolerance this test pins.
+    """
     fold = GraphSnapshot(
         nodes=(NodeSnapshot(id="s1", labels=frozenset(), props={"name": frozenset({"Acme"})}),),
         edges=(),
@@ -100,13 +122,18 @@ def test_wm_anchor_prop_added_to_live_is_excluded() -> None:
             NodeSnapshot(
                 id="s1",
                 labels=frozenset(),
-                props={"name": frozenset({"Acme"}), "wm_anchor_qid": frozenset({"Q123"})},
+                props={"name": frozenset({"Acme"}), "wikidata_id": frozenset({"Q123"})},
             ),
         ),
         edges=(),
     )
     result = measure_divergence(live, fold, _identity, computed_at=_NOW)
-    assert result.total == 0, "wm_anchor_* (E2) must be excluded from the compared-prop set"
+    assert result.total == 0, (
+        "a BARE CANONICAL_ID_FIELDS key (e.g. 'wikidata_id') on live must be excluded from the "
+        "compared-prop set (ADR 0106 — the bare-key E2 exclusion fix); the old "
+        "'wm_anchor_'-prefix predicate never matches a bare node key, so this false-alarms until "
+        "the fix lands"
+    )
 
 
 def test_datasets_prop_added_to_live_is_excluded() -> None:

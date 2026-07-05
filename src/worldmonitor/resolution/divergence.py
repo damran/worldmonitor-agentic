@@ -19,6 +19,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
+from worldmonitor.ontology.anchors import CANONICAL_ID_FIELDS
+
 
 @dataclass(frozen=True)
 class NodeSnapshot:
@@ -68,21 +70,33 @@ class ProjectionDivergence:
 
 
 def _excluded(prop: str) -> bool:
-    """The compared-property exclusion predicate (ADR 0102 D6).
+    """The compared-property exclusion predicate (ADR 0102 D6, bare-key fix Gate P1 / ADR 0106).
 
-    Excluded: the ``id`` join key (legitimately differs under E1 alias-collapse),
-    ``wm_anchor_*`` (E2 — anchors live in entity context, never in the log), ``datasets``
+    Excluded: the ``id`` join key (legitimately differs under E1 alias-collapse), the BARE
+    ``CANONICAL_ID_FIELDS`` anchor keys (``wikidata_id``/``geonames_id``/``lei``/
+    ``opencorporates_id`` — E2; a live node carries these bare keys, never the
+    ``wm_anchor_``-prefixed shape, which lives only in FtM entity CONTEXT and is stripped by
+    ``get_anchors`` before the writer ever projects it — the ORIGINAL ``wm_anchor_`` prefix
+    predicate here was dead code, since it could never match a real node property), ``datasets``
     (E4 — reconstructed but batch-dependent), ``prov_*`` (scalars + ``prov_witnesses`` —
     representative-shift under E1, D6-ii), and ``caption`` (D6-iii — a single FtM *pick*
     over the name values, not a union-monotone value set: a live node's caption reflects its
     last write's pick while the fold's caption is picked over the WHOLE-log union, so a
     routine cross-batch name update legitimately diverges and would false-alarm forever. The
     caption's INPUTS — the name values themselves — remain fully compared).
+
+    The bare anchor keys stay guard-excluded under the PICK-semantics decision (ADR 0106
+    Sub-fork A): the fold's whole-history omit-on-conflict is a deterministic pick over claims
+    that can legitimately differ from the live node's last-write-wins under cross-batch anchor
+    drift — the same class of legitimate divergence as ``caption``. The equivalence signature
+    (IT-PROJ / P-FOLD) is a DIFFERENT instrument that DOES compare anchors (it runs in the
+    single-batch null-divergence regime where no conflict/drift exists) — unaffected by this
+    predicate.
     """
     return (
         prop == "id"
         or prop == "caption"
-        or prop.startswith("wm_anchor_")
+        or prop in CANONICAL_ID_FIELDS
         or prop == "datasets"
         or prop.startswith("prov_")
     )

@@ -407,6 +407,11 @@ class ProjectionCheckpoint(Base):
     Append-only-friendly, additive, single-tenant D1 unchanged (ADR 0042). Model + migration
     ``0010_projection_outbox`` MUST agree byte-for-byte (``tests/integration/test_migrations.py``
     drift guard, ADR 0030).
+
+    ``last_context_claim_seq`` (Gate P1 / ADR 0106) is an additive watermark for the
+    ``context_claim`` lane, mirroring ``last_statement_seq``/``last_decision_seq`` exactly — the
+    minimal, consistent choice over a second checkpoint mechanism. Model + migration ``0012``
+    MUST agree byte-for-byte (the same drift guard).
     """
 
     __tablename__ = "projection_checkpoint"
@@ -419,6 +424,10 @@ class ProjectionCheckpoint(Base):
     )
     # Highest decision.seq folded into this target. Initialises to 0.
     last_decision_seq: Mapped[int] = mapped_column(
+        BigInteger, server_default=text("0"), nullable=False
+    )
+    # Highest context_claim.seq folded into this target (Gate P1 / ADR 0106). Initialises to 0.
+    last_context_claim_seq: Mapped[int] = mapped_column(
         BigInteger, server_default=text("0"), nullable=False
     )
     # Last fold timestamp (server-assigned on INSERT; manually updated on subsequent folds).
@@ -487,6 +496,77 @@ class LlmEgressRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ContextClaimRecord(Base):
+    """Append-only per-anchor-claim log — the context-claim capture lane (Gate P1 / ADR 0106).
+
+    A second append-only lane in the same SoR spine (alongside ``statement``/``decision``,
+    ADR 0099): one row per **(survivor canonical_id, contributing member, anchor key, value)**
+    claim. Anchors (``ontology.anchors.CANONICAL_ID_FIELDS``) live in FtM entity **context**
+    (``wm_anchor_*`` keys), never in ``properties`` — the statement fusion iterates
+    ``member.properties`` only, so no anchor can enter the statement log regardless of call
+    ordering (a structural bar, not an ordering accident). This lane is the FtM-pure home for
+    that evidence: a pseudo-prop ``wm_anchor_*`` row in ``statement`` is rejected because FtM's
+    ``get_prop_type`` raises for a non-schema prop.
+
+    Per-member grain (NOT merged-entity grain): capturing from the merged ``cluster.entity``
+    would lose the per-member ``dataset`` attribution the P2 erasure scrub needs, and would fold
+    a cross-member anchor conflict prematurely. The merge/conflict is reconstructed at fold time
+    from the (possibly multiple) rows for a key (``resolution.projector.reconstruct_entities``),
+    reproducing ``anchors.anchor_conflicts_across`` (the guard's per-source-member view) exactly.
+
+    ``method`` and ``retrieved_at`` are **NOT NULL** — the one place this lane departs from the
+    statement lane (which makes them nullable). An anchor claim with no provenance is exactly the
+    "provenance-naked anchor" gap this lane closes; a claim that cannot be fully provenanced is
+    **not captured** rather than written naked (honesty over completeness) — an
+    anchored-but-unstamped member's anchor is skipped and logged, never written
+    (:func:`worldmonitor.resolution.statements.fuse_context_claim_rows`).
+
+    Append-only invariants (mirrors the ADR-0099 statement/decision spine idiom):
+    * Only ``session.add`` INSERTs are ever issued for this table — no UPDATE, no DELETE, no
+      ``session.delete``, ever (see :mod:`worldmonitor.resolution.statements`).
+    * ``scope`` is a reserved forward-compatibility column (ADR 0099 Decision A) — UNENFORCED;
+      single-tenant D1 unchanged (ADR 0042).
+
+    ``seq`` needs the ADR-0100 SQLite treatment: Postgres IDENTITY is a no-op on SQLite, so the
+    existing ``_assign_sqlite_seq`` ``before_insert`` listener is REUSED verbatim (one additional
+    ``event.listen`` line below; the function body stays byte-unchanged — the named avoidance of
+    the ADR-0100 regression).
+
+    This model and migration ``0012_context_claim_lane`` MUST agree byte-for-byte
+    (``tests/integration/test_migrations.py`` drift guard, ADR 0030).
+    """
+
+    __tablename__ = "context_claim"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Monotonic server-assigned ordering column — the fold's outbox watermark for this lane
+    # (mirrors StatementRecord.seq / DecisionRecord.seq, ADR 0100 D1). Server-assigned via
+    # Postgres IDENTITY; NEVER set by application code.
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), index=True, nullable=False)
+    # SUBJECT = the cluster's / sign-off's durable survivor id
+    canonical_id: Mapped[str] = mapped_column(String(255), index=True)
+    # The contributing source member id (per-member attribution — P2 erasure scrub needs it)
+    entity_id: Mapped[str] = mapped_column(String(255), index=True)
+    # The anchor field (one of anchors.CANONICAL_ID_FIELDS in P1; forward-compat for enricher
+    # keys). Deliberately NOT an FtM schema property — not FtM-validated.
+    key: Mapped[str] = mapped_column(String(64))
+    # Unbounded TEXT — hostile-data rule: no cast on free-form connector/enricher values
+    value: Mapped[str] = mapped_column(Text)
+    # The contributing member's Provenance.source_id (G1 source) — so the P2 erasure scrub
+    # reaches anchor claims by dataset
+    dataset: Mapped[str] = mapped_column(String(255))
+    # "connector:map" for map-time anchors; "enricher:<name>@<version>" for the (not-yet-wired)
+    # enricher interface. NOT NULL — mandatory provenance (the one departure from the statement
+    # lane's nullable method column).
+    method: Mapped[str] = mapped_column(String(64))
+    # ISO-8601 string — the member's Provenance.retrieved_at; stored as string, no cast
+    # (hostile-data rule). NOT NULL — mandatory provenance.
+    retrieved_at: Mapped[str] = mapped_column(String(64))
+    # Reserved forward-compat (ADR 0099 Decision A) — UNENFORCED; single-tenant D1 unchanged
+    scope: Mapped[str | None] = mapped_column(String(64), server_default=text("'default'"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 # ---------------------------------------------------------------------------
 # SQLite ``seq`` fallback (ADR 0100 D1) — test-dialect compatibility only.
 # ---------------------------------------------------------------------------
@@ -508,3 +588,4 @@ def _assign_sqlite_seq(_mapper: Any, connection: Any, target: Any) -> None:
 
 event.listen(StatementRecord, "before_insert", _assign_sqlite_seq)
 event.listen(DecisionRecord, "before_insert", _assign_sqlite_seq)
+event.listen(ContextClaimRecord, "before_insert", _assign_sqlite_seq)

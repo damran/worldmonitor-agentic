@@ -11,10 +11,10 @@ P-DIV-1  NO FALSE ALARM / E-TOLERANCE — for ANY fold ``GraphSnapshot`` + ``sur
          transformations (ADR 0102 D6): node id set to the fold id OR an alias ``survivor_of``
          maps back to it; a subset of values dropped from the multi-valued ``traits`` prop; a
          compared value replaced by a fresh alias whose ``survivor_of`` is a value present in the
-         fold node's set; arbitrary ``wm_anchor_*``/``datasets``/``prov_*`` additions; an extra
-         label; and, on edges, endpoint aliases mapping back + a dropped value-subset + arbitrary
-         ``datasets``/``prov_*`` — ``measure_divergence(live, fold, survivor_of,
-         computed_at=...).total == 0``.
+         fold node's set; arbitrary bare-anchor-key (``CANONICAL_ID_FIELDS``)/``datasets``/
+         ``prov_*`` additions; an extra label; and, on edges, endpoint aliases mapping back + a
+         dropped value-subset + arbitrary ``datasets``/``prov_*`` — ``measure_divergence(live,
+         fold, survivor_of, computed_at=...).total == 0``.
 
 P-DIV-2  ROT IS DETECTED — starting from a zero-divergence ``(live, fold, survivor_of)`` triple
          (the P-DIV-1 generator), injecting (a) ``k`` fresh wholly-unexplained nodes increases
@@ -28,6 +28,14 @@ RED at collection time: ``worldmonitor.resolution.divergence`` does not exist ye
 ``ImportError``. That is the correct, intended TDD failure mode (the Gate 3a-i precedent).
 
 NOT marked ``@pytest.mark.integration`` — this file is pure and Docker-free.
+
+Gate P1 (ADR 0106) truth-up: the generator's synthetic EXCLUDED-class extra that used to be
+``live_props["wm_anchor_qid"]`` is REPLACED (not augmented) with a BARE ``CANONICAL_ID_FIELDS``
+key (``live_props["wikidata_id"]``) — nodes carry bare anchor keys, never a
+``wm_anchor_``-prefixed property; leaving the old shape in place would stop proving the REAL
+bare-key E2 exclusion the guard's fixed ``_excluded`` predicate applies (Gate P1). This is
+RED-by-ASSERTION against TODAY's ``_excluded`` (every symbol imported below already exists —
+Gate 3a-ii-B shipped), not by import.
 """
 
 from __future__ import annotations
@@ -125,7 +133,9 @@ def _zero_divergence_scenario(draw: st.DrawFn) -> _ZeroDivergenceScenario:
             live_props["traits"] = frozenset(live_trait_values)
 
         # --- E-legit: mandatory EXCLUDED-class extras (always present; must NEVER count) ---
-        live_props["wm_anchor_qid"] = frozenset({f"Q-{surv}"})
+        # Gate P1 / ADR 0106: a BARE CANONICAL_ID_FIELDS key (nodes carry bare anchor keys,
+        # never the dead "wm_anchor_"-prefixed shape) — REPLACES the old wm_anchor_qid extra.
+        live_props["wikidata_id"] = frozenset({f"Q-{surv}"})
         live_props["datasets"] = frozenset({"live-batch-x"})
         live_props["prov_source_id"] = frozenset({"src:live"})
         live_props["prov_witnesses"] = frozenset({"{}"})
@@ -213,8 +223,9 @@ def test_p_div_1_no_false_alarm_on_e_legit_transformations(
         f"unexplained_edges={result.unexplained_edges}).\n"
         f"fold={scenario.fold!r}\nlive={scenario.live!r}\n"
         "Every transformation applied here (id -> alias resolving back, dropped value-subsets, "
-        "alias-resolving compared values, wm_anchor_*/datasets/prov_*/extra-label additions, and "
-        "the mirrored edge-side transformations) is E-legit (ADR 0102 D6) and must yield total==0."
+        "alias-resolving compared values, a bare-anchor-key (CANONICAL_ID_FIELDS)/datasets/"
+        "prov_*/extra-label additions, and the mirrored edge-side transformations) is E-legit "
+        "(ADR 0102 D6) and must yield total==0."
     )
 
 

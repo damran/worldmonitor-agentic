@@ -96,6 +96,26 @@ def anchor_conflicts_across(entities: Iterable[FtmEntity]) -> dict[str, list[str
     return {field: sorted(values) for field, values in per_field.items() if len(values) > 1}
 
 
+def set_anchor_claims(entity: FtmEntity, field: str, values: Iterable[str]) -> None:
+    """Set the RAW multi-value anchor context for a field (fold reinstatement, Gate P1).
+
+    Mirrors the shape FtM's ``merge_context`` produces when it unions two members' anchor
+    contexts (a sorted, deduped list of distinct non-empty string values) so
+    :func:`get_anchors` applies the IDENTICAL omit-on-conflict rule to a fold-reconstructed
+    entity as it does to a live merged entity (:mod:`worldmonitor.resolution.projector`,
+    ADR 0106 §2). An empty/all-filtered ``values`` is a no-op (leaves the context key unset,
+    same as a field nobody ever claimed).
+    """
+    if field not in CANONICAL_ID_FIELDS:
+        raise ValueError(f"unknown anchor field: {field!r}")
+    # ``values`` is typed Iterable[str] (the public contract); the truthy filter drops empty
+    # strings the same way _anchor_values' isinstance-and-truthy filter does for its Any-typed
+    # (untyped context) input.
+    vals = sorted({v for v in values if v})
+    if vals:
+        entity.context[f"{_CONTEXT_PREFIX}{field}"] = vals
+
+
 def get_anchors(entity: FtmEntity) -> dict[str, str]:
     """Return the canonical anchors set on an entity (empty if none).
 

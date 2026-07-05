@@ -30,7 +30,7 @@ Public surface (pinned by tests):
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -41,12 +41,14 @@ from sqlalchemy.orm import Session
 
 from worldmonitor.db.models import (
     CanonicalIdLedger,
+    ContextClaimRecord,
     DecisionRecord,
     ProjectionCheckpoint,
     StatementRecord,
 )
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
+from worldmonitor.ontology.anchors import set_anchor_claims
 from worldmonitor.ontology.ftm import FtmEntity, get_model, make_entity
 from worldmonitor.provenance.model import Provenance, stamp, stamp_witness_map
 
@@ -72,11 +74,16 @@ class ProjectionResult:
     """Rows actually folded this call (ADR 0101 A1 observability). ``full_rebuild`` ==
     ``statements_read``; incremental == the full re-read of each touched survivor's history
     (``>= len(delta rows)``, 0 on a 0-delta no-op). Does NOT change ``statements_read``."""
+    context_claims_read: int = 0
+    """Number of ``context_claim`` rows read from the log before deduplication/grouping this
+    call (Gate P1 / ADR 0106 observability). Additive; default preserves every existing
+    construction of this dataclass."""
 
 
 def reconstruct_entities(
     statement_rows: list[StatementRecord],
     survivor_of: Callable[[str], str],
+    context_claim_rows: Sequence[ContextClaimRecord] = (),
 ) -> list[FtmEntity]:
     """Pure fold: reconstruct FtM entities from statement rows (no DB, no Neo4j).
 
@@ -107,15 +114,31 @@ def reconstruct_entities(
           * **WITNESS MAP** (Tier-1, ADR 0045): ``{prop: {row.dataset for rows of that prop}}``,
             EXCLUDING ``prop == "id"``; ``stamp_witness_map()`` it.  Re-derives exactly like
             :func:`resolution.merge._witness_map_from_statements`.
-          * **ANCHORS**: NOT reconstructed (``wm_anchor_*`` live in entity context, not in the
-            statement log) — a documented expected-divergence class E2 (ADR 0100 D2).
+          * **ANCHORS**: reconstructed from the ``context_claim`` lane (Gate P1 / ADR 0106) —
+            ``context_claim_rows`` are grouped by ``survivor_of(row.canonical_id)``, and for each
+            distinct ``key`` the SET of claimed values is set via
+            :func:`~worldmonitor.ontology.anchors.set_anchor_claims` (mirrors the
+            ``merge_context`` union shape) BEFORE the provenance/witness stamping below, so
+            :func:`~worldmonitor.ontology.anchors.get_anchors` applies the IDENTICAL
+            omit-on-conflict rule as the live merged-entity path. A survivor with NO statement
+            rows never gets a group here (this function groups by statement rows only) — a
+            context-claim-only survivor therefore yields no entity and no anchors, a graceful
+            no-op (dormant until Gate P3 wires the sign-off statement/decision spine).
 
-    :param statement_rows: Raw statement rows from the log (may contain duplicates).
-    :param survivor_of:    Maps a canonical_id to its surviving durable id (identity if
-                           the id has no alias row in the ledger).
+    :param statement_rows:     Raw statement rows from the log (may contain duplicates).
+    :param survivor_of:        Maps a canonical_id to its surviving durable id (identity if
+                                the id has no alias row in the ledger).
+    :param context_claim_rows: Raw ``context_claim`` rows (Gate P1 / ADR 0106); default empty —
+                                every existing caller stays byte-behaviour-identical.
     :returns: One :class:`FtmEntity` per distinct survivor group (non-empty).
     """
     ftm_model = get_model()
+
+    # Group context-claim rows by survivor (Gate P1 / ADR 0106) — read once, applied per group.
+    context_by_survivor: dict[str, dict[str, set[str]]] = {}
+    for claim_row in context_claim_rows:
+        key_map = context_by_survivor.setdefault(survivor_of(claim_row.canonical_id), {})
+        key_map.setdefault(claim_row.key, set()).add(claim_row.value)
 
     # (i) Dedup on statement_id — content-addressed duplicates are byte-identical
     seen_stmt_ids: set[str] = set()
@@ -187,6 +210,12 @@ def reconstruct_entities(
         # StatementEntity path (transform.py: list(proxy.datasets) → "datasets" node prop).
         # ValueEntity.datasets is a plain set[str] that can be assigned directly.
         entity.datasets = {row.dataset for row in rows if row.prop != "id"}
+
+        # ANCHORS (Gate P1 / ADR 0106): reconstruct from the context_claim lane BEFORE the
+        # provenance/witness stamping below — sets the RAW multi-value union per key so
+        # get_anchors applies the identical omit-on-conflict rule as the live merged-entity path.
+        for anchor_key, anchor_values in context_by_survivor.get(survivor, {}).items():
+            set_anchor_claims(entity, anchor_key, anchor_values)
 
         # Provenance (G1): representative = member with min(entity_id) in the group
         rep_entity_id = min(row.entity_id for row in rows)
@@ -301,9 +330,11 @@ def project(
     if checkpoint is None or full_rebuild:
         last_stmt_seq: int = 0
         last_dec_seq: int = 0
+        last_ctx_seq: int = 0
     else:
         last_stmt_seq = int(checkpoint.last_statement_seq)
         last_dec_seq = int(checkpoint.last_decision_seq)
+        last_ctx_seq = int(checkpoint.last_context_claim_seq)
 
     # --- Read statement rows (ORDER BY seq for determinism) ---
     stmt_query = select(StatementRecord).order_by(StatementRecord.seq)
@@ -317,7 +348,14 @@ def project(
         dec_query = dec_query.where(DecisionRecord.seq > last_dec_seq)
     decision_rows = list(session.execute(dec_query).scalars().all())
 
+    # --- Read context-claim rows (Gate P1 / ADR 0106) — same full/incremental shape ---
+    ctx_query = select(ContextClaimRecord).order_by(ContextClaimRecord.seq)
+    if not full_rebuild and last_ctx_seq > 0:
+        ctx_query = ctx_query.where(ContextClaimRecord.seq > last_ctx_seq)
+    context_claim_delta_rows = list(session.execute(ctx_query).scalars().all())
+
     statements_read = len(statement_rows)
+    context_claims_read = len(context_claim_delta_rows)
 
     # Count statement_id deduplication (ADR 0100 D3 / P-FOLD-4)
     unique_stmt_ids = len({row.statement_id for row in statement_rows})
@@ -327,16 +365,25 @@ def project(
     survivor_of = build_survivor_of(session)
 
     # --- Determine the rows to fold ---
-    # full_rebuild folds every row. Incremental (F3 fix, ADR 0101 A1): fold each TOUCHED
-    # survivor's COMPLETE statement history — not just the delta — so the additive
-    # `SET n += props` write restores full multi-valued props (a thinner delta re-emit of an
-    # already-accumulated property would otherwise clobber it down to the last batch's values).
+    # full_rebuild folds every row (both lanes). Incremental (F3 fix, ADR 0101 A1, extended to
+    # the context-claim lane by Gate P1 / ADR 0106 §2.b.2): fold each TOUCHED survivor's
+    # COMPLETE statement AND context-claim history — not just the delta — so the additive
+    # `SET n += props` write restores full multi-valued props/anchors (a thinner delta re-emit
+    # of an already-accumulated value would otherwise clobber it down to the last batch's
+    # values). The touched set is the UNION of the statement delta AND the context-claim delta:
+    # a survivor touched ONLY by a context-claim delta still needs its statement history
+    # re-read (else there is no entity to hang the anchors on — reconstruct_entities groups by
+    # statement rows).
     if full_rebuild:
         fold_rows = statement_rows
+        fold_context_rows = context_claim_delta_rows
     else:
-        touched = {survivor_of(str(row.canonical_id)) for row in statement_rows}
+        touched = {survivor_of(str(row.canonical_id)) for row in statement_rows} | {
+            survivor_of(str(row.canonical_id)) for row in context_claim_delta_rows
+        }
         if not touched:
             fold_rows = []  # 0-delta no-op (preserves P-FOLD-3 statements_read==0)
+            fold_context_rows = []
         else:
             # every canonical_id (survivor OR superseded alias) that folds into a touched survivor
             alias_map = _load_alias_map(session)
@@ -352,13 +399,23 @@ def project(
                 .scalars()
                 .all()
             )
+            fold_context_rows = list(
+                session.execute(
+                    select(ContextClaimRecord)
+                    .where(ContextClaimRecord.canonical_id.in_(preimage))
+                    .order_by(ContextClaimRecord.seq)
+                )
+                .scalars()
+                .all()
+            )
 
-    # --- Fold: reconstruct entities from the statement log ---
-    entities = reconstruct_entities(fold_rows, survivor_of)
+    # --- Fold: reconstruct entities from the statement log (+ anchors from the context lane) ---
+    entities = reconstruct_entities(fold_rows, survivor_of, context_claim_rows=fold_context_rows)
 
     # --- Compute max seqs consumed (default = existing watermark so it never goes backward) ---
     max_stmt_seq = max((int(row.seq) for row in statement_rows), default=last_stmt_seq)
     max_dec_seq = max((int(row.seq) for row in decision_rows), default=last_dec_seq)
+    max_ctx_seq = max((int(row.seq) for row in context_claim_delta_rows), default=last_ctx_seq)
 
     # --- Write Neo4j FIRST (at-least-once: idempotent MERGE before watermark commit) ---
     # A crash here leaves the watermark unmoved → the same delta is re-read and re-projected
@@ -372,11 +429,13 @@ def project(
                 id=checkpoint_id,
                 last_statement_seq=max_stmt_seq,
                 last_decision_seq=max_dec_seq,
+                last_context_claim_seq=max_ctx_seq,
             )
         )
     else:
         checkpoint.last_statement_seq = max_stmt_seq
         checkpoint.last_decision_seq = max_dec_seq
+        checkpoint.last_context_claim_seq = max_ctx_seq
         checkpoint.updated_at = datetime.now(UTC)
 
     session.commit()
@@ -388,4 +447,5 @@ def project(
         statements_read=statements_read,
         statements_deduped=statements_deduped,
         statements_refolded=len(fold_rows),
+        context_claims_read=context_claims_read,
     )

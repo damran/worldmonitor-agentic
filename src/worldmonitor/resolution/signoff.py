@@ -49,6 +49,7 @@ from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
 from worldmonitor.resolution.referents import rewrite_referents
+from worldmonitor.resolution.statements import record_context_claims
 
 # Bounded exception summary stored on a dead-letter row (mirrors the pipeline's bound).
 _ERROR_SUMMARY_MAX = 2000
@@ -294,6 +295,10 @@ def approve(
         row.status = "resolved"
     audit.decision = "merged"
     session.add(_signoff_row(canonical_id, source_ids, "approved", approver, reason))
+    # Gate P1 (ADR 0106): additive context-claim capture at the sign-off promote point — banks
+    # each approved member's canonical anchors (P1 does NOT add statement/decision rows here;
+    # that sign-off statement/decision gap is Gate P3, see the module docstring).
+    record_context_claims(session, canonical_id, [make_entity(r.raw_entity) for r in member_rows])
     session.commit()
     return SignOffResult(canonical_id, "approved", 1, len(edges))
 

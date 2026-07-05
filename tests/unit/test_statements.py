@@ -11,6 +11,9 @@ The tests cover:
 - ``record_decision`` writes exactly ONE DecisionRecord for a merge cluster (kind="merge",
   decided_by="auto:resolver", evidence={"reason": ...} or None); it is a no-op for a
   singleton (is_merge=False).
+- Gate P1 (ADR 0106): inserting a ``ContextClaimRecord`` in an SQLite session assigns a
+  monotonic non-NULL ``seq`` — the reused ``_assign_sqlite_seq`` ``before_insert`` listener
+  pinned at RUNTIME (the ADR-0100 SQLite-IDENTITY trap avoidance).
 
 All tests are RED on the current tree: the module-level imports fail because
 ``worldmonitor.resolution.statements`` and the new db.models classes do not exist yet.
@@ -18,6 +21,7 @@ All tests are RED on the current tree: the module-level imports fail because
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from typing import Any
 
@@ -29,7 +33,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 # ----- GATE IMPORTS — fail at collection until builder creates them (RED for right reason) -----
-from worldmonitor.db.models import Base, DecisionRecord, StatementRecord  # noqa: E402
+from worldmonitor.db.models import (  # noqa: E402
+    Base,
+    ContextClaimRecord,
+    DecisionRecord,
+    StatementRecord,
+)
 from worldmonitor.ontology.ftm import make_entity
 from worldmonitor.provenance.model import Provenance, stamp
 from worldmonitor.resolution.merge import ResolvedCluster, cluster_and_merge
@@ -411,4 +420,58 @@ def test_record_decision_supersedes_and_superseded_by_are_null(sqlite_session: S
     )
     assert row.superseded_by is None, (
         f"row.superseded_by={row.superseded_by!r} — must be NULL in step 1 (reserved for Gate 3)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gate P1 (ADR 0106): SQLite ``seq`` listener runtime pin
+# ---------------------------------------------------------------------------
+
+
+def test_context_claim_seq_assigned_monotonically_in_sqlite(sqlite_session: Session) -> None:
+    """Inserting ContextClaimRecords in an SQLite session assigns a monotonic non-NULL ``seq``.
+
+    ``ContextClaimRecord.seq`` MUST reuse the existing, byte-unchanged ``_assign_sqlite_seq``
+    ``before_insert`` listener (the ADR-0100 dialect-guarded SQLite-IDENTITY-fallback trap
+    avoidance: Postgres IDENTITY is a no-op on SQLite, so a new lane's ``seq`` column needs the
+    SAME listener registered, not a bespoke one) — pinned here at RUNTIME (no test today
+    exercises any lane's listener actually firing on an INSERT).
+
+    RED today: ImportError — ContextClaimRecord does not exist yet.
+    """
+    first = ContextClaimRecord(
+        id=str(uuid.uuid4()),
+        canonical_id="ctx-seq-test",
+        entity_id="ctx-seq-test-member-1",
+        key="wikidata_id",
+        value="Q1",
+        dataset="src-A",
+        method="connector:map",
+        retrieved_at="2026-01-01T00:00:00Z",
+    )
+    sqlite_session.add(first)
+    sqlite_session.flush()
+
+    assert first.seq is not None, (
+        "ContextClaimRecord.seq is NULL after INSERT — the reused _assign_sqlite_seq "
+        "before_insert listener must fire on SQLite (ADR 0106 / the ADR-0100 trap avoidance)"
+    )
+
+    second = ContextClaimRecord(
+        id=str(uuid.uuid4()),
+        canonical_id="ctx-seq-test",
+        entity_id="ctx-seq-test-member-2",
+        key="wikidata_id",
+        value="Q2",
+        dataset="src-B",
+        method="connector:map",
+        retrieved_at="2026-01-01T00:00:00Z",
+    )
+    sqlite_session.add(second)
+    sqlite_session.flush()
+
+    assert second.seq is not None, "second ContextClaimRecord.seq is NULL after INSERT"
+    assert second.seq > first.seq, (
+        f"ContextClaimRecord.seq must be MONOTONIC: first.seq={first.seq!r}, "
+        f"second.seq={second.seq!r} — got second <= first"
     )
