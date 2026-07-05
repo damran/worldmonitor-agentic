@@ -123,16 +123,24 @@ class _SpySession:
 
     def __init__(self, bus: _SpyBus) -> None:
         self._bus = bus
+        self._pending: list[Any] = []
 
     def add(self, row: Any) -> None:
         self._bus.calls.append(("add", row))
         self._bus.rows.append(row)
+        self._pending.append(row)
 
     def commit(self) -> None:
         self._bus.calls.append(("commit", None))
         if self._bus.raise_on_commit:
             raise RuntimeError("fake-durable-commit-failure")
         self._bus.events.append("durable_commit")
+        # Oracle tie (adversarial-verify hardening): snapshot the rows THIS commit carried,
+        # so P-AUDIT-1 can assert the pre-provider commit contains the attempt row itself —
+        # a contrived impl committing an EMPTY session pre-provider and adding the row
+        # afterwards would otherwise satisfy the decomposed assertions.
+        self._bus.commit_snapshots.append(list(self._pending))
+        self._pending.clear()
 
     def close(self) -> None:
         self._bus.calls.append(("close", None))
@@ -160,6 +168,7 @@ class _SpyBus:
         self.events: list[str] = []
         self.calls: list[tuple[str, Any]] = []
         self.rows: list[Any] = []
+        self.commit_snapshots: list[list[Any]] = []
         self.raise_on_commit = raise_on_commit
         self.factory_invoked = False
 
@@ -229,6 +238,15 @@ def test_external_attempt_row_committed_before_provider_call(
     assert len(attempt_rows) >= 1, (
         f"mode={mode!r} provider_raises={provider_raises!r}: expected >=1 committed "
         f"'attempt' row (present even on provider failure); rows={bus.rows!r}"
+    )
+
+    # Oracle tie (adversarial-verify hardening): the FIRST commit — the one proven above to
+    # precede the provider — must itself carry the attempt row, not an empty session.
+    assert bus.commit_snapshots, "a durable_commit event exists but no commit snapshot"
+    assert any(getattr(r, "phase", None) == "attempt" for r in bus.commit_snapshots[0]), (
+        f"mode={mode!r}: the pre-provider commit carried no 'attempt' row "
+        f"(snapshot={bus.commit_snapshots[0]!r}) — the attempt row must be IN the commit "
+        f"that precedes the provider call, not a later one."
     )
 
 
@@ -421,6 +439,78 @@ def test_fingerprint_never_raises_on_hostile_content(tag: str) -> None:
     assert re.fullmatch(r"[0-9a-f]{64}", fingerprint), (
         f"fingerprint on hostile content must still be 64-char hex; got {fingerprint!r}"
     )
+
+
+# ── P-AUDIT-4 totality clause (adversarial-verify fix round) ───────────────────────────
+# Four EXECUTED raise classes refuted the original "default=str never raises" claim:
+# a lone UTF-16 surrogate (WIRE-REACHABLE via stdlib json.loads escape handling + pydantic
+# `content: str` pass-through → was an HTTP 500 on /v1), a circular structure, a leaf whose
+# __str__ raises, and mixed-type dict keys under sort_keys. The fingerprint must be TOTAL.
+
+_LONE_SURROGATE_CONTENT = "hi \ud800 there"
+
+
+class _RaisingStr:
+    """A leaf whose ``__str__``/``__repr__`` raise — ``default=str`` propagates the raise."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("hostile __str__")
+
+    __repr__ = __str__  # type: ignore[assignment]
+
+
+def _hostile_payload(tag: str) -> list[dict[Any, Any]]:
+    if tag == "lone-surrogate":
+        return [{"role": "user", "content": _LONE_SURROGATE_CONTENT}]
+    if tag == "circular":
+        msg: dict[Any, Any] = {"role": "user"}
+        msg["content"] = msg
+        return [msg]
+    if tag == "raising-str":
+        return [{"role": "user", "content": _RaisingStr()}]
+    return [{1: "a", "role": "user", "content": "x"}]  # mixed-type-keys
+
+
+@pytest.mark.parametrize("tag", ["lone-surrogate", "circular", "raising-str", "mixed-type-keys"])
+def test_fingerprint_total_on_executed_hostile_classes(tag: str) -> None:
+    """P-AUDIT-4 (totality): every executed raise class yields a 64-hex digest, never a
+    raise, and equal hostile input ⇒ equal digest (deterministic within its domain).
+    """
+    digest = egress_audit.fingerprint_messages(_hostile_payload(tag))
+    assert re.fullmatch(r"[0-9a-f]{64}", digest), (
+        f"tag={tag!r}: fingerprint must be total (64-hex), got {digest!r}"
+    )
+    assert digest == egress_audit.fingerprint_messages(_hostile_payload(tag)), (
+        f"tag={tag!r}: fingerprint must be deterministic for equal hostile input"
+    )
+
+
+@pytest.mark.parametrize("mode", [LLMMode.LOCAL, LLMMode.OPENROUTER])
+def test_hostile_payload_never_escapes_chat_untyped(mode: LLMMode) -> None:
+    """Adversarial-verify fix round: with the durable flag ON, a hostile (lone-surrogate)
+    payload must NOT raise out of ``chat()`` — the provider is still called exactly once and
+    the committed attempt row carries a 64-hex fingerprint. Refutes the executed /v1 HTTP-500
+    (raw ``UnicodeEncodeError`` escaping the typed-error contract) and proves LOCAL
+    best-effort (SF-5) is not broken by the audit side.
+    """
+    bus = _SpyBus()
+    provider_calls: list[Any] = []
+
+    def _provider_spy(*args: Any, **kwargs: Any) -> Any:
+        provider_calls.append((args, kwargs))
+        return _make_fake_response()
+
+    settings = _make_test_settings(llm_mode=mode.value)
+    gateway = LLMGateway(settings, session_factory=bus.factory)
+    messages = [{"role": "user", "content": _LONE_SURROGATE_CONTENT}]
+
+    with patch("litellm.completion", side_effect=_provider_spy):
+        gateway.chat(messages=messages, mode=mode)  # must NOT raise
+
+    assert len(provider_calls) == 1, f"mode={mode!r}: provider must be called exactly once"
+    attempt_rows = [row for row in bus.rows if row.phase == "attempt"]
+    assert len(attempt_rows) == 1
+    assert re.fullmatch(r"[0-9a-f]{64}", attempt_rows[0].content_fingerprint)
 
 
 # ── P-AUDIT-5 — durable fail-closed asymmetry ──────────────────────────────────────────

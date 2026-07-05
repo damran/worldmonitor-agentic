@@ -82,11 +82,11 @@ Two row kinds per crossing (`phase`), correlated by `call_id`. Model + migration
 | `call_id` | `String(64)`, indexed | no | shared `uuid4()` correlating the attempt + completed rows of one crossing |
 | `phase` | `String(16)`, indexed | no | `"attempt"` (pre-call) \| `"completed"` (post-call) |
 | `mode` | `String(32)` | no | `EgressRecord.mode.value` |
-| `confidentiality` | `String(64)` | no | `EgressRecord.confidentiality` |
+| `confidentiality` | `Text` | no | `EgressRecord.confidentiality` — Text, NOT a bounded String: the registry labels are prose (CLAUDE_HEADLESS's is 153 chars); a bounded column truncation-refuses the fail-closed external write and bricks the mode (adversarial-verify HIGH, fixed) |
 | `target_host` | `String(255)` | no | `EgressRecord.target_host` |
 | `data_left_perimeter` | `Boolean` | no | `EgressRecord.data_left_perimeter` |
 | `model` | `String(255)` | no | resolved model string |
-| `caller_tag` | `String(255)` | no | `EgressRecord.caller_tag` (honest caller, L1-b) |
+| `caller_tag` | `Text` | no | `EgressRecord.caller_tag` (honest caller, L1-b) — Text: an unbounded JWT subject must never truncation-refuse the audit write |
 | `content_fingerprint` | `String(64)` | **yes** | attempt rows: `sha256` hex of the canonical messages; NULL on completed rows |
 | `entity_manifest` | `JSONB` | **yes** | attempt rows: caller-declared `list[str]` of canonical ids, or NULL (not declared / wire callers); NULL on completed rows |
 | `prompt_tokens` | `Integer` | **yes** | completed rows: `usage.prompt_tokens`; NULL on attempt rows |
@@ -117,11 +117,18 @@ Sibling to `egress_log.py`; keeps `egress_log.py` byte-unchanged (FROZEN). Modul
 
 ```
 def fingerprint_messages(messages: list[dict[str, Any]]) -> str:
-    # Canonical-JSON (repo idiom) → sha256 → 64-char hex. Stdlib only; MUST NOT raise on hostile
-    # content (default=str so any exotic value serializes deterministically).
-    #   canonical = json.dumps(messages, sort_keys=True, separators=(",", ":"),
-    #                          ensure_ascii=False, default=str)
-    #   return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    # Canonical-JSON (repo idiom) → sha256 → 64-char hex. Stdlib only; TOTAL — never raises
+    # (adversarial-verify fix round): default=str for unserializable leaf VALUES; the digest
+    # encodes via .encode("utf-8", "surrogatepass") (lone UTF-16 surrogates are WIRE-reachable
+    # via stdlib json.loads escapes and must not raise UnicodeEncodeError); any remaining
+    # serialization failure (mixed-type keys TypeError / circular ValueError / raising __str__)
+    # falls back to a coarse deterministic type-level sentinel before hashing.
+    #   try: canonical = json.dumps(messages, sort_keys=True, separators=(",", ":"),
+    #                               ensure_ascii=False, default=str)
+    #   except Exception: canonical = f"unserializable:{type(messages).__qualname__}:{len}"
+    #   return hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()
+    # Determinism domain, honest: byte-deterministic for JSON-shaped payloads (the /v1 wire
+    # case); type-level only for non-serializable in-process payloads.
 
 def build_attempt_row(call_id: str, record: EgressRecord, fingerprint: str,
                       entity_ids: list[str] | None) -> LlmEgressRecord:
@@ -188,22 +195,30 @@ record  = EgressRecord(..., caller_tag=caller_tag, usage=None)   # unchanged fie
 if self._settings.llm_egress_log_enabled:
     egress_log.emit(record)
 
-# ── F2 durable PRE-call ("attempt") row ──────────────────────────────────────────────
+# ── F2 durable PRE-call ("attempt") row. The row BUILD (incl. the fingerprint) sits
+# INSIDE the per-mode guarded blocks (adversarial-verify fix round): an audit-side failure
+# follows the same policy as the write — external ⇒ typed LLMGatewayError fail-closed,
+# LOCAL ⇒ best-effort warn. Previously the build sat outside and a hostile-payload
+# serialization error escaped chat() as a raw untyped exception (HTTP 500 on /v1).
 if durable_on and self._session_factory is not None:
-    attempt = egress_audit.build_attempt_row(
-        call_id, record, egress_audit.fingerprint_messages(messages), entity_ids
-    )
     if external:
-        # fail-closed: commit MUST succeed BEFORE the provider call
+        # fail-closed: build + commit MUST succeed BEFORE the provider call
         try:
+            attempt = egress_audit.build_attempt_row(
+                call_id, record, egress_audit.fingerprint_messages(messages), entity_ids
+            )
             egress_audit.write_row(self._session_factory, attempt)
         except Exception as exc:
             raise LLMGatewayError(
                 "external LLM egress refused: durable audit write failed — no durable audit, no egress"
             ) from exc
     else:
-        # LOCAL best-effort: a sink failure must not break a confidential on-perimeter call
+        # LOCAL best-effort: an audit-side failure (build OR write) must not break a
+        # confidential on-perimeter call
         try:
+            attempt = egress_audit.build_attempt_row(
+                call_id, record, egress_audit.fingerprint_messages(messages), entity_ids
+            )
             egress_audit.write_row(self._session_factory, attempt)
         except Exception:
             logger.warning("durable egress audit write failed (LOCAL, best-effort)", exc_info=True)

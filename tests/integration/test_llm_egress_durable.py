@@ -55,7 +55,7 @@ from sqlalchemy.orm import sessionmaker
 from worldmonitor.db.engine import create_all, make_engine, session_factory
 from worldmonitor.db.models import LlmEgressRecord
 from worldmonitor.llm.gateway import LLMGateway, LLMGatewayError
-from worldmonitor.llm.modes import LLMMode
+from worldmonitor.llm.modes import REGISTRY, LLMMode
 from worldmonitor.settings import Settings
 
 pytestmark = pytest.mark.integration
@@ -337,3 +337,52 @@ def test_external_call_with_unreachable_db_refuses_and_writes_nothing(postgres_d
 
     bad_engine.dispose()
     engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# (e) EVERY registry mode round-trips the REAL durable write (adversarial-verify fix round)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", list(LLMMode))
+def test_durable_write_succeeds_for_every_registry_mode(postgres_dsn: str, mode: LLMMode) -> None:
+    """Adversarial-verify fix round (HIGH): CLAUDE_HEADLESS's 153-char confidentiality label
+    overflowed the original ``VARCHAR(64)`` column — ``StringDataRightTruncation`` on the
+    attempt INSERT ⇒ the fail-closed path refused EVERY headless call whenever the durable
+    flag was on, and the audit could never record that mode. Spy sessions (property file) and
+    SQLite (unit file) cannot see VARCHAR enforcement, so this drives the REAL durable write
+    on REAL Postgres for EVERY registry mode and asserts both rows persist with the FULL,
+    untruncated registry label.
+    """
+    engine = make_engine(postgres_dsn)
+    try:
+        create_all(engine)
+        sessions = session_factory(engine)
+
+        settings = _make_test_settings()
+        gateway = LLMGateway(settings, session_factory=sessions)
+
+        with patch("litellm.completion", return_value=_make_fake_response()):
+            gateway.chat(
+                messages=[{"role": "user", "content": f"registry-mode probe: {mode.value}"}],
+                mode=mode,
+            )
+
+        with sessions() as session:
+            rows = list(
+                session.execute(
+                    select(LlmEgressRecord).where(LlmEgressRecord.mode == mode.value)
+                ).scalars()
+            )
+
+        assert len(rows) == 2, (
+            f"mode={mode.value!r}: expected 2 persisted rows (attempt + completed); got "
+            f"{len(rows)} — a truncation-refused durable write bricks this mode entirely."
+        )
+        for row in rows:
+            assert row.confidentiality == REGISTRY[mode].confidentiality, (
+                f"mode={mode.value!r}: persisted confidentiality label must be the FULL "
+                f"registry label ({len(REGISTRY[mode].confidentiality)} chars), untruncated."
+            )
+    finally:
+        engine.dispose()

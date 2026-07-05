@@ -468,11 +468,15 @@ class LlmEgressRecord(Base):
     # "attempt" (pre-call) | "completed" (post-call)
     phase: Mapped[str] = mapped_column(String(16), index=True)
     mode: Mapped[str] = mapped_column(String(32))
-    confidentiality: Mapped[str] = mapped_column(String(64))
+    # Text, not a bounded String: the ADR-0091 registry's confidentiality LABELS are prose
+    # (CLAUDE_HEADLESS's is 153 chars) and caller_tag carries an unbounded JWT subject —
+    # a bounded column would truncation-refuse the fail-closed external write and brick a
+    # whole mode (adversarial-verify fix round, ADR 0105 §Adversarial-verification findings).
+    confidentiality: Mapped[str] = mapped_column(Text)
     target_host: Mapped[str] = mapped_column(String(255))
     data_left_perimeter: Mapped[bool] = mapped_column(Boolean)
     model: Mapped[str] = mapped_column(String(255))
-    caller_tag: Mapped[str] = mapped_column(String(255))
+    caller_tag: Mapped[str] = mapped_column(Text)
     # Attempt-row columns — NULL on a completed row.
     content_fingerprint: Mapped[str | None] = mapped_column(String(64), default=None)
     entity_manifest: Mapped[list[str] | None] = mapped_column(JSONB, default=None)

@@ -245,6 +245,48 @@ diff: `person_affecting: false`, `human_cosign: n/a`. This is **not** a promisso
 is no deferred person-affecting behaviour hiding behind F2; the person-affecting egress *policy* fork
 (L2) is closed as out-of-scope per F1, not postponed.
 
+## Adversarial-verification findings (5-lens audit, 2026-07-05 — fix round applied pre-merge)
+
+A perspective-diverse adversarial review (fail-closed-bypass / leak+append-only / dormancy+L1 /
+test-integrity / spine+governance) ran against the built branch, alongside an independent checker
+that reproduced every §7 invariant (PASS). The lenses produced **executed** proofs on real Postgres
+and a real FastAPI client — the fifth consecutive gate where this pattern caught defects the test
+suite dodged. All fixed in-branch before merge:
+
+- **FIXED (HIGH — mode-bricking column bound).** `llm_egress.confidentiality` was `VARCHAR(64)` but
+  the ADR-0091 registry's CLAUDE_HEADLESS confidentiality label is 153 chars — the attempt INSERT
+  raised `StringDataRightTruncation`, the fail-closed path (correctly) refused, and **every**
+  CLAUDE_HEADLESS crossing was refused whenever durable auditing was on (executed proof). Escaped
+  the suite because property tests use spies, unit tests run SQLite, and the Postgres integration
+  cases used OPENROUTER only. Fix: `confidentiality` + `caller_tag` (unbounded JWT subject) →
+  `Text` in model + migration `0011` (amended in-branch — unmerged, no shipped history rewritten);
+  new Postgres integration test drives the REAL durable write for **every** registry mode and
+  asserts the full untruncated label round-trips.
+- **FIXED (HIGH — fingerprint was not total; raw escape past the typed-error contract).**
+  `fingerprint_messages` raised on four executed hostile classes — a lone UTF-16 surrogate
+  (**wire-reachable**: stdlib `json.loads` accepts the `\ud800` escape, pydantic `content: str`
+  passes it through ⇒ executed HTTP 500 on `/v1`), a circular structure, a leaf whose `__str__`
+  raises, and mixed-type dict keys under `sort_keys` — and the build call sat OUTSIDE the guarded
+  blocks, so the raw untyped exception escaped `chat()` (breaking the typed-error contract and, on
+  LOCAL, the SF-5 best-effort promise). Fix: the fingerprint is now **total** (`surrogatepass`
+  encoding + a coarse deterministic type-level sentinel fallback; determinism domain documented
+  honestly — byte-deterministic for JSON-shaped wire payloads, type-level otherwise), and the row
+  build moved INSIDE the per-mode guarded blocks. New tests: the four executed classes as
+  parametrized totality cases + a gateway-level no-untyped-escape test (provider still called,
+  fingerprint still 64-hex).
+- **FIXED (LOW — silent LOCAL misconfiguration).** Durable-enabled-but-unwired was loud for
+  external (fail-closed refuse) yet silent for LOCAL — one construction-time warning added.
+- **FIXED (LOW — P-AUDIT-1 oracle decomposition).** The ordering oracle never tied the
+  pre-provider commit to the attempt row itself (a contrived commit-empty-then-add-later impl
+  passed); the spy session now snapshots each commit's rows and P-AUDIT-1 asserts the
+  pre-provider commit carries the attempt row.
+- **Recorded, not fixed (LOW observations):** v1 "tamper-evidence" is writer-boundary posture only
+  (no DB-level `REVOKE UPDATE/DELETE`/trigger; the SF-6 hash-chain deferral stands — ops docs may
+  add a grant-level note when durable auditing is first enabled); the migration drift guard does
+  not compare `server_default` (pre-existing gap, later hardening); `default=str` reprs embed
+  memory addresses for exotic in-process payloads (documented as the determinism domain, not
+  "fixed" — the wire case is unaffected).
+
 ## Alternatives considered
 
 - **Keep the audit on stdlib logging only.** Rejected: ephemeral. Under F1 = advisory-discretion the

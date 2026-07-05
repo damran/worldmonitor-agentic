@@ -32,23 +32,42 @@ from worldmonitor.llm.egress_log import EgressRecord
 
 
 def fingerprint_messages(messages: list[dict[str, Any]]) -> str:
-    """A deterministic sha256 hex digest over the canonicalized outbound ``messages``.
+    """A sha256 hex digest over the canonicalized outbound ``messages`` — TOTAL: never raises.
 
     Uses the repo's existing ``sort_keys=True`` canonicalization idiom (``provenance/model.py``,
-    ``backup.py``) so the digest is key-order-insensitive and content-sensitive.
-    ``default=str`` means a non-JSON-serializable value is stringified rather than raising —
-    the fingerprint MUST NOT raise on hostile content. Stdlib only, no new dependency.
+    ``backup.py``) so the digest is key-order-insensitive and content-sensitive. Totality over
+    hostile payloads (adversarial-verify fix round, ADR 0105):
+
+    * ``default=str`` stringifies a non-JSON-serializable leaf VALUE;
+    * ``"surrogatepass"`` encodes lone UTF-16 surrogates deterministically instead of raising
+      ``UnicodeEncodeError`` — lone surrogates are wire-reachable via stdlib ``json.loads``
+      escape handling (``"\\ud800"``) and pydantic ``content: str`` passes them through;
+    * any remaining serialization failure (non-str dict keys / mixed-key ``sort_keys``
+      ``TypeError``, circular-reference ``ValueError``, a leaf whose ``__str__`` raises) falls
+      back to a coarse, deterministic type-level sentinel — content identity is unattainable
+      for such payloads anyway, and an audit fingerprint must never break the choke point.
+
+    Determinism domain, stated honestly: byte-deterministic across processes for JSON-shaped
+    payloads (the ``/v1`` wire case). For non-serializable in-process payloads, ``default=str``
+    reprs may embed memory addresses, so those digests identify the call, not the content.
 
     NEVER stores ``messages`` itself — only this fixed-length 64-char hex digest.
     """
-    canonical = json.dumps(
-        messages,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        default=str,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    try:
+        canonical = json.dumps(
+            messages,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        )
+    except Exception:  # totality: hostile keys / cycles / raising reprs (see docstring)
+        try:
+            size = str(len(messages))
+        except Exception:
+            size = "?"
+        canonical = f"unserializable:{type(messages).__qualname__}:{size}"
+    return hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def build_attempt_row(

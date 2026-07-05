@@ -79,6 +79,14 @@ class LLMGateway:
         # Durable-audit DB seam (ADR 0105 / Gate F2): a sessionmaker injected at construction.
         # Default None preserves every existing (pre-F2) gateway construction unchanged.
         self._session_factory = session_factory
+        # Observability (adversarial-verify fix round): durable-enabled-but-unwired is LOUD
+        # for external calls (fail-closed refuse) yet would be SILENT for LOCAL — one warning
+        # at construction makes a mis-wired LOCAL-only process visible in the logs.
+        if settings.llm_egress_durable_enabled and session_factory is None:
+            logger.warning(
+                "llm_egress_durable_enabled=True but no session_factory is wired — durable "
+                "egress rows will NOT be written (external calls will refuse fail-closed)"
+            )
         # Register the claude shim ONLY when CLAUDE_HEADLESS mode is active (off by default).
         if self._active_mode is LLMMode.CLAUDE_HEADLESS:
             self._register_claude_shim()
@@ -175,17 +183,21 @@ class LLMGateway:
         if self._settings.llm_egress_log_enabled:
             egress_log.emit(record)
 
-        # ── ADR 0105 / Gate F2 — durable PRE-call ("attempt") row ────────────────────────
+        # ── ADR 0105 / Gate F2 — durable PRE-call ("attempt") row. The row BUILD (incl.
+        # the fingerprint) sits INSIDE the guarded blocks so an audit-side failure follows
+        # the same per-mode policy as the write itself: external ⇒ typed fail-closed
+        # refusal, LOCAL ⇒ best-effort (SF-5). An escape here would be a raw untyped
+        # exception past the gateway contract (adversarial-verify fix round, ADR 0105).
         if durable_on and self._session_factory is not None:
-            attempt_row = egress_audit.build_attempt_row(
-                call_id,
-                record,
-                egress_audit.fingerprint_messages(messages),
-                entity_ids,
-            )
             if external:
                 # Fail-closed: the commit MUST succeed BEFORE the provider call.
                 try:
+                    attempt_row = egress_audit.build_attempt_row(
+                        call_id,
+                        record,
+                        egress_audit.fingerprint_messages(messages),
+                        entity_ids,
+                    )
                     egress_audit.write_row(self._session_factory, attempt_row)
                 except Exception as exc:
                     raise LLMGatewayError(
@@ -196,6 +208,12 @@ class LLMGateway:
                 # LOCAL best-effort: a sink failure must not break a confidential,
                 # on-perimeter call (SF-5, the fail-closed asymmetry).
                 try:
+                    attempt_row = egress_audit.build_attempt_row(
+                        call_id,
+                        record,
+                        egress_audit.fingerprint_messages(messages),
+                        entity_ids,
+                    )
                     egress_audit.write_row(self._session_factory, attempt_row)
                 except Exception:
                     logger.warning(
