@@ -1,19 +1,21 @@
 # 0106 — Context-claim capture lane (Gate P1): bank anchor/enricher evidence into the SoR spine as provenance-stamped claims, and make the fold reproduce anchors
 
-- **Status:** PROPOSED (2026-07-05)
+- **Status:** ACCEPTED (2026-07-11; proposed 2026-07-05)
 - **Date:** 2026-07-05
 - **human_fork:** false
 - **person_affecting:** false
-- **human_cosign:** PENDING — Gate P1 user cosign (person_affecting:false waiver on the `resolution/**`
-  diff, per ADR 0097 §4/§5). P1 is the **additive capture of evidence the existing, unchanged merge /
-  sign-off path already produced** (the 0099/0100 precedent): it adds one append-only `context_claim`
-  table + INSERT-only writers + a fold read-side + a dead-code guard fix. It changes **no** ER
-  threshold, **no** clustering/merge/park outcome, **no** individual-affecting score, **no** erasure
-  path, **no** gold label, and **no** live graph write. Because the diff nonetheless edits
-  `resolution/**` (`statements.py`, `pipeline.py`, `signoff.py`, `projector.py`, `divergence.py`) while
-  self-tagging non-sensitive, ADR 0097 requires the explicit human co-sign carried here. The main loop
-  asks the user **after** the adversarial verify+fix round (with the fixed findings disclosed) and then
-  stamps the dated line — the 3a-ii-B pattern (a completed, dated cosign, never a promissory one).
+- **human_cosign:** Mithat 2026-07-11 — post-verify cosign, findings disclosed (see §Verification
+  record); the one MAJOR finding was explicitly decided by the user as **defer to P2/3b**. Gate P1 user
+  cosign (person_affecting:false waiver on the `resolution/**` diff, per ADR 0097 §4/§5). P1 is the
+  **additive capture of evidence the existing, unchanged merge / sign-off path already produced** (the
+  0099/0100 precedent): it adds one append-only `context_claim` table + INSERT-only writers + a fold
+  read-side + a dead-code guard fix. It changes **no** ER threshold, **no** clustering/merge/park
+  outcome, **no** individual-affecting score, **no** erasure path, **no** gold label, and **no** live
+  graph write. Because the diff nonetheless edits `resolution/**` (`statements.py`, `pipeline.py`,
+  `signoff.py`, `projector.py`, `divergence.py`) while self-tagging non-sensitive, ADR 0097 requires
+  the explicit human co-sign carried here. The user was asked **after** the adversarial verify+fix
+  round (fixed findings disclosed) and this dated line was stamped then — the 3a-ii-B pattern (a
+  completed, dated cosign, never a promissory one).
 - **Realises:** the **E2 capture** blocking-3b-prerequisite of the Fable log-capture consult
   (`docs/fable-review/80_LOG_CAPTURE_CONSULT.md` §4, §7-1) and pre-cutover gate **P1** of the sequenced
   roadmap (`docs/fable-review/81_PRECUTOVER_GATE_SEQUENCE.md`). **Builds on:** ADR 0099 (the append-only
@@ -248,6 +250,41 @@ redesign); or the Sub-fork A set-valued switch.
   holds unchanged. The new rows commit atomically with the existing spine writes and roll back together.
 - **The P2 (erasure) scrub can reach anchor claims by dataset** (per-member `dataset` attribution), and
   the P3 (sign-off spine) gate finds the anchor capture already wired at `approve()`.
+
+## Verification record (2026-07-11)
+
+Nine-agent verification (4 INV-reproduction checkers + 5 adversarial lenses) over the parked diff,
+followed by a checker-verified fix round. **All 13 `gate.scope` invariants reproduced PASS.** Fix round
+(decision-independent): P-CTX-7 supersession regression pin (a claim banked under a later-superseded
+canonical_id lands its anchor on the survivor under both fold modes, zero orphan nodes); the DB-level
+append-only detector tightened to a table-qualified token match with a self-check test and a genuinely
+watermark-advancing second `project()`; `set_anchor_claims` restored the spec §2.a.3 `isinstance(str)`
+guard; §5's import wording corrected (transitive `followthemoney`→SQLAlchemy pure-library load
+acknowledged).
+
+**Known bound (MAJOR, found by the verify wave; user-decided 2026-07-11: DEFER to P2/3b).** Under a
+**cross-batch anchor conflict** (a survivor anchored `k=v1` in an earlier incremental fold receives a
+conflicting `k=v2` claim in a later batch), the incremental fold correctly re-derives the
+omit-on-conflict (`get_anchors` returns no `k`) but the additive write path (`SET n += props`,
+`graph/ftmg_fork/transform.py` — deliberately additive so a thin re-emit cannot clobber prior state)
+**cannot retract** the already-projected bare key: the projected node keeps `k=v1` while a fresh
+`full_rebuild` correctly omits it. So **INV-FOLD-INCR-ANCHOR holds in the no-cross-batch-conflict
+regime**; `full_rebuild` (the DR path) is correct unconditionally; the projector is dormant/non-live in
+P1. Deterministic repro recorded in the gate transcript. **Owner:** anchor-key retraction is the
+projector's first *delete* capability — the same capability Gate P2 already owns (ADR 0107 §live-removal
+option b: seq-bearing erasure events the projector consumes with delete capability); P2's design decides
+whether touched-survivor anchor retraction rides that mechanism or a targeted
+`REMOVE`-omitted-anchor-keys step. **Safety net:** Gate 3b's cutover precondition (guard green over N
+cycles, exclusion surface audited) fires before anything irreversible; the bare-key guard exclusion
+(pick-semantics, §Sub-fork A) is re-examined there with this bound on record. **Revisit trigger:** P2's
+ADR lands, or any pre-cutover corpus exhibits a real cross-batch anchor conflict.
+
+**Minor findings deferred to P2 with owners (recorded so P2's planner sees them):** (i) the capture
+writer's `dataset = prov.source_id or member.id or ""` fallback means an empty-but-present `source_id`
+writes a claim reachable only by `member.id`, not by source — the P2 erasure scrub must not assume
+`dataset == source_id`, or P2 tightens the skip-guard to require a non-empty `source_id`; (ii) neither
+`context_claim.dataset` nor `statement.dataset` carries an index — the P2 `WHERE dataset = ?` scrub adds
+one when it lands (not needed while the lanes are dormant).
 
 ## Alternatives rejected
 
