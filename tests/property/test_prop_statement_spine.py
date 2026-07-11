@@ -29,6 +29,7 @@ import copy
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 import strategies as wm
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
@@ -122,6 +123,7 @@ def _oracle_dataset(member: Any) -> str:
 # ===========================================================================
 
 
+@pytest.mark.integration
 @given(
     entities=st.lists(
         wm.source_tagged_entity(),
@@ -159,87 +161,92 @@ def test_p_stmt_1_lossless_projection(entities: list, postgres_dsn: str) -> None
     by_id = {e.id: e for e in entities if e.id is not None}
 
     engine = make_engine(postgres_dsn)
-    Base.metadata.create_all(engine)  # idempotent; adds new tables when builder adds models
+    try:
+        Base.metadata.create_all(engine)  # idempotent; adds new tables when builder adds models
 
-    with Session(engine) as session:
-        record_statements(session, cluster, by_id)
-        session.flush()  # visible within this transaction, NEVER committed
+        with Session(engine) as session:
+            record_statements(session, cluster, by_id)
+            session.flush()  # visible within this transaction, NEVER committed
 
-        rows = list(
-            session.execute(
-                select(StatementRecord).where(StatementRecord.canonical_id == cluster.canonical_id)
-            ).scalars()
-        )
+            rows = list(
+                session.execute(
+                    select(StatementRecord).where(
+                        StatementRecord.canonical_id == cluster.canonical_id
+                    )
+                ).scalars()
+            )
 
-        # ------ INDEPENDENT ORACLE — never calls fuse_statement_rows ------
-        expected_tuples: set[tuple[str, str, str, str, str, str]] = set()
-        for mid in cluster.member_ids:
-            if mid not in by_id:
-                continue
-            m = by_id[mid]
-            src = _oracle_dataset(m)
-            for prop in m.properties:
-                if prop == "id":
-                    continue  # the "id" pseudo-property MUST be excluded
-                for value in m.get(prop):
-                    expected_tuples.add(
-                        (
-                            cluster.canonical_id,
-                            mid,
-                            m.schema.name,
-                            prop,
-                            str(value),
-                            src,
+            # ------ INDEPENDENT ORACLE — never calls fuse_statement_rows ------
+            expected_tuples: set[tuple[str, str, str, str, str, str]] = set()
+            for mid in cluster.member_ids:
+                if mid not in by_id:
+                    continue
+                m = by_id[mid]
+                src = _oracle_dataset(m)
+                for prop in m.properties:
+                    if prop == "id":
+                        continue  # the "id" pseudo-property MUST be excluded
+                    for value in m.get(prop):
+                        expected_tuples.add(
+                            (
+                                cluster.canonical_id,
+                                mid,
+                                m.schema.name,
+                                prop,
+                                str(value),
+                                src,
+                            )
                         )
+
+            actual_tuples = {
+                (r.canonical_id, r.entity_id, r.schema, r.prop, r.value, r.dataset) for r in rows
+            }
+
+            assert actual_tuples == expected_tuples, (
+                f"P-STMT-1 LOSSLESS PROJECTION VIOLATED for cluster {cluster.canonical_id!r}\n"
+                f"  expected {len(expected_tuples)} claim tuple(s), got {len(actual_tuples)}\n"
+                f"  invented (in actual, not in oracle): {actual_tuples - expected_tuples}\n"
+                f"  dropped  (in oracle, not in actual): {expected_tuples - actual_tuples}"
+            )
+
+            # Explicit id-pseudo-statement exclusion guard
+            id_rows = [r for r in rows if r.prop == "id"]
+            assert not id_rows, (
+                f"P-STMT-1: {len(id_rows)} 'id' pseudo-statement row(s) found — "
+                "the id pseudo-property MUST be excluded from the statement log (G1)"
+            )
+
+            # Per-row G1 provenance: reliability / retrieved_at / raw_pointer
+            # must match the member's Provenance
+            for row in rows:
+                mid = row.entity_id
+                if mid not in by_id:
+                    continue
+                member = by_id[mid]
+                prov = get_provenance(member)
+                if prov is not None:
+                    assert row.reliability == prov.reliability, (
+                        f"P-STMT-1 G1: row.reliability={row.reliability!r} != "
+                        f"prov.reliability={prov.reliability!r} for member {mid!r}"
+                    )
+                    assert row.retrieved_at == prov.retrieved_at, (
+                        f"P-STMT-1 G1: row.retrieved_at={row.retrieved_at!r} != "
+                        f"prov.retrieved_at={prov.retrieved_at!r} for member {mid!r}"
+                    )
+                    assert row.raw_pointer == prov.source_record, (
+                        f"P-STMT-1 G1: row.raw_pointer={row.raw_pointer!r} != "
+                        f"prov.source_record={prov.source_record!r} for member {mid!r}"
+                    )
+                else:
+                    # Unstamped member: reliability must be NULL (no invented provenance)
+                    assert row.reliability is None, (
+                        f"P-STMT-1 G1: unstamped member {mid!r} must have NULL reliability, "
+                        f"got {row.reliability!r} — no invented provenance (G1)"
                     )
 
-        actual_tuples = {
-            (r.canonical_id, r.entity_id, r.schema, r.prop, r.value, r.dataset) for r in rows
-        }
-
-        assert actual_tuples == expected_tuples, (
-            f"P-STMT-1 LOSSLESS PROJECTION VIOLATED for cluster {cluster.canonical_id!r}\n"
-            f"  expected {len(expected_tuples)} claim tuple(s), got {len(actual_tuples)}\n"
-            f"  invented (in actual, not in oracle): {actual_tuples - expected_tuples}\n"
-            f"  dropped  (in oracle, not in actual): {expected_tuples - actual_tuples}"
-        )
-
-        # Explicit id-pseudo-statement exclusion guard
-        id_rows = [r for r in rows if r.prop == "id"]
-        assert not id_rows, (
-            f"P-STMT-1: {len(id_rows)} 'id' pseudo-statement row(s) found — "
-            "the id pseudo-property MUST be excluded from the statement log (G1)"
-        )
-
-        # Per-row G1 provenance: reliability / retrieved_at / raw_pointer
-        # must match the member's Provenance
-        for row in rows:
-            mid = row.entity_id
-            if mid not in by_id:
-                continue
-            member = by_id[mid]
-            prov = get_provenance(member)
-            if prov is not None:
-                assert row.reliability == prov.reliability, (
-                    f"P-STMT-1 G1: row.reliability={row.reliability!r} != "
-                    f"prov.reliability={prov.reliability!r} for member {mid!r}"
-                )
-                assert row.retrieved_at == prov.retrieved_at, (
-                    f"P-STMT-1 G1: row.retrieved_at={row.retrieved_at!r} != "
-                    f"prov.retrieved_at={prov.retrieved_at!r} for member {mid!r}"
-                )
-                assert row.raw_pointer == prov.source_record, (
-                    f"P-STMT-1 G1: row.raw_pointer={row.raw_pointer!r} != "
-                    f"prov.source_record={prov.source_record!r} for member {mid!r}"
-                )
-            else:
-                # Unstamped member: reliability must be NULL (no invented provenance)
-                assert row.reliability is None, (
-                    f"P-STMT-1 G1: unstamped member {mid!r} must have NULL reliability, "
-                    f"got {row.reliability!r} — no invented provenance (G1)"
-                )
-
-        session.rollback()  # ALWAYS rollback — this example never commits to the container
+            session.rollback()  # ALWAYS rollback — this example never commits to the container
+    finally:
+        engine.dispose()
 
 
 # ===========================================================================
