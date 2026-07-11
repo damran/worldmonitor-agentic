@@ -711,7 +711,10 @@ def _p_ctx_6_scenario(draw: st.DrawFn) -> tuple[int, dict[str, dict[str, Any]]]:
         stmt_batch = draw(st.integers(min_value=0, max_value=n_batches - 2))
         ctx_batch = draw(st.integers(min_value=stmt_batch + 1, max_value=n_batches - 1))
         field = draw(st.sampled_from(CANONICAL_ID_FIELDS))
-        value = draw(st.text(alphabet=_ALNUM, min_size=1, max_size=8))
+        # Survivor-ordinal prefix: two survivors must never draw the same anchor value —
+        # the graph's canonical-ID uniqueness constraints (shared container) reject the
+        # cross-survivor duplicate, which is a generator collision, not a fold property.
+        value = f"s{i}" + draw(st.text(alphabet=_ALNUM, min_size=1, max_size=8))
         plan[survivor] = {
             "stmt_batch": stmt_batch,
             "ctx_batch": ctx_batch,
