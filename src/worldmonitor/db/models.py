@@ -332,8 +332,9 @@ class StatementRecord(Base):
     prop: Mapped[str] = mapped_column(String(64))  # never "id" — excluded on write
     # Unbounded TEXT — hostile-data rule: no cast on free-form connector values
     value: Mapped[str] = mapped_column(Text)
-    # The member's Provenance.source_id (G1 source)
-    dataset: Mapped[str] = mapped_column(String(255))
+    # The member's Provenance.source_id (G1 source). Indexed (migration 0013 / ADR 0107 SF-1) —
+    # the P2 erasure scrub's primary reach predicate is `WHERE dataset = <erased source_id>`.
+    dataset: Mapped[str] = mapped_column(String(255), index=True)
     # G1 quad — nullable when the member was genuinely unstamped (no invented provenance)
     reliability: Mapped[str | None] = mapped_column(String(16), default=None)
     # ISO-8601 string — Provenance.retrieved_at; stored as string, no cast (hostile-data rule)
@@ -553,8 +554,9 @@ class ContextClaimRecord(Base):
     # Unbounded TEXT — hostile-data rule: no cast on free-form connector/enricher values
     value: Mapped[str] = mapped_column(Text)
     # The contributing member's Provenance.source_id (G1 source) — so the P2 erasure scrub
-    # reaches anchor claims by dataset
-    dataset: Mapped[str] = mapped_column(String(255))
+    # reaches anchor claims by dataset. Indexed (migration 0013 / ADR 0107 SF-1) — the scrub's
+    # primary reach predicate is `WHERE dataset = <erased source_id>`.
+    dataset: Mapped[str] = mapped_column(String(255), index=True)
     # "connector:map" for map-time anchors; "enricher:<name>@<version>" for the (not-yet-wired)
     # enricher interface. NOT NULL — mandatory provenance (the one departure from the statement
     # lane's nullable method column).

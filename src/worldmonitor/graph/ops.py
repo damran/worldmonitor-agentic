@@ -181,3 +181,58 @@ def erase_source_graph(neo4j: Neo4jClient, source_id: str) -> GraphErasureCounts
         props_retracted=props_retracted,
         edges_deleted=edges_deleted,
     )
+
+
+def set_node_values(
+    neo4j: Neo4jClient,
+    node_id: str,
+    *,
+    compared_props: dict[str, list[str]],
+    remove_anchor_keys: list[str],
+) -> None:
+    """Provenance-preserving value/anchor prune-to-fold writer (Gate P2 / ADR 0107, SF-4).
+
+    Reads the node's FULL current properties FIRST (mirrors :func:`erase_source_graph`'s
+    read-current-props-then-merge idiom above) and merges ``compared_props`` /
+    ``remove_anchor_keys`` into a COPY, then issues ONE full-property-replace ``SET n = $props``
+    — never a bare partial-map ``SET`` built only from the compared/anchor deltas, which would
+    silently wipe ``prov_source_id`` / ``prov_witnesses`` / ``id`` / ``caption`` / ``datasets``
+    (G1, plan-verify HIGH-1).
+
+    ``compared_props``: ``{prop: new_value_list}`` — a NON-EMPTY list REPLACES the property's
+    value set with the fold's row-granular result ("prune to match"); an EMPTY list REMOVEs the
+    property entirely (every value the node held for it was erased-source-only).
+
+    ``remove_anchor_keys``: bare ``CANONICAL_ID_FIELDS`` keys to REMOVE. REMOVE-only, by design
+    (plan-verify HIGH-2): every anchor carries a Neo4j ``UNIQUE`` constraint
+    (``graph/constraints.py``), so this writer never SETs a new/changed anchor value —
+    surfacing a previously omit-on-conflict value could collide with another node and abort the
+    erasure mid-transaction. A key absent from ``remove_anchor_keys`` is left untouched (no
+    gratuitous anchor rebuild).
+
+    A missing node (e.g. already ``DETACH DELETE``d by a sole-source :func:`erase_source_graph`
+    prune) is a silent no-op — nothing left to prune.
+    """
+    rows = neo4j.execute_read(
+        "MATCH (n:Entity {id: $id}) RETURN properties(n) AS props", id=node_id
+    )
+    if not rows:
+        return
+    current_props = rows[0]["props"]
+    if not isinstance(current_props, dict):
+        return
+
+    new_props: dict[str, Any] = dict(cast("dict[str, Any]", current_props))
+    for prop, values in compared_props.items():
+        if values:
+            new_props[prop] = list(values)
+        else:
+            new_props.pop(prop, None)
+    for key in remove_anchor_keys:
+        new_props.pop(key, None)
+
+    neo4j.execute_write(
+        "MATCH (n:Entity {id: $id}) SET n = $props",
+        id=node_id,
+        props=new_props,
+    )
