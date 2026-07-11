@@ -14,7 +14,16 @@ Covers spec §4's integration items:
     ``context_claim.seq`` consumed after ``project()``.
 (c) Append-only AT THE DB LEVEL: an SQLAlchemy ``before_cursor_execute`` listener captures
     every SQL statement issued across seed + resolve_pending + signoff.approve() + project();
-    none is an UPDATE/DELETE against ``context_claim``.
+    none is an UPDATE/DELETE against ``context_claim``. The detector is a TABLE-QUALIFIED
+    token match (``update context_claim`` / ``delete from context_claim``, case-insensitive) —
+    NOT a bare ``"context_claim" in stmt`` substring check, because
+    ``projection_checkpoint.last_context_claim_seq`` (a real, legitimate UPDATE target of
+    ``project()``'s checkpoint upsert) contains the literal substring ``"context_claim"`` in
+    its COLUMN name; a bare substring match would false-positive on that benign statement the
+    moment a second ``project()`` call in this file emits an UPDATE against
+    ``projection_checkpoint`` (test (b) already does — this file previously only called
+    ``project()`` once per test, so the false positive was LATENT, not triggered; the
+    tightened detector below is the fix pinned for equal-or-greater strength).
 (d) ``test_migrations.py``'s drift guard (``test_no_autogenerate_drift`` / the create_all-vs-
     alembic-head snapshot equality) stays green UNCHANGED — no new test needed here: once the
     builder's model (``db/models.py``) and migration ``0012`` agree byte-for-byte, that
@@ -36,6 +45,7 @@ All tests are RED at collection time: the module-level import of ``ContextClaimR
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -72,6 +82,23 @@ pytestmark = pytest.mark.integration
 
 _SRC = "src:ctx-lane-test"
 _RETRIEVED_AT = "2026-07-06T00:00:00Z"
+
+# (c) TABLE-QUALIFIED write-detector for the append-only-at-DB-level assertion.
+#
+# A bare ``"context_claim" in stmt.lower()`` substring check (the pre-tightening shape) also
+# matches ``projection_checkpoint.last_context_claim_seq`` — a real COLUMN name that contains
+# the literal substring "context_claim" — so an UPDATE against ``projection_checkpoint`` whose
+# SET clause merely touches that column (exactly what ``project()``'s checkpoint upsert emits,
+# ``resolution/projector.py``'s ``checkpoint.last_context_claim_seq = max_ctx_seq`` branch)
+# would be wrongly flagged as a write against the ``context_claim`` TABLE. This regex instead
+# requires the SQL verb to be immediately followed by the TABLE token itself (optionally
+# double-quoted): "update context_claim" / "delete from context_claim". Underscore is a `\w`
+# character, so this also naturally cannot match a substring embedded inside a longer
+# identifier like ``last_context_claim_seq`` (the verb + whitespace must precede the table name
+# directly — "set last_context_claim_seq" never satisfies "update\s+context_claim").
+_CONTEXT_CLAIM_WRITE_RE = re.compile(
+    r'\b(?:update|delete\s+from)\s+"?context_claim"?\b', re.IGNORECASE
+)
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +381,57 @@ def test_last_context_claim_seq_column_exists_and_advances_after_project(
 # ===========================================================================
 
 
+def test_context_claim_write_detector_ignores_checkpoint_column_false_positive() -> None:
+    """(c) detector self-check: the tightened, TABLE-QUALIFIED regex must NOT flag an UPDATE
+    against ``projection_checkpoint`` whose SET clause merely touches the
+    ``last_context_claim_seq`` COLUMN (the exact false positive a bare
+    ``"context_claim" in stmt`` substring match would trip on — this is what
+    ``project()``'s checkpoint-upsert branch, ``checkpoint.last_context_claim_seq =
+    max_ctx_seq``, actually emits at the SQL level), while STILL catching a genuine
+    UPDATE/DELETE against the ``context_claim`` TABLE itself. Pure/no-DB; pins the detector
+    logic in isolation from the (Docker-backed) DB-level test below.
+    """
+    false_positive_sql = (
+        "UPDATE projection_checkpoint SET last_statement_seq=%(last_statement_seq)s, "
+        "last_decision_seq=%(last_decision_seq)s, "
+        "last_context_claim_seq=%(last_context_claim_seq)s, updated_at=%(updated_at)s "
+        "WHERE projection_checkpoint.id = %(projection_checkpoint_id)s"
+    )
+    assert not _CONTEXT_CLAIM_WRITE_RE.search(false_positive_sql), (
+        "(c) DETECTOR REGRESSION: the tightened context_claim write-detector must NOT flag an "
+        "UPDATE against projection_checkpoint whose SET clause merely touches the "
+        "last_context_claim_seq COLUMN — this is the exact false positive a bare "
+        "'context_claim' substring match would trip on the moment a second project() call "
+        "emits this (legitimate) checkpoint UPDATE."
+    )
+
+    genuine_update_sql = "UPDATE context_claim SET value=%(value)s WHERE context_claim.id = %(id)s"
+    genuine_update_quoted_sql = (
+        'UPDATE "context_claim" SET value=%(value)s WHERE "context_claim".id = %(id)s'
+    )
+    genuine_delete_sql = "DELETE FROM context_claim WHERE context_claim.id = %(id)s"
+    for label, sql in (
+        ("bare UPDATE", genuine_update_sql),
+        ("quoted UPDATE", genuine_update_quoted_sql),
+        ("DELETE FROM", genuine_delete_sql),
+    ):
+        assert _CONTEXT_CLAIM_WRITE_RE.search(sql), (
+            f"(c) DETECTOR REGRESSION: a genuine {label} against the context_claim TABLE must "
+            f"still be caught by the tightened detector; sql={sql!r}"
+        )
+
+    # A benign INSERT (the only writer op the lane permits) must never be flagged either.
+    benign_insert_sql = (
+        "INSERT INTO context_claim (id, canonical_id, entity_id, key, value, dataset, method, "
+        "retrieved_at, scope) VALUES (%(id)s, %(canonical_id)s, %(entity_id)s, %(key)s, "
+        "%(value)s, %(dataset)s, %(method)s, %(retrieved_at)s, %(scope)s)"
+    )
+    assert not _CONTEXT_CLAIM_WRITE_RE.search(benign_insert_sql), (
+        "(c) DETECTOR REGRESSION: a benign INSERT against context_claim must never be flagged "
+        "as a forbidden write"
+    )
+
+
 def test_context_claim_writes_are_append_only_at_db_level(
     clean_graph: Neo4jClient,
     postgres_dsn: str,
@@ -361,6 +439,14 @@ def test_context_claim_writes_are_append_only_at_db_level(
     """(c): across seed + resolve_pending + signoff.approve() + project(), no UPDATE/DELETE is
     EVER issued against the context_claim table (captured via a real ``before_cursor_execute``
     listener on the engine — a DB-level proof, not a mock).
+
+    The forbidden-statement filter uses the TABLE-QUALIFIED ``_CONTEXT_CLAIM_WRITE_RE``
+    (module-level, self-checked by the sibling
+    ``test_context_claim_write_detector_ignores_checkpoint_column_false_positive`` test) rather
+    than a bare ``"context_claim" in stmt`` substring match, so a ``project()``-issued UPDATE
+    against ``projection_checkpoint.last_context_claim_seq`` can never trip this assertion —
+    equal-or-greater strength than the substring check for the writers' actual INSERT-only
+    intent, with the false-positive risk on the checkpoint column removed.
 
     RED today: ImportError — ContextClaimRecord does not exist yet.
     """
@@ -402,16 +488,54 @@ def test_context_claim_writes_are_append_only_at_db_level(
 
         with sessions() as session:
             project(session, clean_graph, full_rebuild=True)
+
+        # Advance the context watermark between the two project() calls: SQLAlchemy emits
+        # only CHANGED columns in an UPDATE SET clause, so a 0-delta re-run would write
+        # ``SET updated_at = ...`` alone and the precondition below would never see a
+        # checkpoint UPDATE referencing ``last_context_claim_seq`` at all.
+        with sessions() as session:
+            session.add(
+                ContextClaimRecord(
+                    id=str(uuid.uuid4()),
+                    canonical_id=parked_canonical,
+                    entity_id=f"{parked_canonical}-watermark-member",
+                    key="lei",
+                    value="CTXLANEWATERMARK0001",
+                    dataset=_SRC,
+                    method="connector:map",
+                    retrieved_at=_RETRIEVED_AT,
+                    scope="default",
+                )
+            )
+            session.commit()
+
+        # A SECOND project() call — deliberately exercises the checkpoint-upsert UPDATE path
+        # (the checkpoint row now exists and the context watermark has genuinely advanced, so
+        # this call takes the ``checkpoint.last_context_claim_seq = max_ctx_seq`` UPDATE
+        # branch with the column actually present in the SET clause, not the session.add
+        # INSERT branch) — the exact statement shape the tightened detector must NOT confuse
+        # with a write against the context_claim TABLE.
+        with sessions() as session:
+            project(session, clean_graph, full_rebuild=True)
     finally:
         event.remove(engine, "before_cursor_execute", _capture)
         engine.dispose()
 
-    forbidden = [
+    checkpoint_updates = [
         stmt
         for stmt in captured_sql
-        if "context_claim" in stmt.lower()
-        and (" update " in f" {stmt.lower()} " or " delete " in f" {stmt.lower()} ")
+        if "last_context_claim_seq" in stmt.lower()
+        and re.search(r"\bupdate\b", stmt, re.IGNORECASE)
     ]
+    assert checkpoint_updates, (
+        "(c) precondition: expected >= 1 captured UPDATE statement referencing "
+        "last_context_claim_seq (the second project() call's checkpoint-upsert UPDATE branch, "
+        "checkpoint.last_context_claim_seq = max_ctx_seq) — the exact false-positive shape "
+        "this test guards against was never exercised; without this, a regression back to "
+        "the bare substring match would go undetected here"
+    )
+
+    forbidden = [stmt for stmt in captured_sql if _CONTEXT_CLAIM_WRITE_RE.search(stmt)]
     assert not forbidden, (
         f"(c) APPEND-ONLY VIOLATED AT THE DB LEVEL: {len(forbidden)} UPDATE/DELETE statement(s) "
         "issued against context_claim:\n" + "\n".join(forbidden)

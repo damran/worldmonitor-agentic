@@ -108,10 +108,18 @@ def set_anchor_claims(entity: FtmEntity, field: str, values: Iterable[str]) -> N
     """
     if field not in CANONICAL_ID_FIELDS:
         raise ValueError(f"unknown anchor field: {field!r}")
-    # ``values`` is typed Iterable[str] (the public contract); the truthy filter drops empty
-    # strings the same way _anchor_values' isinstance-and-truthy filter does for its Any-typed
-    # (untyped context) input.
-    vals = sorted({v for v in values if v})
+    # Same filter as _anchor_values (spec §2.a.3): the isinstance guard keeps a mistyped /
+    # hostile non-str claim value out of sorted() (mixed-type sort would TypeError) and out
+    # of the anchor context; the truthy half drops empty strings. Deliberately redundant
+    # under the declared Iterable[str] contract — it defends the runtime against untyped
+    # callers the type checker cannot see (claim values ultimately arrive from external data).
+    vals = sorted(
+        {
+            v
+            for v in values
+            if isinstance(v, str) and v  # pyright: ignore[reportUnnecessaryIsInstance]
+        }
+    )
     if vals:
         entity.context[f"{_CONTEXT_PREFIX}{field}"] = vals
 

@@ -1,6 +1,6 @@
 """Property/metamorphic tests for Gate P1 — the context-claim capture lane (ADR 0106).
 
-Six mandatory ``@given`` invariants (CLAUDE.md build-discipline / spec §3), split across the
+Seven mandatory ``@given`` invariants (CLAUDE.md build-discipline / spec §3), split across the
 gate's two slices:
 
 P-CTX-1  LOSSLESS anchor capture (Slice P1-a; real-Postgres round-trip) — the persisted
@@ -37,6 +37,18 @@ P-CTX-6  INCREMENTAL == FULL-REBUILD WITH ANCHORS (Slice P1-b; extends P-FOLD-2,
          implementation that never reconstructs anchors would otherwise satisfy
          ``incr == full`` VACUOUSLY — both sides anchor-empty).
 
+P-CTX-7  CROSS-BATCH SUPERSESSION anchor path (Slice P1-b; real DB + Neo4j; a REGRESSION PIN,
+         not RED-first — the code path is already correct). The projector groups context
+         claims by ``survivor_of(claim.canonical_id)`` (``reconstruct_entities``), and the
+         incremental preimage expansion (``projector.py:388-410``) re-reads a touched
+         survivor's FULL statement AND context-claim history — including rows still filed
+         under a since-superseded alias. A context claim banked under an OLD canonical_id A
+         that is LATER superseded by a ``CanonicalIdLedger`` alias row (A -> survivor S) must
+         still land the anchor on S's node after BOTH an incremental (per-batch) fold and a
+         fresh ``full_rebuild``, and must NEVER produce an orphan node under A. Non-vacuity:
+         directly asserts the bare anchor key is present on S and that zero nodes exist under
+         A (not just "no exception").
+
 All P-CTX-1..3 tests are RED at collection time: the module-level imports of
 ``ContextClaimRecord`` (``worldmonitor.db.models``) and ``fuse_context_claim_rows`` /
 ``record_context_claims`` (``worldmonitor.resolution.statements``) fail with ``ImportError`` —
@@ -46,6 +58,9 @@ an additive keyword ``reconstruct_entities`` does not accept yet — but the fil
 collection via the imports above, so this is moot until Slice P1-a lands; once P1-a is built
 alone (before P1-b), P-CTX-4/5/6 fail with ``TypeError: unexpected keyword argument
 'context_claim_rows'`` (assertion-adjacent RED, the correct failure once the imports resolve).
+P-CTX-7 is a POST-BOTH-SLICES regression pin: it MUST PASS once P1-a + P1-b are both built (the
+fold's alias-inclusive preimage expansion is already code-correct); a failure here on the
+built tree is a real defect, not a missing feature.
 
 Container-heavy examples wrap their per-example engine in ``try/finally: engine.dispose()``
 (memory: given-red-tests-leak-connections — a per-example engine + end-only dispose exhausts
@@ -84,6 +99,7 @@ from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.ontology.anchors import CANONICAL_ID_FIELDS, get_anchors, set_anchor
 from worldmonitor.ontology.ftm import make_entity
 from worldmonitor.provenance.model import Provenance, get_provenance, stamp
+from worldmonitor.resolution.canonical import record_alias
 from worldmonitor.resolution.projector import project, reconstruct_entities
 
 # This import fails until builder creates fuse_context_claim_rows/record_context_claims
@@ -821,6 +837,175 @@ def test_p_ctx_6_incremental_equals_full_rebuild_with_anchors(
             f"  plan: {plan!r}\n"
             "The incremental touched set must be the UNION of the statement delta AND the "
             "context-claim delta (ADR 0106 §2.b.2)."
+        )
+    finally:
+        engine.dispose()
+
+
+# ===========================================================================
+# P-CTX-7: CROSS-BATCH SUPERSESSION anchor path (real DB + Neo4j; regression pin)
+# ===========================================================================
+
+
+@st.composite
+def _p_ctx_7_scenario(draw: st.DrawFn) -> tuple[str, str, str, str]:
+    """Draw (survivor S, OLD pre-supersession canonical A, anchor field, anchor value).
+
+    Per-example-unique suffix (P-CTX-6's collision-avoidance recipe): the shared container's
+    canonical-id uniqueness constraints would reject a cross-example id collision — a
+    generator artefact, not a fold property."""
+    suffix = draw(st.text(alphabet="abcdefghij0123456789", min_size=4, max_size=10))
+    survivor = f"pctx7-surv-{suffix}"
+    old_id = f"pctx7-old-{suffix}"
+    field = draw(st.sampled_from(CANONICAL_ID_FIELDS))
+    value = "PCTX7-" + draw(st.text(alphabet=_ALNUM, min_size=1, max_size=8))
+    return survivor, old_id, field, value
+
+
+def _assert_p_ctx_7_survivor_anchor(
+    client: Neo4jClient, survivor: str, old_id: str, field: str, value: str, *, label: str
+) -> None:
+    """Shared oracle for P-CTX-7's incremental + full_rebuild assertion blocks: the SURVIVOR
+    carries the anchor claimed under the (now-superseded) OLD id, and NO node was ever
+    created under that OLD id."""
+    survivor_rows = client.execute_read(
+        "MATCH (n {id: $sid}) RETURN properties(n) AS props", sid=survivor
+    )
+    assert len(survivor_rows) == 1, (
+        f"P-CTX-7 ({label}): expected exactly 1 node for survivor={survivor!r}, got "
+        f"{len(survivor_rows)}"
+    )
+    props = survivor_rows[0]["props"] or {}
+    assert props.get(field) == value, (
+        f"P-CTX-7 ({label}) VIOLATED: survivor={survivor!r}'s node is missing bare anchor "
+        f"{field!r}={value!r} (got {props.get(field)!r}) — a context_claim banked under the "
+        f"superseded id {old_id!r} must still land on the SURVIVOR after the fold's "
+        "alias-inclusive survivor_of grouping / incremental preimage expansion "
+        "(ADR 0106 §2.b.2, projector.py:388-410)."
+    )
+
+    orphan_rows = client.execute_read("MATCH (n {id: $oid}) RETURN count(n) AS cnt", oid=old_id)
+    orphan_count = int(orphan_rows[0]["cnt"]) if orphan_rows else 0
+    assert orphan_count == 0, (
+        f"P-CTX-7 ({label}) VIOLATED: found {orphan_count} orphan node(s) under the "
+        f"superseded id {old_id!r} — a context_claim/statement must always resolve through "
+        "survivor_of; a node must never be created under a pre-supersession id."
+    )
+
+
+@pytest.mark.integration
+@given(scenario=_p_ctx_7_scenario())
+@_SETTINGS
+def test_p_ctx_7_supersession_anchor_lands_on_survivor(
+    scenario: tuple[str, str, str, str],
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+) -> None:
+    """P-CTX-7: a context_claim banked under a canonical_id A that is LATER superseded (a
+    CanonicalIdLedger alias row A -> survivor S) must still land the anchor on S's node under
+    BOTH an incremental (per-batch) fold and a fresh full_rebuild — and NEVER produce an
+    orphan node under A.
+
+    This PINS a lens-semantics detail that is already code-correct (ADR 0106 §2.b.2 /
+    projector.py:388-410): ``reconstruct_entities`` groups context-claim rows by
+    ``survivor_of(claim.canonical_id)``, and the incremental preimage expansion re-reads a
+    touched survivor's FULL statement AND context-claim history — including rows still filed
+    under a since-superseded alias — whenever that survivor is touched by ANY later delta.
+
+    Batch shape (deliberately CROSS-BATCH, exercising the preimage-expansion branch rather
+    than a same-batch survivor_of resolution that would trivially bypass it):
+      batch 1: StatementRecord for S + ContextClaimRecord for A (BEFORE the alias exists) —
+               project() consumes the context-claim delta, but A has no statement group at
+               that point (a correct, benign no-op; nothing lands on any node yet).
+      batch 2: the CanonicalIdLedger alias row A -> S is recorded, AND a second, distinct
+               StatementRecord for S is written (the delta that RE-TOUCHES S) — project()
+               must now re-discover A's already-consumed context claim via the preimage
+               expansion (``projector.py:388-410``) and land it on S.
+
+    Non-vacuity: asserts the anchor VALUE is present on S's node (not just "no exception"),
+    and that zero nodes ever exist under the superseded id A.
+
+    MUST PASS on the current tree — this is a regression pin, not a RED-first spec test; a
+    failure here is a real defect (report blocked, do not weaken this test).
+    """
+    survivor, old_id, field, value = scenario
+
+    _cleanup_postgres(postgres_dsn)
+    clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+
+    engine = make_engine(postgres_dsn)
+    try:
+        create_all(engine)
+        sessions = session_factory(engine)
+
+        # --- Batch 1: S's statement + A's context claim (written BEFORE any supersession) ---
+        with sessions() as session:
+            session.add(
+                StatementRecord(
+                    id=str(uuid.uuid4()),
+                    statement_id=str(uuid.uuid4()),
+                    canonical_id=survivor,
+                    entity_id=f"{survivor}-member",
+                    schema="Company",
+                    prop="name",
+                    value=f"{survivor}-name",
+                    dataset="pctx7-ds-1",
+                    reliability="B",
+                    retrieved_at="2026-01-01T00:00:00Z",
+                )
+            )
+            session.add(
+                ContextClaimRecord(
+                    id=str(uuid.uuid4()),
+                    canonical_id=old_id,
+                    entity_id=f"{old_id}-member",
+                    key=field,
+                    value=value,
+                    dataset="pctx7-ds-1",
+                    method="connector:map",
+                    retrieved_at="2026-01-01T00:00:00Z",
+                    scope="default",
+                )
+            )
+            session.commit()
+
+        with sessions() as session:
+            project(session, clean_graph, full_rebuild=False)
+
+        # --- Batch 2: THE SUPERSESSION (A -> S) + a fresh statement re-touching S ---
+        with sessions() as session:
+            record_alias(session, canonical_id=survivor, alias=old_id)
+            session.add(
+                StatementRecord(
+                    id=str(uuid.uuid4()),
+                    statement_id=str(uuid.uuid4()),
+                    canonical_id=survivor,
+                    entity_id=f"{survivor}-member",
+                    schema="Company",
+                    prop="jurisdiction",
+                    value="us",
+                    dataset="pctx7-ds-2",
+                    reliability="B",
+                    retrieved_at="2026-01-02T00:00:00Z",
+                )
+            )
+            session.commit()
+
+        with sessions() as session:
+            project(session, clean_graph, full_rebuild=False)
+
+        # --- Assert (incremental): the SURVIVOR carries the anchor; A is NEVER a node ---
+        _assert_p_ctx_7_survivor_anchor(
+            clean_graph, survivor, old_id, field, value, label="incremental"
+        )
+
+        # --- Full rebuild on a FRESH graph: the same must hold ---
+        clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+        with sessions() as session:
+            project(session, clean_graph, full_rebuild=True)
+
+        _assert_p_ctx_7_survivor_anchor(
+            clean_graph, survivor, old_id, field, value, label="full_rebuild"
         )
     finally:
         engine.dispose()

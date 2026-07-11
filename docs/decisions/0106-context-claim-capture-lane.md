@@ -181,8 +181,9 @@ anchors — additive future work the P1 writer already supports. Re-running an e
 
 Replace `prop.startswith("wm_anchor_")` in `_excluded` with an exclusion of the **bare**
 `CANONICAL_ID_FIELDS` keys (`wikidata_id`, `geonames_id`, `lei`, `opencorporates_id`), imported from
-`ontology.anchors` (single source of truth; `anchors.py` imports no Neo4j/DB/SQLAlchemy module, so
-`divergence.py`'s pure/Docker-free property is preserved). **The bare anchor keys stay guard-excluded**
+`ontology.anchors` (single source of truth; `anchors.py` imports no Neo4j / `worldmonitor.db` module —
+its `ontology.ftm` import does transitively load SQLAlchemy via `followthemoney` as a pure library
+import needing no live connection — so `divergence.py`'s Docker-free / no-live-DB property is preserved). **The bare anchor keys stay guard-excluded**
 under the pick-semantics decision (§Sub-fork A): the fold's whole-history omit-on-conflict is a
 deterministic PICK over claims that can legitimately differ from the live node's last-write-wins under
 cross-batch anchor drift — exactly the caption case (ADR 0102 D6-iii). The **equivalence signature**

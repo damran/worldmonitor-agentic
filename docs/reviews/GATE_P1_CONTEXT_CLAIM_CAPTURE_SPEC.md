@@ -164,8 +164,9 @@ A dedicated test pins the no-op (§4).
 
 **2.b.3 `_excluded` (`divergence.py:82-88`)** — DELETE `prop.startswith("wm_anchor_")`; add
 `or prop in CANONICAL_ID_FIELDS` (import `from worldmonitor.ontology.anchors import CANONICAL_ID_FIELDS`
-— confirm no Neo4j/DB/SQLAlchemy import lands; `anchors.py` has none, so `divergence.py` stays pure /
-Docker-free). Update the `_excluded` docstring (bare keys, pick-semantics, ADR 0106 §Sub-fork A).
+— confirm no Neo4j/`worldmonitor.db` import lands; `anchors.py` has none (its `ontology.ftm` import
+transitively loads SQLAlchemy via `followthemoney` — a pure library import, no live connection — so
+`divergence.py` stays Docker-free / no-live-DB). Update the `_excluded` docstring (bare keys, pick-semantics, ADR 0106 §Sub-fork A).
 
 **2.b.4 Existing-test truth-up (REQUIRED — the guard change breaks them RED otherwise; adversarial-verify
 CRITICAL):** `tests/unit/test_projection_divergence.py::test_wm_anchor_prop_added_to_live_is_excluded`
