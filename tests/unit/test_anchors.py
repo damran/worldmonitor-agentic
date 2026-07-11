@@ -4,6 +4,10 @@ Also covers the anchor-preferred durable-id WIRING at the merge boundary (Gate B
 0044): the A10 grep-gate — an ANCHORED merged cluster, after the pipeline's durable-id derivation
 hook (``resolve_durable_id`` + ``rekey_cluster``), is keyed on the anchor-prefixed durable id and is
 NOT a ``wmc-`` hash; an UNANCHORED merge keeps ``wmc-`` (the ONLY path ``wmc-`` is the durable id).
+
+Gate P1 (ADR 0106 §2.a.3): ``set_anchor_claims`` — the additive fold-reinstatement helper that
+sets the RAW multi-value anchor context for a field, mirroring the ``merge_context`` union shape
+so ``get_anchors`` applies the identical omit-on-conflict rule.
 """
 
 from __future__ import annotations
@@ -15,7 +19,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from worldmonitor.ontology.anchors import CANONICAL_ID_FIELDS, get_anchors, set_anchor
+from worldmonitor.ontology.anchors import (
+    CANONICAL_ID_FIELDS,
+    get_anchors,
+    set_anchor,
+    set_anchor_claims,
+)
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
 from worldmonitor.resolution import canonical
 from worldmonitor.resolution.merge import cluster_and_merge, rekey_cluster
@@ -47,6 +56,77 @@ def test_unknown_anchor_field_raises() -> None:
 
 def test_no_anchors_returns_empty() -> None:
     assert get_anchors(_entity()) == {}
+
+
+# ---------------------------------------------------------------------------------------------
+# Gate P1 (ADR 0106 §2.a.3): set_anchor_claims — the fold-reinstatement raw multi-value setter.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_set_anchor_claims_single_value_sets_single_element_list() -> None:
+    """RED today: ImportError — set_anchor_claims does not exist yet."""
+    entity = _entity()
+    set_anchor_claims(entity, "wikidata_id", ["Q1"])
+    assert entity.context.get("wm_anchor_wikidata_id") == ["Q1"]
+    assert get_anchors(entity) == {"wikidata_id": "Q1"}
+
+
+def test_set_anchor_claims_multiple_values_sets_deduped_sorted_list() -> None:
+    """RED today: ImportError — set_anchor_claims does not exist yet."""
+    entity = _entity()
+    set_anchor_claims(entity, "wikidata_id", ["Q2", "Q1", "Q2", "Q1"])
+    assert entity.context.get("wm_anchor_wikidata_id") == ["Q1", "Q2"], (
+        "set_anchor_claims must set the DEDUPED, SORTED distinct-value list "
+        "(mirrors the merge_context union shape, ADR 0106 §2.a.3)"
+    )
+
+
+def test_set_anchor_claims_empty_is_a_noop() -> None:
+    """RED today: ImportError — set_anchor_claims does not exist yet."""
+    entity = _entity()
+    set_anchor_claims(entity, "wikidata_id", [])
+    assert "wm_anchor_wikidata_id" not in entity.context
+    assert get_anchors(entity) == {}
+
+
+def test_set_anchor_claims_ignores_non_string_and_empty_values() -> None:
+    """Only non-empty string values are kept — mirrors _anchor_values' own filter.
+
+    RED today: ImportError — set_anchor_claims does not exist yet.
+    """
+    entity = _entity()
+    set_anchor_claims(entity, "wikidata_id", ["Q1", "", "Q1"])
+    assert entity.context.get("wm_anchor_wikidata_id") == ["Q1"]
+
+
+def test_set_anchor_claims_unknown_field_raises() -> None:
+    """RED today: ImportError — set_anchor_claims does not exist yet."""
+    with pytest.raises(ValueError, match="anchor field"):
+        set_anchor_claims(_entity(), "bogus_id", ["x"])
+
+
+def test_set_anchor_claims_multi_value_omitted_by_get_anchors() -> None:
+    """The fold reinstatement round-trips the SAME omit-on-conflict rule get_anchors applies to
+    a live merged entity: a multi-distinct-value claim set must be OMITTED, never collapsed to
+    an arbitrary winner (Gate B-5, ADR 0040 Finding 1).
+
+    RED today: ImportError — set_anchor_claims does not exist yet.
+    """
+    entity = _entity()
+    set_anchor_claims(entity, "wikidata_id", ["Q1", "Q2"])
+    assert get_anchors(entity) == {}
+
+
+def test_set_anchor_claims_round_trips_omit_alongside_a_clean_key() -> None:
+    """A conflicting key is omitted while a co-existing single-value key stays present (guards
+    against an omit-everything regression).
+
+    RED today: ImportError — set_anchor_claims does not exist yet.
+    """
+    entity = _entity()
+    set_anchor_claims(entity, "wikidata_id", ["Q1", "Q2"])
+    set_anchor_claims(entity, "geonames_id", ["123"])
+    assert get_anchors(entity) == {"geonames_id": "123"}
 
 
 # ---------------------------------------------------------------------------------------------

@@ -27,16 +27,24 @@ drift guard, ADR 0030).
 
 from __future__ import annotations
 
+import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from worldmonitor.db.models import DecisionRecord, StatementRecord
+from worldmonitor.db.models import ContextClaimRecord, DecisionRecord, StatementRecord
+from worldmonitor.ontology.anchors import get_anchors
 from worldmonitor.ontology.ftm import FtmEntity
 from worldmonitor.provenance.model import get_provenance
 from worldmonitor.resolution.merge import ResolvedCluster, fuse_statement_entity
+
+logger = logging.getLogger(__name__)
+
+# The method tag for a map-time anchor claim (ADR 0106 §1/§4). The enricher interface (not
+# wired in P1) uses "enricher:<name>@<version>".
+_CONNECTOR_MAP_METHOD = "connector:map"
 
 
 def fuse_statement_rows(
@@ -148,3 +156,68 @@ def record_decision(
             scope="default",
         )
     )
+
+
+def fuse_context_claim_rows(
+    canonical_id: str,
+    members: Iterable[FtmEntity],
+) -> list[ContextClaimRecord]:
+    """Build one :class:`ContextClaimRecord` per ``(member, anchor key, value)`` claim.
+
+    Per-member grain (ADR 0106 §1/§3): NOT the merged ``cluster.entity`` — capturing from the
+    merged entity would lose the per-member ``dataset`` attribution the P2 erasure scrub needs
+    and would fold a cross-member anchor conflict prematurely (``merge_context`` union would
+    make :func:`~worldmonitor.ontology.anchors.get_anchors` OMIT a conflicting key before it is
+    ever captured). Each member's OWN (single-valued) anchors are read directly.
+
+    A member with no stamped :class:`~worldmonitor.provenance.model.Provenance` or an empty
+    ``retrieved_at`` has its anchors **skipped and logged** — never written naked (INV-CTX-PROV).
+    A member with no anchors yields zero rows.
+
+    This is the SINGLE authoritative projection — consumed by both the persist path
+    (:func:`record_context_claims`) and the P-CTX-1 property-test oracle-independence check.
+    """
+    rows: list[ContextClaimRecord] = []
+    for member in members:
+        prov = get_provenance(member)
+        if prov is None or not prov.retrieved_at:
+            logger.warning(
+                "context_claim: skipping anchor capture for entity_id=%r (canonical_id=%r) — "
+                "no stamped provenance / no retrieved_at (ADR 0106 §3, never written naked)",
+                member.id,
+                canonical_id,
+            )
+            continue
+
+        dataset = prov.source_id or member.id or ""
+        entity_id = member.id or canonical_id
+        for field, value in get_anchors(member).items():
+            rows.append(
+                ContextClaimRecord(
+                    id=str(uuid.uuid4()),
+                    canonical_id=canonical_id,
+                    entity_id=entity_id,
+                    key=field,
+                    value=value,
+                    dataset=dataset,
+                    method=_CONNECTOR_MAP_METHOD,
+                    retrieved_at=prov.retrieved_at,
+                    scope="default",
+                )
+            )
+    return rows
+
+
+def record_context_claims(
+    session: Session,
+    canonical_id: str,
+    members: Iterable[FtmEntity],
+) -> None:
+    """``session.add`` each context-claim row from :func:`fuse_context_claim_rows` (caller commits).
+
+    Append-only: pure ``session.add``; no UPDATE or DELETE, ever. Additive evidence banking
+    only — mutates no FtM entity and writes to no other lane (INV-CTX-NONMUTATION /
+    INV-CTX-APPENDONLY, ADR 0106 §2.a.4).
+    """
+    for row in fuse_context_claim_rows(canonical_id, members):
+        session.add(row)

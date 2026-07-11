@@ -47,6 +47,13 @@ IT-PROJ-4  (Gate 3a-ii-A / ADR 0101, F4) MANDATORY single-batch fold-vs-direct e
            corpus has 0 edges, so its edge-equivalence claim is vacuous (F4); this test
            closes that gap.
 
+Gate P1 (ADR 0106) — anchor parity (IT-PROJ-2-class): a NEW single-batch, single-source,
+ANCHOR-bearing corpus (no cross-member conflict) whose fold graph_signature — WITH anchors
+INCLUDED in the comparison (the equivalence signature compares them, ADR 0106 §5) — equals the
+direct writer's EXACTLY. Non-vacuous: asserts >= 1 bare CANONICAL_ID_FIELDS key present on BOTH
+sides (a fold that never reconstructs anchors would otherwise pass the equality check vacuously,
+both sides anchor-empty).
+
 All tests are RED at collection time: the module-level imports of ``project``,
 ``ProjectionResult`` from ``worldmonitor.resolution.projector`` and
 ``ProjectionCheckpoint`` from ``worldmonitor.db.models`` fail with ``ImportError``
@@ -69,6 +76,7 @@ from worldmonitor.db.models import (
     ProjectionCheckpoint,  # gate import: RED until builder adds it to models
 )
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.ontology.anchors import CANONICAL_ID_FIELDS, set_anchor
 from worldmonitor.ontology.ftm import make_entity
 from worldmonitor.provenance.model import Provenance, stamp
 from worldmonitor.resolution.pipeline import resolve_pending
@@ -187,6 +195,31 @@ def _queue_item(entity: dict[str, object]) -> ErQueueItem:
     )
 
 
+def _anchored_queue_item(entity: dict[str, object], anchors: dict[str, str]) -> ErQueueItem:
+    """Like _queue_item, but stamps canonical anchors onto the entity BEFORE wrapping
+    (Gate P1 / ADR 0106) — same source/reliability/timestamp shape as _queue_item, so E1/E3
+    stay null exactly as IT-PROJ-2."""
+    source_record = f"s3://landing/{entity['id']}.json"
+    stamped = stamp(
+        make_entity(entity),
+        Provenance(
+            source_id="src:statement-spine-test",
+            retrieved_at="2026-06-21T00:00:00Z",
+            reliability="A",
+            source_record=source_record,
+        ),
+    )
+    for field, value in anchors.items():
+        set_anchor(stamped, field, value)
+    return ErQueueItem(
+        id=str(uuid.uuid4()),
+        connector_id="opensanctions",
+        raw_entity=stamped.to_dict(),
+        source_record=source_record,
+        status="pending",
+    )
+
+
 def _candidates() -> list[dict[str, object]]:
     """Canonical fixture: clear dup pair + distinct entity + sanctioned dup pair.
 
@@ -275,6 +308,45 @@ def _edge_candidates() -> list[dict[str, object]]:
             "datasets": ["t"],
         },
     ]
+
+
+def _anchored_candidates() -> list[dict[str, object]]:
+    """NEW single-batch, single-source, ANCHOR-bearing fixture (Gate P1 / ADR 0106).
+
+    Mirrors _candidates()'s shape (clear dup pair + distinct singleton), but each entity
+    carries a canonical anchor (geonames_id / opencorporates_id) — SINGLE-VALUED, NO
+    cross-member conflict, so E2 (anchors) is now RECONSTRUCTABLE via the context_claim
+    lane (Gate P1) rather than the documented expected-divergence class it used to be.
+    Single batch, ONE shared source 'src:statement-spine-test' => E1/E3 stay null exactly
+    as IT-PROJ-2; E4 ('datasets') is still excluded the same way.
+    """
+    return [
+        {
+            "id": "anch1",
+            "schema": "Company",
+            "properties": {"name": ["AnchorCo Ltd"], "jurisdiction": ["us"]},
+            "datasets": ["t"],
+        },
+        {
+            "id": "anch2",
+            "schema": "Company",
+            "properties": {"name": ["AnchorCo Ltd"], "jurisdiction": ["us"]},
+            "datasets": ["t"],
+        },
+        {
+            "id": "anch3",
+            "schema": "Company",
+            "properties": {"name": ["Distinct Anchor Corp"], "jurisdiction": ["gb"]},
+            "datasets": ["t"],
+        },
+    ]
+
+
+_ANCHOR_PLAN: dict[str, dict[str, str]] = {
+    "anch1": {"geonames_id": "2643743"},
+    "anch2": {"geonames_id": "2643743"},
+    "anch3": {"opencorporates_id": "gb/98765"},
+}
 
 
 # ===========================================================================
@@ -725,6 +797,84 @@ def test_single_batch_edge_fold_vs_direct_equivalence(
         "On a SINGLE BATCH with ONE shared source and NO anchors/enrichment (E1/E2/E3 all "
         "null, same as IT-PROJ-2), the fold engine MUST reproduce the direct-write graph "
         "byte-identically INCLUDING edges (ADR 0101 Decision A3 / F4)."
+    )
+
+    engine.dispose()
+
+
+# ===========================================================================
+# Gate P1 (ADR 0106) anchor parity — IT-PROJ-2-class single-batch anchored fold-vs-direct
+# ===========================================================================
+
+
+def test_single_batch_anchored_fold_vs_direct_write_equivalence(
+    clean_graph: Neo4jClient,
+    postgres_dsn: str,
+) -> None:
+    """Gate P1 anchor parity (IT-PROJ-2-class): the fold's graph_signature — WITH anchors
+    INCLUDED in the comparison (the equivalence signature compares them, ADR 0106 §5) —
+    equals the direct writer's EXACTLY on a single-batch, single-source, no-conflict anchored
+    corpus (E1/E3 null exactly as IT-PROJ-2; E4 'datasets' still excluded).
+
+    Non-vacuous: asserts >= 1 bare CANONICAL_ID_FIELDS key present on BOTH the direct and fold
+    signatures — a fold that never reconstructs anchors would otherwise pass the equality
+    check VACUOUSLY (both sides anchor-empty).
+
+    RED today: reconstruct_entities never reconstructs anchors (ADR 0100 D3's 'ANCHORS: NOT
+    reconstructed' note) — the fold's node(s) carry no bare CANONICAL_ID_FIELDS key while the
+    direct write does, so fold != direct on this corpus.
+    """
+    engine = make_engine(postgres_dsn)
+    create_all(engine)
+    sessions = session_factory(engine)
+
+    with sessions() as session:
+        for candidate in _anchored_candidates():
+            session.add(_anchored_queue_item(candidate, _ANCHOR_PLAN[str(candidate["id"])]))
+        session.commit()
+
+    with sessions() as session:
+        stats = resolve_pending(session=session, neo4j=clean_graph, guard_mode="block")
+
+    assert stats.promoted == 2, (
+        f"anchor-parity precondition: expected 2 promoted clusters, got {stats.promoted}"
+    )
+
+    _EXCL = frozenset({"datasets"})
+    direct = graph_signature(clean_graph, exclude_node_props=_EXCL)
+
+    clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+
+    with sessions() as session:
+        project(session, clean_graph, full_rebuild=True)
+
+    fold = graph_signature(clean_graph, exclude_node_props=_EXCL)
+
+    assert fold == direct, (
+        "Gate P1 ANCHOR PARITY VIOLATED: fold graph != direct graph on the anchored, "
+        "no-conflict, single-batch corpus.\n"
+        f"  direct: {len(direct[0])} nodes, {len(direct[1])} edges\n"
+        f"  fold:   {len(fold[0])} nodes, {len(fold[1])} edges\n"
+        "The fold must reconstruct anchors from the context_claim lane (ADR 0106 §2) — a "
+        "fold that never sets the context union produces nodes with no bare anchor key, "
+        "diverging from the direct write."
+    )
+
+    # --- Non-vacuity: >= 1 BARE anchor key present on BOTH sides ---
+    direct_anchor_keys = {
+        k.strip('"') for (_nid, _lbls, props) in direct[0] for (k, _v) in props
+    } & set(CANONICAL_ID_FIELDS)
+    fold_anchor_keys = {
+        k.strip('"') for (_nid, _lbls, props) in fold[0] for (k, _v) in props
+    } & set(CANONICAL_ID_FIELDS)
+
+    assert direct_anchor_keys, (
+        "non-vacuity precondition failed: the direct graph has no bare anchor key"
+    )
+    assert fold_anchor_keys, (
+        "NON-VACUITY VIOLATED: the fold graph has ZERO bare anchor keys — a fold that never "
+        "reconstructs anchors would otherwise pass the equality check vacuously (both sides "
+        "anchor-empty). The fold must carry >= 1 bare CANONICAL_ID_FIELDS key."
     )
 
     engine.dispose()

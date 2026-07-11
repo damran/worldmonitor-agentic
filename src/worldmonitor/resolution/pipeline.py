@@ -53,7 +53,11 @@ from worldmonitor.resolution.merge import (
 from worldmonitor.resolution.referents import build_referent_map, rewrite_referents
 from worldmonitor.resolution.review import needs_review
 from worldmonitor.resolution.splink_model import score_pairs
-from worldmonitor.resolution.statements import record_decision, record_statements
+from worldmonitor.resolution.statements import (
+    record_context_claims,
+    record_decision,
+    record_statements,
+)
 from worldmonitor.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -483,6 +487,14 @@ def _resolve_batch(
         record_statements(session, cluster, by_id)
         if cluster.is_merge:
             record_decision(session, cluster, reason=reason)
+        # Gate P1 (ADR 0106): additive context-claim capture — banks each promoted member's
+        # canonical anchors (wm_anchor_* context, structurally absent from the statement lane
+        # above) as provenance-stamped rows in the SECOND SoR lane. Every promoted cluster
+        # (singleton + merge); the parked path's `continue` above writes nothing (INV-CTX-
+        # PARKED-NOTHING preserved).
+        record_context_claims(
+            session, cluster.canonical_id, [by_id[m] for m in cluster.member_ids if m in by_id]
+        )
         _set_status(cluster.member_ids, "resolved")
         promoted_entities.append(entity)
         promoted_clusters.append(cluster)
