@@ -33,6 +33,8 @@ import uuid
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session, sessionmaker
 
 from worldmonitor.db.engine import create_all, make_engine, session_factory
@@ -43,6 +45,18 @@ from worldmonitor.resolution.erasure_scrub import (
 )  # NEW surface — does not exist yet
 
 _RETRIEVED_AT = "2026-07-11T00:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# SQLite JSONB shim (idempotent if already registered by another test module) — this file
+# must be self-contained: it fails standalone without it (other JSONB-bearing tables reachable
+# from Base.metadata, e.g. er_queue_item.raw_entity/task_run.stats, don't compile to SQLite).
+# ---------------------------------------------------------------------------
+
+
+@compiles(JSONB, "sqlite")
+def _jsonb_as_sqlite_json(_element: Any, _compiler: Any, **_kw: Any) -> str:
+    return "JSON"
 
 
 def _sqlite_sessions() -> tuple[Any, sessionmaker[Session]]:
