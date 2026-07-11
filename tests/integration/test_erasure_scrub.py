@@ -666,7 +666,11 @@ def test_it_erase_idempotent_b_cross_store_crash_recovery_converges(
     (momentary resurrection risk); a RETRY (re-scrub + re-prune, this time committed) converges.
 
     RED today: ``ImportError`` — this test necessarily exercises ``scrub_log_lanes`` +
-    ``prune_live_to_fold`` directly (local import).
+    ``prune_live_to_fold`` directly (local import). Gate-P2-fix-round NOTE: once the module
+    imports cleanly, this test also exercises ``prune_live_to_fold``'s NEW signature (accepts
+    the whole ``LogScrubResult``, not a bare ``touched_survivors`` iterable, fix design SS1) —
+    its two call sites below pass ``crash_result``/``retry_result`` directly (not
+    ``.touched_survivors``), matching the target interface.
     """
     engine, sessions = _sessions(postgres_dsn)
 
@@ -682,7 +686,7 @@ def test_it_erase_idempotent_b_cross_store_crash_recovery_converges(
     crash_engine, crash_sessions = _sessions(postgres_dsn)
     with crash_sessions() as crash_session:
         crash_result = scrub_log_lanes(crash_session, corpus["erased_src"])
-        prune_live_to_fold(crash_session, clean_graph, crash_result.touched_survivors)
+        prune_live_to_fold(crash_session, clean_graph, crash_result)
         # NO commit — simulates the crash between the Neo4j write and the Postgres commit.
     crash_engine.dispose()
 
@@ -707,7 +711,7 @@ def test_it_erase_idempotent_b_cross_store_crash_recovery_converges(
     # ---- RETRY: re-scrub + re-prune, this time committed ----
     with sessions() as session:
         retry_result = scrub_log_lanes(session, corpus["erased_src"])
-        prune_live_to_fold(session, clean_graph, retry_result.touched_survivors)
+        prune_live_to_fold(session, clean_graph, retry_result)
         session.commit()
 
     with sessions() as session:
@@ -868,3 +872,447 @@ def test_it_erase_appendonly_b_scrub_log_lanes_emits_exactly_those_writes(
         "IT-ERASE-appendonly (b) NON-VACUITY VIOLATED: scrub_log_lanes() must emit at least one "
         "DELETE/UPDATE against statement/context_claim/decision — none captured"
     )
+
+
+# =========================================================================================
+# IT-ERASE-flow-legacy-data (CRITICAL bug, fix design SS1 — positive-attribution gate)
+# =========================================================================================
+
+
+def _seed_flow_legacy_corpus(session: Any, neo4j: Neo4jClient, tag: str) -> dict[str, str]:
+    """The P-ERASE-5 CRITICAL-bug shape at integration scale: a survivor with (a) an
+    erased-source-only STATEMENT-LOGGED value (``alias``, the SF-4 case) that MUST be removed,
+    and (b) a DIFFERENT prop (``profession``) AND anchor (``lei``) contributed by a
+    NEVER-erased source with ZERO backing log row at all (legacy/pre-dual-write live data)."""
+    erased_src = f"esrc-legacy:{tag}"
+    keep_src = f"ksrc-legacy:{tag}"
+    legacy_src = f"lsrc-legacy:{tag}"
+    survivor_id = f"surv-legacy-{tag}"
+    m1 = f"{survivor_id}-m1"
+    m2 = f"{survivor_id}-m2"
+    m3 = f"{survivor_id}-m3"
+    legacy_prop_value = f"LegacyProfession-{tag}"
+    legacy_anchor_value = f"LEILEGACYIT{tag.upper()}"
+
+    session.add(_stmt(survivor_id, m1, "name", "Legacy Flow Name", erased_src))
+    session.add(_stmt(survivor_id, m2, "name", "Legacy Flow Name", keep_src))
+    session.add(_stmt(survivor_id, m1, "alias", "LegacyFlowOnlyFromErased", erased_src))
+    # NOTE: m3's `profession` + `lei` anchor are DELIBERATELY never logged (legacy data) — no
+    # `_stmt(...)` call, no `ContextClaimRecord` for m3 anywhere.
+    session.commit()
+
+    ensure_constraints(neo4j)
+    by_id = {
+        m1: _person(
+            m1, erased_src, {"name": ["Legacy Flow Name"], "alias": ["LegacyFlowOnlyFromErased"]}
+        ),
+        m2: _person(m2, keep_src, {"name": ["Legacy Flow Name"]}),
+        m3: _person(m3, legacy_src, {"profession": [legacy_prop_value]}),
+    }
+    merged, dropped = _merge_entities(survivor_id, (m1, m2, m3), by_id)
+    assert dropped == ()
+    set_anchor(merged, "lei", legacy_anchor_value)
+    write_entities(neo4j, [merged])
+
+    return {
+        "erased_src": erased_src,
+        "keep_src": keep_src,
+        "legacy_src": legacy_src,
+        "survivor_id": survivor_id,
+        "m1": m1,
+        "m2": m2,
+        "m3": m3,
+        "legacy_prop_value": legacy_prop_value,
+        "legacy_anchor_value": legacy_anchor_value,
+    }
+
+
+def test_it_erase_flow_legacy_data_survives_unrelated_erasure(
+    minio: tuple[str, str, str],
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+) -> None:
+    """IT-ERASE-flow-legacy-data — the CRITICAL bug at integration scale (fix design SS1).
+
+    Sibling of P-ERASE-5 (property suite) at deterministic integration scale. RED today:
+    ``profession``/``lei`` from a NEVER-erased legacy source (with zero backing log rows) are
+    WIPED by ``prune_live_to_fold``'s "no fold evidence == erased-source-only" mis-inference —
+    proven against TODAY's EXISTING ``erase_source`` entry point (no new symbol required).
+    """
+    landing = _landing(minio)
+    engine, sessions = _sessions(postgres_dsn)
+
+    with sessions() as session:
+        corpus = _seed_flow_legacy_corpus(session, clean_graph, "legacyflow1")
+
+    from worldmonitor.erasure import erase_source
+
+    with sessions() as session:
+        erase_source(
+            neo4j=clean_graph,
+            session=session,
+            landing=landing,
+            source_id=corpus["erased_src"],
+            authorized_by="it-erase-legacy-op",
+        )
+        session.commit()
+
+    after = _read_node(clean_graph, corpus["survivor_id"])
+    assert after is not None, "the multi-source survivor must SURVIVE a partial erase"
+
+    alias = list(after.get("alias") or [])
+    assert "LegacyFlowOnlyFromErased" not in alias, (
+        "IT-ERASE-flow-legacy-data (a) VIOLATED: the erased-source-only statement-logged alias "
+        f"value survives: alias={alias!r}"
+    )
+
+    assert after.get("profession") == [corpus["legacy_prop_value"]], (
+        "IT-ERASE-flow-legacy-data (b) CRITICAL VIOLATED: the legacy (never statement-logged) "
+        f"profession value was wiped: got {after.get('profession')!r}, expected "
+        f"[{corpus['legacy_prop_value']!r}]"
+    )
+    live_anchor = clean_graph.execute_read(
+        "MATCH (n:Entity {id: $id}) RETURN n.lei AS lei", id=corpus["survivor_id"]
+    )[0]["lei"]
+    assert live_anchor == corpus["legacy_anchor_value"], (
+        "IT-ERASE-flow-legacy-data (b) CRITICAL VIOLATED: the legacy (never context-claim-"
+        f"logged) lei anchor was wiped: got {live_anchor!r}, expected "
+        f"{corpus['legacy_anchor_value']!r}"
+    )
+
+    engine.dispose()
+
+
+# =========================================================================================
+# IT-ERASE-caption-staleness (fix design SS2 — the caption half of the HIGH)
+# =========================================================================================
+
+
+def test_it_erase_caption_recomputed_not_stale(
+    minio: tuple[str, str, str],
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+) -> None:
+    """IT-ERASE-caption-staleness / fix design SS2.
+
+    A survivor whose live ``caption`` was picked from an erased-source-only ``name`` value
+    while a surviving source contributes a DIFFERENT name value: after ``erase_source``,
+    ``n.caption`` must be CORRECTLY RECOMPUTED off the post-scrub fold (never left stale, and
+    never corrupted into a 1-element list — ``caption`` is a Neo4j SCALAR string, not an FtM
+    multi-valued prop, ``graph/ftmg_fork/transform.py:103``). The independent oracle is the
+    SAME frozen ``reconstruct_entities`` :func:`prune_live_to_fold` itself uses — not a second,
+    hand-rolled expectation.
+
+    RED today: ``caption`` is ``_excluded`` (same predicate as ``datasets``) so
+    ``prune_live_to_fold`` never touches it at all — the stale erased-source-only caption
+    survives the erase unchanged.
+    """
+    erased_src = "esrc-caption:it"
+    keep_src = "ksrc-caption:it"
+    survivor_id = "surv-caption-it"
+    m1 = f"{survivor_id}-m1"
+    m2 = f"{survivor_id}-m2"
+
+    engine, sessions = _sessions(postgres_dsn)
+    with sessions() as session:
+        session.add(_stmt(survivor_id, m1, "name", "Erased Caption Name", erased_src))
+        session.add(_stmt(survivor_id, m2, "name", "Kept Caption Name", keep_src))
+        session.commit()
+
+    ensure_constraints(clean_graph)
+    by_id = {
+        m1: _person(m1, erased_src, {"name": ["Erased Caption Name"]}),
+        m2: _person(m2, keep_src, {"name": ["Kept Caption Name"]}),
+    }
+    merged, dropped = _merge_entities(survivor_id, (m1, m2), by_id)
+    assert dropped == ()
+    write_entities(clean_graph, [merged])
+    # Force the PRE-erasure live caption to be the erased-source-only value (a deterministic
+    # precondition — FtM's own caption-pick order among the two name values is not the thing
+    # under test here; "gets correctly recomputed" is).
+    clean_graph.execute_write(
+        "MATCH (n:Entity {id: $id}) SET n.caption = $caption",
+        id=survivor_id,
+        caption="Erased Caption Name",
+    )
+    pre = _read_node(clean_graph, survivor_id)
+    assert pre is not None and pre.get("caption") == "Erased Caption Name"
+
+    from worldmonitor.erasure import erase_source
+
+    with sessions() as session:
+        erase_source(
+            neo4j=clean_graph,
+            session=session,
+            landing=_landing(minio),
+            source_id=erased_src,
+            authorized_by="it-erase-caption-op",
+        )
+        session.commit()
+
+    # Independent oracle: the FROZEN pure reconstruct over the POST-scrub remaining rows (the
+    # SAME single source of truth prune_live_to_fold itself must use, per the fix design).
+    from worldmonitor.resolution.projector import build_survivor_of, reconstruct_entities
+
+    with sessions() as session:
+        survivor_of = build_survivor_of(session)
+        remaining_stmt_rows = list(session.execute(select(StatementRecord)).scalars())
+        fold_entities = {
+            e.id: e
+            for e in reconstruct_entities(remaining_stmt_rows, survivor_of)
+            if e.id is not None
+        }
+    expected_caption = fold_entities[survivor_id].caption
+
+    after = _read_node(clean_graph, survivor_id)
+    assert after is not None
+    assert isinstance(after.get("caption"), str), (
+        "IT-ERASE-caption VIOLATED: caption must stay a SCALAR string, never list-wrapped "
+        f"(got {after.get('caption')!r} of type {type(after.get('caption'))})"
+    )
+    assert after.get("caption") == expected_caption, (
+        f"IT-ERASE-caption VIOLATED: n.caption={after.get('caption')!r} does not match the "
+        f"post-scrub fold's caption {expected_caption!r} (stale/uncomputed caption)"
+    )
+    assert after.get("caption") != "Erased Caption Name", (
+        "non-vacuity: the caption must actually CHANGE off the erased-source-only stale value"
+    )
+
+    engine.dispose()
+
+
+# =========================================================================================
+# IT-ERASE-datasets-staleness (fix design SS3 — the datasets half of the HIGH)
+# =========================================================================================
+
+
+def test_it_erase_datasets_list_strips_erased_source_id(
+    minio: tuple[str, str, str],
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+) -> None:
+    """IT-ERASE-datasets-staleness / fix design SS3.
+
+    ``datasets`` is a plain Neo4j list-of-strings property holding contributing source ids
+    (``graph/ftmg_fork/transform.py:104``). After ``erase_source``, the erased ``source_id``
+    must be stripped from a touched survivor's live ``datasets`` list — no fold-based
+    inference needed (the caller already knows exactly which ``source_id`` was erased).
+
+    RED today: ``datasets`` is ``_excluded`` (same predicate as ``caption``) so
+    ``prune_live_to_fold`` never touches it — the erased source_id survives in the list
+    unchanged (``erase_source_graph`` doesn't touch ``datasets`` either — ``graph/ops.py``).
+    """
+    erased_src = "esrc-datasets:it"
+    keep_src = "ksrc-datasets:it"
+    survivor_id = "surv-datasets-it"
+    m1 = f"{survivor_id}-m1"
+    m2 = f"{survivor_id}-m2"
+
+    engine, sessions = _sessions(postgres_dsn)
+    with sessions() as session:
+        session.add(_stmt(survivor_id, m1, "name", "Datasets Shared Name", erased_src))
+        session.add(_stmt(survivor_id, m2, "name", "Datasets Shared Name", keep_src))
+        session.commit()
+
+    ensure_constraints(clean_graph)
+    by_id = {
+        m1: _person(m1, erased_src, {"name": ["Datasets Shared Name"]}),
+        m2: _person(m2, keep_src, {"name": ["Datasets Shared Name"]}),
+    }
+    merged, dropped = _merge_entities(survivor_id, (m1, m2), by_id)
+    assert dropped == ()
+    write_entities(clean_graph, [merged])
+
+    pre = _read_node(clean_graph, survivor_id)
+    assert pre is not None
+    pre_datasets = set(pre.get("datasets") or [])
+    assert erased_src in pre_datasets, "precondition: erased_src must be a contributing dataset"
+    assert keep_src in pre_datasets, "precondition: keep_src must be a contributing dataset"
+
+    from worldmonitor.erasure import erase_source
+
+    with sessions() as session:
+        erase_source(
+            neo4j=clean_graph,
+            session=session,
+            landing=_landing(minio),
+            source_id=erased_src,
+            authorized_by="it-erase-datasets-op",
+        )
+        session.commit()
+
+    after = _read_node(clean_graph, survivor_id)
+    assert after is not None
+    after_datasets = list(after.get("datasets") or [])
+    assert erased_src not in after_datasets, (
+        "IT-ERASE-datasets VIOLATED: the erased source_id survives in the live datasets list: "
+        f"{after_datasets!r}"
+    )
+    assert keep_src in after_datasets, "non-vacuity: the KEPT source must survive in datasets"
+
+    engine.dispose()
+
+
+# =========================================================================================
+# IT-ERASE-multi-anchor (regression-lock, test-gap #1, spec SS5 — GREEN before AND after)
+# =========================================================================================
+
+
+def test_it_erase_multi_anchor_together_both_removed(
+    minio: tuple[str, str, str],
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+) -> None:
+    """IT-ERASE-multi-anchor — regression-lock (test-gap #1, spec SS5): a survivor with TWO
+    erased-source-only anchors (``wikidata_id`` AND ``lei``, both anchor-claimed by the erased
+    source via TWO separate ``ContextClaimRecord`` rows with different ``key`` values) must
+    have BOTH removed together in one scrub. GREEN both BEFORE and AFTER the CRITICAL/HIGH fix
+    (current code is already correct here, per the adversarial review) — a pure regression
+    lock, not RED-driving.
+    """
+    erased_src = "esrc-multianchor:it"
+    keep_src = "ksrc-multianchor:it"
+    survivor_id = "surv-multianchor-it"
+    m1 = f"{survivor_id}-m1"
+    m2 = f"{survivor_id}-m2"
+    wikidata_value = "Q8172635"
+    lei_value = "LEIMULTIANCHOR000001"
+
+    engine, sessions = _sessions(postgres_dsn)
+    with sessions() as session:
+        session.add(_stmt(survivor_id, m1, "name", "Multi Anchor Name", erased_src))
+        session.add(_stmt(survivor_id, m2, "name", "Multi Anchor Name", keep_src))
+        session.add(
+            ContextClaimRecord(
+                id=str(uuid.uuid4()),
+                canonical_id=survivor_id,
+                entity_id=m1,
+                key="wikidata_id",
+                value=wikidata_value,
+                dataset=erased_src,
+                method="connector:map",
+                retrieved_at=_RETRIEVED_AT,
+                scope="default",
+            )
+        )
+        session.add(
+            ContextClaimRecord(
+                id=str(uuid.uuid4()),
+                canonical_id=survivor_id,
+                entity_id=m1,
+                key="lei",
+                value=lei_value,
+                dataset=erased_src,
+                method="connector:map",
+                retrieved_at=_RETRIEVED_AT,
+                scope="default",
+            )
+        )
+        session.commit()
+
+    ensure_constraints(clean_graph)
+    by_id = {
+        m1: _person(m1, erased_src, {"name": ["Multi Anchor Name"]}),
+        m2: _person(m2, keep_src, {"name": ["Multi Anchor Name"]}),
+    }
+    merged, dropped = _merge_entities(survivor_id, (m1, m2), by_id)
+    assert dropped == ()
+    set_anchor(merged, "wikidata_id", wikidata_value)
+    set_anchor(merged, "lei", lei_value)
+    write_entities(clean_graph, [merged])
+
+    pre_anchors = clean_graph.execute_read(
+        "MATCH (n:Entity {id: $id}) RETURN n.wikidata_id AS wid, n.lei AS lei", id=survivor_id
+    )[0]
+    assert pre_anchors["wid"] == wikidata_value and pre_anchors["lei"] == lei_value
+
+    from worldmonitor.erasure import erase_source
+
+    with sessions() as session:
+        erase_source(
+            neo4j=clean_graph,
+            session=session,
+            landing=_landing(minio),
+            source_id=erased_src,
+            authorized_by="it-erase-multianchor-op",
+        )
+        session.commit()
+
+    post_anchors = clean_graph.execute_read(
+        "MATCH (n:Entity {id: $id}) RETURN n.wikidata_id AS wid, n.lei AS lei", id=survivor_id
+    )[0]
+    assert post_anchors["wid"] is None, (
+        f"IT-ERASE-multi-anchor VIOLATED: wikidata_id survives: {post_anchors['wid']!r}"
+    )
+    assert post_anchors["lei"] is None, (
+        f"IT-ERASE-multi-anchor VIOLATED: lei survives: {post_anchors['lei']!r}"
+    )
+
+    engine.dispose()
+
+
+# =========================================================================================
+# IT-ERASE-stock-malformed-stats (regression-lock, test-gap #2, spec SS5 — GREEN before AND
+# after)
+# =========================================================================================
+
+
+def test_it_erase_stock_skips_malformed_stats_rows_gracefully(
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+) -> None:
+    """IT-ERASE-stock-malformed-stats — regression-lock (test-gap #2, spec SS5): a
+    ``TaskRun(kind="erase", status="ok")`` row with ``stats=None`` and another with
+    ``stats={}`` (missing ``"source_id"``) interleaved among otherwise-valid rows must be
+    skipped gracefully (no crash, no phantom empty-string source scrubbed) while the valid
+    rows are still correctly processed. GREEN both BEFORE and AFTER the CRITICAL/HIGH fix
+    (current code is already correct here, per the adversarial review) — a pure regression
+    lock, not RED-driving.
+    """
+    engine, sessions = _sessions(postgres_dsn)
+
+    src_valid = "stockvalid:ds"
+    with sessions() as session:
+        session.add(_stmt("surv-malformed", "surv-malformed-m1", "name", "Valid Stock", src_valid))
+        session.add(TaskRun(id=str(uuid.uuid4()), kind="erase", status="ok", stats=None))
+        session.add(TaskRun(id=str(uuid.uuid4()), kind="erase", status="ok", stats={}))
+        session.add(
+            TaskRun(
+                id=str(uuid.uuid4()),
+                kind="erase",
+                status="ok",
+                stats={"source_id": src_valid, "authorized_by": "dpo"},
+            )
+        )
+        session.commit()
+
+    ensure_constraints(clean_graph)
+    write_entities(
+        clean_graph, [_person("surv-malformed-m1", src_valid, {"name": ["Valid Stock"]})]
+    )
+
+    from worldmonitor.resolution.erasure_scrub import scrub_stock
+
+    with sessions() as session:
+        results = scrub_stock(session, neo4j=clean_graph)
+        session.commit()
+
+    scrubbed_sources = {r.source_id for r in results}
+    assert scrubbed_sources == {src_valid}, (
+        f"IT-ERASE-stock-malformed-stats VIOLATED: expected exactly {{src_valid!r}} scrubbed, "
+        f"got {scrubbed_sources!r} (a malformed-stats row must never be scrubbed as a phantom "
+        "empty-string source)"
+    )
+    assert "" not in scrubbed_sources, (
+        "IT-ERASE-stock-malformed-stats VIOLATED: a phantom empty-string source_id was scrubbed"
+    )
+
+    with sessions() as session:
+        remaining_valid = session.execute(
+            select(func.count())
+            .select_from(StatementRecord)
+            .where(StatementRecord.dataset == src_valid)
+        ).scalar_one()
+    assert remaining_valid == 0, "the valid row must still be correctly scrubbed"
+
+    engine.dispose()

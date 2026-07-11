@@ -755,3 +755,177 @@ def test_p_erase_4_live_value_prune_preserves_provenance(
         )
     finally:
         engine.dispose()
+
+
+# ===========================================================================
+# P-ERASE-5: legacy (never-log-backed) live data survives an UNRELATED erasure
+# (the CRITICAL bug — fix design SS1, positive-attribution gate)
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class _LegacyCorpusIds:
+    erased_src: str
+    keep_src: str
+    legacy_src: str
+    survivor_id: str
+    m1: str
+    m2: str
+    m3: str
+    legacy_prop_value: str
+    legacy_anchor_value: str
+
+
+def _legacy_anchor_value(suffix: str) -> str:
+    """A deterministic, per-example-unique ``lei``-shaped value — a DIFFERENT anchor field
+    (its own Neo4j UNIQUE constraint, ``graph/constraints.py``) than ``_anchor_value``'s
+    ``wikidata_id``-shaped ``Q...`` values, so the two never collide even within one example."""
+    return f"LEILEGACY{100000 + (sum(ord(c) for c in suffix) % 800000)}"
+
+
+def _seed_legacy_scenario(
+    session: Session, neo4j: Neo4jClient, scenario: _EraseScenario
+) -> _LegacyCorpusIds:
+    """Seed the P-ERASE-5 CRITICAL-bug corpus.
+
+    (a) ``m1``/``m2`` mirror the existing SF-4 hard case EXACTLY: an erased-source-only value
+    on a STATEMENT-LOGGED prop (``alias``) that MUST still be correctly removed by erasing
+    ``erased_src`` — this half is NOT the bug, it must keep passing after the fix too.
+
+    (b) ``m3`` contributes a DIFFERENT prop (``profession``) AND anchor (``lei``) from a source
+    (``legacy_src``) that is NEVER erased and has ZERO backing ``StatementRecord``/
+    ``ContextClaimRecord`` row at all — no ``_stmt(...)`` call, no ``ContextClaimRecord`` are
+    ever added for ``m3`` — written DIRECTLY onto the live node via the SAME production
+    merge/write path this file's other corpus-builders use (``_merge_entities`` +
+    ``write_entities``), simulating legacy/pre-ADR-0099-dual-write live data (or data from a
+    source structurally never statement-logged). Erasing ``erased_src`` must leave (b)
+    COMPLETELY UNTOUCHED — today's ``prune_live_to_fold`` treats "the fold has no evidence for
+    this prop/anchor" as "erased-source-only" and WIPES it, even though ``legacy_src`` is never
+    named in this erasure at all (the CRITICAL data-loss bug this test proves is real).
+    """
+    sfx = scenario.suffix
+    erased_src = f"esrc5:{sfx}"
+    keep_src = f"ksrc5:{sfx}"
+    legacy_src = f"lsrc5:{sfx}"
+    survivor_id = f"surv5-{sfx}"
+    m1 = f"{survivor_id}-m1"
+    m2 = f"{survivor_id}-m2"
+    m3 = f"{survivor_id}-m3"
+    legacy_prop_value = f"LegacyProfession-{sfx}"
+    legacy_anchor_value = _legacy_anchor_value(sfx)
+
+    # --- Postgres: ONLY m1/m2's contributions are logged; m3's are NEVER logged (legacy). ---
+    session.add(_stmt(survivor_id, m1, "name", "Shared Name Five", erased_src))
+    session.add(_stmt(survivor_id, m2, "name", "Shared Name Five", keep_src))
+    session.add(_stmt(survivor_id, m1, "alias", "OnlyFromErasedFive", erased_src))
+    session.commit()
+
+    # --- Neo4j: the LIVE graph carries m3's legacy contribution too (SAME production
+    # merge/write path), with NO corresponding log row anywhere. ---
+    ensure_constraints(neo4j)
+    by_id = {
+        m1: _person(
+            m1, erased_src, {"name": ["Shared Name Five"], "alias": ["OnlyFromErasedFive"]}
+        ),
+        m2: _person(m2, keep_src, {"name": ["Shared Name Five"]}),
+        m3: _person(m3, legacy_src, {"profession": [legacy_prop_value]}),
+    }
+    merged, dropped = _merge_entities(survivor_id, (m1, m2, m3), by_id)
+    assert dropped == (), f"unexpected schema-incompatible drop: {dropped!r}"
+    set_anchor(merged, "lei", legacy_anchor_value)
+    write_entities(neo4j, [merged])
+
+    return _LegacyCorpusIds(
+        erased_src=erased_src,
+        keep_src=keep_src,
+        legacy_src=legacy_src,
+        survivor_id=survivor_id,
+        m1=m1,
+        m2=m2,
+        m3=m3,
+        legacy_prop_value=legacy_prop_value,
+        legacy_anchor_value=legacy_anchor_value,
+    )
+
+
+@pytest.mark.integration
+@given(scenario=_p_erase_scenario())
+@example(scenario=_EraseScenario(suffix="p5legacy01"))
+@_SETTINGS
+def test_p_erase_5_legacy_unlogged_data_survives_unrelated_erasure(
+    scenario: _EraseScenario,
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+    minio: tuple[str, str, str],
+) -> None:
+    """P-ERASE-5 — the CRITICAL bug (fix design SS1, the positive-attribution gate).
+
+    Today's ``prune_live_to_fold`` treats "the post-scrub fold has no evidence for this live
+    prop/anchor" as "this value was erased-source-only" and wipes it — WRONG whenever a
+    survivor's live-graph data isn't 100% covered by the statement/context_claim log (data
+    written before the ADR-0099 statement dual-write existed, CLAUDE.md: "the live SoR stays
+    Neo4j until the F1 projector cutover"; or data from a source never itself statement-logged
+    for a structural reason). Erasing ``erased_src`` must remove ONLY its own statement-logged,
+    erased-source-only contribution (``alias``, the existing SF-4 case); the legacy,
+    never-logged ``profession``/``lei`` values from ``legacy_src`` — a source NEVER named in
+    this erasure — must survive on the live node BYTE-IDENTICAL.
+
+    RED today: ``profession`` and ``lei`` are WIPED by ``prune_live_to_fold`` even though
+    ``legacy_src`` was never erased (the fold has zero evidence for either, since neither was
+    ever statement/context-claim-logged) — this is the CRITICAL data-loss bug, proven here
+    against TODAY's EXISTING ``erase_source`` entry point (no new symbol required).
+    """
+    _cleanup_postgres(postgres_dsn)
+    clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+
+    engine = make_engine(postgres_dsn)
+    try:
+        create_all(engine)
+        sessions = session_factory(engine)
+        landing = _landing(minio)
+
+        with sessions() as session:
+            corpus = _seed_legacy_scenario(session, clean_graph, scenario)
+
+        from worldmonitor.erasure import erase_source
+
+        with sessions() as session:
+            erase_source(
+                neo4j=clean_graph,
+                session=session,
+                landing=landing,
+                source_id=corpus.erased_src,
+                authorized_by="p2-prop-op-5",
+            )
+            session.commit()
+
+        after = _read_node(clean_graph, corpus.survivor_id)
+        assert after is not None, "the multi-source survivor must SURVIVE a partial erase"
+
+        # (a) the SF-4 hard case: the erased-source-only, STATEMENT-LOGGED value must still be
+        # correctly removed (this half is NOT the bug — it must keep passing after the fix too).
+        alias = list(after.get("alias") or [])
+        assert "OnlyFromErasedFive" not in alias, (
+            "P-ERASE-5 (a) VIOLATED: the erased-source-only statement-logged alias value "
+            f"survives on the live node: alias={alias!r}"
+        )
+
+        # (b) THE CRITICAL BUG: legacy, NEVER-log-backed data from a source that was NEVER
+        # erased must survive COMPLETELY UNTOUCHED.
+        assert after.get("profession") == [corpus.legacy_prop_value], (
+            "P-ERASE-5 (b) CRITICAL VIOLATED: the legacy (never statement-logged) `profession` "
+            f"value from an UN-erased source was wiped: got {after.get('profession')!r}, "
+            f"expected [{corpus.legacy_prop_value!r}] — prune_live_to_fold treated 'no fold "
+            "evidence' as 'erased-source-only' for a prop the erased source never touched"
+        )
+        live_anchor = clean_graph.execute_read(
+            "MATCH (n:Entity {id: $id}) RETURN n.lei AS lei", id=corpus.survivor_id
+        )[0]["lei"]
+        assert live_anchor == corpus.legacy_anchor_value, (
+            "P-ERASE-5 (b) CRITICAL VIOLATED: the legacy (never context-claim-logged) `lei` "
+            f"anchor from an UN-erased source was wiped: got {live_anchor!r}, expected "
+            f"{corpus.legacy_anchor_value!r} — the anchor REMOVE-only gate must be POSITIVELY "
+            "attributed to the erased source, not inferred from fold absence"
+        )
+    finally:
+        engine.dispose()

@@ -405,3 +405,251 @@ def test_set_node_values_empty_compared_prop_removes_it_from_the_node() -> None:
         "an emptied compared prop must be REMOVEd from the node, not left stale"
     )
     assert props.get("prov_source_id") == "keep-src"
+
+
+# ===========================================================================
+# set_node_values — NEW parameters (fix design SS2/SS4: new_caption, remove_dataset_ids)
+# ===========================================================================
+
+
+def test_set_node_values_new_caption_sets_scalar_without_list_wrapping() -> None:
+    """Fix design SS2/SS4: ``new_caption`` must set ``caption`` as a SCALAR string — NEVER
+    routed through ``compared_props`` (which always writes a Python ``list``, which would
+    corrupt a scalar into a 1-element array). G1 (``prov_source_id``/``id``) must still be
+    preserved untouched.
+
+    RED today: ``set_node_values`` has no ``new_caption`` parameter — ``TypeError: unexpected
+    keyword argument 'new_caption'``.
+    """
+    stub = _StubNeo4j(
+        {
+            "id": "surv-caption-unit",
+            "caption": "Stale Caption",
+            "prov_source_id": "keep-src",
+            "name": ["Kept Name"],
+        }
+    )
+
+    set_node_values(
+        stub,  # type: ignore[arg-type]
+        "surv-caption-unit",
+        compared_props={},
+        remove_anchor_keys=[],
+        new_caption="Recomputed Caption",
+    )
+
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("caption") == "Recomputed Caption", (
+        "new_caption must set the recomputed scalar caption"
+    )
+    assert isinstance(props.get("caption"), str), (
+        f"caption must stay a SCALAR string, never list-wrapped: got {props.get('caption')!r}"
+    )
+    assert props.get("prov_source_id") == "keep-src", "G1: prov_source_id must be preserved"
+    assert props.get("id") == "surv-caption-unit", "HIGH-1: id must be preserved"
+
+
+def test_set_node_values_new_caption_default_sentinel_leaves_caption_untouched() -> None:
+    """Fix design SS4: the "don't touch" default must genuinely leave ``caption`` untouched —
+    a plain ``str | None = None`` default would be AMBIGUOUS with "explicitly clear the caption
+    to empty", so the builder must use a real sentinel, never bare ``None``. This call omits
+    ``new_caption`` entirely: since the parameter does not exist yet, this exercises TODAY's
+    existing (already-correct, caption-untouched) behaviour under the OLD signature too —
+    GREEN both before and after the fix (the additive default must be backward-compatible; a
+    genuinely new-RED probe for the sentinel-vs-None distinction is impractical to observe from
+    the outside — the sentinel is an internal implementation detail — this test locks the
+    externally-observable CONTRACT: omitted ``new_caption`` never touches caption).
+    """
+    stub = _StubNeo4j(
+        {
+            "id": "surv-caption-unit-2",
+            "caption": "Untouched Caption",
+            "prov_source_id": "keep-src",
+        }
+    )
+
+    set_node_values(
+        stub,  # type: ignore[arg-type]
+        "surv-caption-unit-2",
+        compared_props={},
+        remove_anchor_keys=[],
+    )
+
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("caption") == "Untouched Caption", (
+        "the default (no new_caption passed) must leave caption COMPLETELY untouched"
+    )
+
+
+def test_set_node_values_remove_dataset_ids_strips_exactly_the_named_ids() -> None:
+    """Fix design SS3/SS4: ``remove_dataset_ids`` strips EXACTLY the named id(s) from the plain
+    ``datasets`` list, leaving every other entry untouched — no fold-based inference, a literal
+    -string removal (the caller already knows the exact erased ``source_id``). G1 preserved.
+
+    RED today: ``set_node_values`` has no ``remove_dataset_ids`` parameter — ``TypeError:
+    unexpected keyword argument 'remove_dataset_ids'``.
+    """
+    stub = _StubNeo4j(
+        {
+            "id": "surv-datasets-unit",
+            "prov_source_id": "keep-src",
+            "datasets": ["erased-src", "keep-src", "other-src"],
+        }
+    )
+
+    set_node_values(
+        stub,  # type: ignore[arg-type]
+        "surv-datasets-unit",
+        compared_props={},
+        remove_anchor_keys=[],
+        remove_dataset_ids=["erased-src"],
+    )
+
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert sorted(props.get("datasets") or []) == ["keep-src", "other-src"], (
+        f"remove_dataset_ids must strip EXACTLY the named id(s), got {props.get('datasets')!r}"
+    )
+    assert props.get("prov_source_id") == "keep-src", "G1: prov_source_id must be preserved"
+    assert props.get("id") == "surv-datasets-unit", "HIGH-1: id must be preserved"
+
+
+def test_set_node_values_remove_dataset_ids_default_is_a_noop() -> None:
+    """The default (``remove_dataset_ids`` omitted) must leave ``datasets`` completely
+    untouched — mirrors the caption sentinel-default contract test above (GREEN both before
+    and after the fix, since the parameter is purely additive)."""
+    stub = _StubNeo4j(
+        {
+            "id": "surv-datasets-unit-2",
+            "prov_source_id": "keep-src",
+            "datasets": ["keep-src", "other-src"],
+        }
+    )
+
+    set_node_values(
+        stub,  # type: ignore[arg-type]
+        "surv-datasets-unit-2",
+        compared_props={},
+        remove_anchor_keys=[],
+    )
+
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert sorted(props.get("datasets") or []) == ["keep-src", "other-src"], (
+        "the default (no remove_dataset_ids passed) must leave datasets COMPLETELY untouched"
+    )
+
+
+# ===========================================================================
+# prune_live_to_fold — the positive-attribution gate (fix design SS1, the CRITICAL fix)
+# ===========================================================================
+
+
+def test_prune_live_to_fold_positive_attribution_gate_skips_unattributed_prop() -> None:
+    """Fix design SS1 — the CRITICAL fix's positive-attribution gate at the unit level: a prop
+    NOT named in ``LogScrubResult.erased_survivor_props`` for a survivor must NEVER be added to
+    ``compared_props`` at all — left byte-identical on the live node, no matter what the fold
+    shows or doesn't show for it.
+
+    Stubs a Neo4j node carrying a ``profession`` value with ZERO backing ``StatementRecord``
+    (so the fold has no evidence for it either — the CURRENT buggy code would infer
+    "erased-source-only" from that absence and wipe it) and a ``LogScrubResult`` whose
+    ``erased_survivor_props`` names ONLY ``(survivor, "alias")`` — never ``"profession"`` —
+    proving the gate is a POSITIVE inclusion test, never an inference from fold-absence.
+
+    RED today: ``LogScrubResult`` has no ``erased_survivor_props`` field — ``TypeError:
+    unexpected keyword argument 'erased_survivor_props'``. ``prune_live_to_fold`` also still
+    takes a bare ``touched_survivors: Iterable[str]``, not the whole ``LogScrubResult`` (fix
+    design SS1) — this test necessarily exercises the NEW signature.
+    """
+    from worldmonitor.resolution.erasure_scrub import (
+        LogScrubResult,  # NEW field — does not exist yet
+        prune_live_to_fold,
+    )
+
+    engine, sessions = _sqlite_sessions()
+    survivor_id = "surv-gate-unit"
+    keep_src = "ksrc:gate-unit"
+    with sessions() as session:
+        session.add(_stmt(survivor_id, "m-keep", "name", "Gate Unit Name", keep_src))
+        session.commit()
+
+        scrub_result = LogScrubResult(
+            source_id="esrc:gate-unit",
+            erased_member_ids=frozenset({"m-erased"}),
+            touched_survivors=frozenset({survivor_id}),
+            statements_scrubbed=1,
+            context_claims_scrubbed=0,
+            decisions_redacted=0,
+            erased_survivor_props=frozenset({(survivor_id, "alias")}),
+        )
+
+        stub = _StubNeo4j(
+            {
+                "id": survivor_id,
+                "prov_source_id": keep_src,
+                "name": ["Gate Unit Name"],
+                "profession": ["LegacyNeverLoggedProfession"],
+            }
+        )
+
+        prune_live_to_fold(session, stub, scrub_result)  # type: ignore[arg-type]
+
+    assert len(stub.write_calls) == 1, "exactly one Neo4j write for the one touched survivor"
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("profession") == ["LegacyNeverLoggedProfession"], (
+        "POSITIVE-ATTRIBUTION GATE VIOLATED: a prop absent from erased_survivor_props must be "
+        f"left byte-identical, got profession={props.get('profession')!r}"
+    )
+    engine.dispose()
+
+
+def test_prune_live_to_fold_positive_attribution_gate_applies_to_anchors_too() -> None:
+    """Fix design SS1 — the SAME positive-attribution gate applies to ``remove_anchor_keys``:
+    an anchor key absent from ``erased_survivor_props`` must be left untouched even if the
+    fold's ``get_anchors`` carries no value for it (legacy/unlogged anchor claim).
+
+    RED today: same interface-RED as the sibling test above (``LogScrubResult`` has no
+    ``erased_survivor_props`` field; ``prune_live_to_fold`` takes a bare iterable, not the
+    whole ``LogScrubResult``).
+    """
+    from worldmonitor.resolution.erasure_scrub import (
+        LogScrubResult,  # NEW field — does not exist yet
+        prune_live_to_fold,
+    )
+
+    engine, sessions = _sqlite_sessions()
+    survivor_id = "surv-gate-anchor-unit"
+    keep_src = "ksrc:gate-anchor-unit"
+    with sessions() as session:
+        session.add(_stmt(survivor_id, "m-keep", "name", "Gate Anchor Unit Name", keep_src))
+        session.commit()
+
+        # erased_survivor_props names NOTHING for this survivor at all (the erasure reached a
+        # DIFFERENT survivor's rows only) — "lei" must be left completely untouched.
+        scrub_result = LogScrubResult(
+            source_id="esrc:gate-anchor-unit",
+            erased_member_ids=frozenset({"m-erased-elsewhere"}),
+            touched_survivors=frozenset({survivor_id}),
+            statements_scrubbed=0,
+            context_claims_scrubbed=0,
+            decisions_redacted=0,
+            erased_survivor_props=frozenset(),
+        )
+
+        stub = _StubNeo4j(
+            {
+                "id": survivor_id,
+                "prov_source_id": keep_src,
+                "name": ["Gate Anchor Unit Name"],
+                "lei": "LEIUNITGATEUNTOUCHED",
+            }
+        )
+
+        prune_live_to_fold(session, stub, scrub_result)  # type: ignore[arg-type]
+
+    assert len(stub.write_calls) == 1
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("lei") == "LEIUNITGATEUNTOUCHED", (
+        "POSITIVE-ATTRIBUTION GATE VIOLATED: an anchor key absent from erased_survivor_props "
+        f"must be left untouched, got lei={props.get('lei')!r}"
+    )
+    engine.dispose()
