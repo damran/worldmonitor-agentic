@@ -1316,3 +1316,191 @@ def test_it_erase_stock_skips_malformed_stats_rows_gracefully(
     assert remaining_valid == 0, "the valid row must still be correctly scrubbed"
 
     engine.dispose()
+
+
+# =========================================================================================
+# IT-ERASE-caption-sole-witness (fix-round NEW-1, HIGH — caption recompute must not be gated
+# on compared_props being non-empty)
+# =========================================================================================
+
+
+def test_it_erase_caption_recomputes_when_compared_props_ends_up_empty(
+    minio: tuple[str, str, str],
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+) -> None:
+    """IT-ERASE-caption-sole-witness / fix-round NEW-1 (HIGH).
+
+    A survivor whose ``name`` (the caption-relevant prop) is SOLE-witnessed by the erased
+    source: ``erase_source_graph`` (frozen, runs FIRST in ``erase_source``'s call sequence)
+    already pops ``name`` from the live node's props wholesale before ``prune_live_to_fold``
+    ever runs, so ``name`` never enters the per-prop loop at all. The survivor's OTHER prop
+    (``alias``) was never touched by the erased source either, so ``compared_props`` ends up
+    completely EMPTY.
+
+    RED today: today's caption gate (``if compared_props and fold_entity is not None:``) never
+    fires when ``compared_props`` is empty — the stale erased-source-only ``caption`` survives
+    the erase unchanged, even though the fold has a perfectly good new pick (``alias``).
+    """
+    erased_src = "esrc-caption-sole:it"
+    keep_src = "ksrc-caption-sole:it"
+    survivor_id = "surv-caption-sole-it"
+    m1 = f"{survivor_id}-m1"
+    m2 = f"{survivor_id}-m2"
+    name_value = "Sole Witnessed Caption Name"
+    alias_value = "Unrelated Kept Alias"
+
+    engine, sessions = _sessions(postgres_dsn)
+    with sessions() as session:
+        session.add(_stmt(survivor_id, m1, "name", name_value, erased_src))
+        session.add(_stmt(survivor_id, m2, "alias", alias_value, keep_src))
+        session.commit()
+
+    ensure_constraints(clean_graph)
+    by_id = {
+        m1: _person(m1, erased_src, {"name": [name_value]}),
+        m2: _person(m2, keep_src, {"alias": [alias_value]}),
+    }
+    merged, dropped = _merge_entities(survivor_id, (m1, m2), by_id)
+    assert dropped == ()
+    write_entities(clean_graph, [merged])
+    clean_graph.execute_write(
+        "MATCH (n:Entity {id: $id}) SET n.caption = $caption", id=survivor_id, caption=name_value
+    )
+    pre = _read_node(clean_graph, survivor_id)
+    assert pre is not None and pre.get("caption") == name_value
+
+    from worldmonitor.erasure import erase_source
+
+    with sessions() as session:
+        erase_source(
+            neo4j=clean_graph,
+            session=session,
+            landing=_landing(minio),
+            source_id=erased_src,
+            authorized_by="it-erase-caption-sole-op",
+        )
+        session.commit()
+
+    # Independent oracle: the SAME frozen reconstruct_entities prune_live_to_fold itself must
+    # use, over the POST-scrub remaining rows.
+    from worldmonitor.resolution.projector import build_survivor_of, reconstruct_entities
+
+    with sessions() as session:
+        survivor_of = build_survivor_of(session)
+        remaining_rows = list(session.execute(select(StatementRecord)).scalars())
+        fold_entities = {
+            e.id: e for e in reconstruct_entities(remaining_rows, survivor_of) if e.id is not None
+        }
+    expected_caption = fold_entities[survivor_id].caption
+
+    after = _read_node(clean_graph, survivor_id)
+    assert after is not None
+    assert "name" not in after, (
+        "precondition sanity: erase_source_graph must already have popped the sole-witnessed "
+        f"name prop, got name={after.get('name')!r}"
+    )
+    assert after.get("caption") == expected_caption, (
+        f"IT-ERASE-caption-sole-witness VIOLATED: n.caption={after.get('caption')!r} does not "
+        f"match the post-scrub fold's caption {expected_caption!r} (stale/uncomputed caption "
+        "when compared_props ends up empty)"
+    )
+    assert after.get("caption") != name_value, (
+        "non-vacuity: the caption must actually CHANGE off the sole-witnessed erased name"
+    )
+
+    engine.dispose()
+
+
+# =========================================================================================
+# IT-ERASE-shared-multivalued-prop (fix-round NEW-2, MEDIUM — value-level positive
+# attribution for a multi-valued prop)
+# =========================================================================================
+
+
+def test_it_erase_legacy_value_survives_sharing_a_multivalued_prop_with_an_erased_value(
+    minio: tuple[str, str, str],
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+) -> None:
+    """IT-ERASE-shared-multivalued-prop / fix-round NEW-2 (MEDIUM).
+
+    ONE multi-valued prop (``alias``) holds THREE live values: erased-source-logged, kept-
+    source-logged, and a legacy (never statement-logged) value from a THIRD, never-erased
+    source. ``erase_source_graph``'s witness map is prop-granular, so the whole value list
+    survives it untouched (other witnesses remain); ``prune_live_to_fold``'s
+    positive-attribution gate is (today) also only prop-granular, wiping every value it
+    couldn't positively re-derive from the fold's reconstruction — including the innocent
+    legacy value.
+
+    RED today: ``compared_props["alias"]`` is set to the fold's reconstructed value set
+    (``[kept_alias_value]`` only) — the legacy value is wiped alongside the genuinely-erased
+    one.
+    """
+    erased_src = "esrc-shared:it"
+    keep_src = "ksrc-shared:it"
+    legacy_src = "lsrc-shared:it"
+    survivor_id = "surv-shared-it"
+    m1 = f"{survivor_id}-m1"
+    m2 = f"{survivor_id}-m2"
+    m3 = f"{survivor_id}-m3"
+    shared_name = "Shared Multivalued Name"
+    erased_alias_value = "IT Erased Alias"
+    kept_alias_value = "IT Kept Alias"
+    legacy_alias_value = "IT Legacy Alias"
+
+    engine, sessions = _sessions(postgres_dsn)
+    with sessions() as session:
+        session.add(_stmt(survivor_id, m1, "name", shared_name, erased_src))
+        session.add(_stmt(survivor_id, m2, "name", shared_name, keep_src))
+        session.add(_stmt(survivor_id, m1, "alias", erased_alias_value, erased_src))
+        session.add(_stmt(survivor_id, m2, "alias", kept_alias_value, keep_src))
+        # m3's alias is DELIBERATELY never logged (legacy/pre-dual-write data) — no
+        # `_stmt(...)` call for it anywhere.
+        session.commit()
+
+    ensure_constraints(clean_graph)
+    by_id = {
+        m1: _person(m1, erased_src, {"name": [shared_name], "alias": [erased_alias_value]}),
+        m2: _person(m2, keep_src, {"name": [shared_name], "alias": [kept_alias_value]}),
+        m3: _person(m3, legacy_src, {"alias": [legacy_alias_value]}),
+    }
+    merged, dropped = _merge_entities(survivor_id, (m1, m2, m3), by_id)
+    assert dropped == ()
+    write_entities(clean_graph, [merged])
+
+    pre = _read_node(clean_graph, survivor_id)
+    assert pre is not None
+    pre_alias = set(pre.get("alias") or [])
+    assert pre_alias == {erased_alias_value, kept_alias_value, legacy_alias_value}, (
+        f"precondition: all three alias values must be live pre-erasure, got {pre_alias!r}"
+    )
+
+    from worldmonitor.erasure import erase_source
+
+    with sessions() as session:
+        erase_source(
+            neo4j=clean_graph,
+            session=session,
+            landing=_landing(minio),
+            source_id=erased_src,
+            authorized_by="it-erase-shared-op",
+        )
+        session.commit()
+
+    after = _read_node(clean_graph, survivor_id)
+    assert after is not None
+    after_alias = set(after.get("alias") or [])
+    assert erased_alias_value not in after_alias, (
+        f"IT-ERASE-shared (a) VIOLATED: the erased-source-logged value survives: {after_alias!r}"
+    )
+    assert kept_alias_value in after_alias, "non-vacuity: the kept, still-logged value must survive"
+    assert legacy_alias_value in after_alias, (
+        "IT-ERASE-shared (b) NEW-2 VIOLATED: the legacy (never statement-logged) alias value "
+        f"from an UN-erased source was wiped: alias={after_alias!r}"
+    )
+    assert after_alias == {kept_alias_value, legacy_alias_value}, (
+        f"IT-ERASE-shared VIOLATED: expected EXACTLY the kept + legacy values, got {after_alias!r}"
+    )
+
+    engine.dispose()

@@ -929,3 +929,305 @@ def test_p_erase_5_legacy_unlogged_data_survives_unrelated_erasure(
         )
     finally:
         engine.dispose()
+
+
+# ===========================================================================
+# P-ERASE-6: caption recompute must fire even when compared_props ends up empty
+# (fix-round NEW-1, HIGH — the sole-witnessed-caption-source bug)
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class _CaptionCorpusIds:
+    erased_src: str
+    keep_src: str
+    survivor_id: str
+    m1: str
+    m2: str
+    name_value: str
+    alias_value: str
+
+
+def _seed_p6_scenario(
+    session: Session, neo4j: Neo4jClient, scenario: _EraseScenario
+) -> _CaptionCorpusIds:
+    """Seed the NEW-1 corpus: ``name`` (the caption-relevant prop) is SOLE-witnessed by
+    ``erased_src`` — no other source contributes a ``name`` value for this survivor at all. A
+    DIFFERENT, UNRELATED prop (``alias``) is contributed only by ``keep_src`` — ``erased_src``
+    never touches it. ``erase_source_graph`` (frozen, runs BEFORE ``prune_live_to_fold``) has
+    already popped ``name`` from the live node's props wholesale (its sole witness is gone) by
+    the time ``prune_live_to_fold`` reads ``current_props`` — so ``name`` never enters the
+    per-prop loop at all, and since ``alias`` was never touched by ``erased_src`` either,
+    ``compared_props`` ends up completely EMPTY for this survivor.
+    """
+    sfx = scenario.suffix
+    erased_src = f"esrc6:{sfx}"
+    keep_src = f"ksrc6:{sfx}"
+    survivor_id = f"surv6-{sfx}"
+    m1 = f"{survivor_id}-m1"
+    m2 = f"{survivor_id}-m2"
+    name_value = f"SoleCaptionName-{sfx}"
+    alias_value = f"UnrelatedKeptAlias-{sfx}"
+
+    session.add(_stmt(survivor_id, m1, "name", name_value, erased_src))
+    session.add(_stmt(survivor_id, m2, "alias", alias_value, keep_src))
+    session.commit()
+
+    ensure_constraints(neo4j)
+    by_id = {
+        m1: _person(m1, erased_src, {"name": [name_value]}),
+        m2: _person(m2, keep_src, {"alias": [alias_value]}),
+    }
+    merged, dropped = _merge_entities(survivor_id, (m1, m2), by_id)
+    assert dropped == (), f"unexpected schema-incompatible drop: {dropped!r}"
+    write_entities(neo4j, [merged])
+    # Force the PRE-erasure live caption deterministically (mirrors
+    # test_it_erase_caption_recomputed_not_stale's convention) — FtM's own pick order already
+    # favours `name` over `alias` here, but forcing keeps the precondition explicit/robust.
+    neo4j.execute_write(
+        "MATCH (n:Entity {id: $id}) SET n.caption = $caption", id=survivor_id, caption=name_value
+    )
+
+    return _CaptionCorpusIds(
+        erased_src=erased_src,
+        keep_src=keep_src,
+        survivor_id=survivor_id,
+        m1=m1,
+        m2=m2,
+        name_value=name_value,
+        alias_value=alias_value,
+    )
+
+
+@pytest.mark.integration
+@given(scenario=_p_erase_scenario())
+@example(scenario=_EraseScenario(suffix="p6caption1"))
+@_SETTINGS
+def test_p_erase_6_sole_witnessed_caption_source_still_recomputes_caption(
+    scenario: _EraseScenario,
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+    minio: tuple[str, str, str],
+) -> None:
+    """P-ERASE-6 — fix-round NEW-1 (HIGH): the caption recompute must fire off ``fold_entity``
+    alone, NEVER gated on ``compared_props`` being non-empty.
+
+    RED today: ``erase_source_graph`` already pops the sole-witnessed ``name`` prop from the
+    live node BEFORE ``prune_live_to_fold`` ever runs, so ``name`` never enters the per-prop
+    loop at all; ``alias`` was never touched by ``erased_src`` either, so ``compared_props``
+    ends up EMPTY. Today's gate (``if compared_props and fold_entity is not None:``) then NEVER
+    recomputes the caption — the stale erased-source-only name survives on ``n.caption``
+    forever, even though the fold (``alias`` remains) has a perfectly good new pick.
+    """
+    _cleanup_postgres(postgres_dsn)
+    clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+
+    engine = make_engine(postgres_dsn)
+    try:
+        create_all(engine)
+        sessions = session_factory(engine)
+        landing = _landing(minio)
+
+        with sessions() as session:
+            corpus = _seed_p6_scenario(session, clean_graph, scenario)
+
+        pre = _read_node(clean_graph, corpus.survivor_id)
+        assert pre is not None and pre.get("caption") == corpus.name_value, (
+            "precondition: the live caption must start as the erased-source-only name"
+        )
+
+        from worldmonitor.erasure import erase_source
+
+        with sessions() as session:
+            erase_source(
+                neo4j=clean_graph,
+                session=session,
+                landing=landing,
+                source_id=corpus.erased_src,
+                authorized_by="p2-prop-op-6",
+            )
+            session.commit()
+
+        # Independent oracle: the SAME frozen reconstruct_entities prune_live_to_fold itself
+        # must use, over the POST-scrub remaining rows — not a second, hand-rolled expectation.
+        from worldmonitor.resolution.projector import build_survivor_of, reconstruct_entities
+
+        with sessions() as session:
+            survivor_of = build_survivor_of(session)
+            remaining_rows = list(session.execute(select(StatementRecord)).scalars())
+            fold_entities = {
+                e.id: e
+                for e in reconstruct_entities(remaining_rows, survivor_of)
+                if e.id is not None
+            }
+        expected_caption = fold_entities[corpus.survivor_id].caption
+
+        after = _read_node(clean_graph, corpus.survivor_id)
+        assert after is not None, "the multi-source survivor must SURVIVE a partial erase"
+        assert after.get("caption") == expected_caption, (
+            f"P-ERASE-6 NEW-1 VIOLATED: n.caption={after.get('caption')!r} does not match the "
+            f"post-scrub fold's caption {expected_caption!r} — a caption recompute gated on "
+            "compared_props being non-empty skips recomputation whenever the ONLY genuinely-"
+            "erased prop was already popped by erase_source_graph before prune_live_to_fold "
+            "ever ran"
+        )
+        assert after.get("caption") != corpus.name_value, (
+            "non-vacuity: the caption must actually CHANGE off the sole-witnessed erased name"
+        )
+    finally:
+        engine.dispose()
+
+
+# ===========================================================================
+# P-ERASE-7: a value-level positive-attribution gate for multi-valued props
+# (fix-round NEW-2, MEDIUM — the shared-prop legacy-value bug)
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class _SharedPropCorpusIds:
+    erased_src: str
+    keep_src: str
+    legacy_src: str
+    survivor_id: str
+    m1: str
+    m2: str
+    m3: str
+    erased_alias_value: str
+    kept_alias_value: str
+    legacy_alias_value: str
+
+
+def _seed_p7_scenario(
+    session: Session, neo4j: Neo4jClient, scenario: _EraseScenario
+) -> _SharedPropCorpusIds:
+    """Seed the NEW-2 corpus: ONE multi-valued prop (``alias``) with THREE live values —
+    ``erased_alias_value`` (statement-logged, dataset==erased_src, genuinely reached),
+    ``kept_alias_value`` (statement-logged, dataset==keep_src, survives the scrub), and
+    ``legacy_alias_value`` (NEVER statement-logged at all — contributed by a THIRD,
+    never-erased source, mirroring pre-dual-write legacy data). ``erase_source_graph``'s
+    witness map is PROP-granular (not per-value): since ``alias`` still has surviving witnesses
+    (keep_src/legacy_src) after ``erased_src`` is pruned from the witness map, the whole live
+    value LIST is left byte-identical by ``erase_source_graph`` — the value-level filter is
+    entirely ``prune_live_to_fold``'s job.
+    """
+    sfx = scenario.suffix
+    erased_src = f"esrc7:{sfx}"
+    keep_src = f"ksrc7:{sfx}"
+    legacy_src = f"lsrc7:{sfx}"
+    survivor_id = f"surv7-{sfx}"
+    m1 = f"{survivor_id}-m1"
+    m2 = f"{survivor_id}-m2"
+    m3 = f"{survivor_id}-m3"
+    erased_alias_value = f"ErasedAlias-{sfx}"
+    kept_alias_value = f"KeptAlias-{sfx}"
+    legacy_alias_value = f"LegacyAlias-{sfx}"
+    shared_name = f"SharedNameSeven-{sfx}"
+
+    session.add(_stmt(survivor_id, m1, "name", shared_name, erased_src))
+    session.add(_stmt(survivor_id, m2, "name", shared_name, keep_src))
+    session.add(_stmt(survivor_id, m1, "alias", erased_alias_value, erased_src))
+    session.add(_stmt(survivor_id, m2, "alias", kept_alias_value, keep_src))
+    # m3's alias contribution is DELIBERATELY never logged (legacy/pre-dual-write data) — no
+    # `_stmt(...)` call, no `ContextClaimRecord`, for m3 anywhere.
+    session.commit()
+
+    ensure_constraints(neo4j)
+    by_id = {
+        m1: _person(m1, erased_src, {"name": [shared_name], "alias": [erased_alias_value]}),
+        m2: _person(m2, keep_src, {"name": [shared_name], "alias": [kept_alias_value]}),
+        m3: _person(m3, legacy_src, {"alias": [legacy_alias_value]}),
+    }
+    merged, dropped = _merge_entities(survivor_id, (m1, m2, m3), by_id)
+    assert dropped == (), f"unexpected schema-incompatible drop: {dropped!r}"
+    write_entities(neo4j, [merged])
+
+    return _SharedPropCorpusIds(
+        erased_src=erased_src,
+        keep_src=keep_src,
+        legacy_src=legacy_src,
+        survivor_id=survivor_id,
+        m1=m1,
+        m2=m2,
+        m3=m3,
+        erased_alias_value=erased_alias_value,
+        kept_alias_value=kept_alias_value,
+        legacy_alias_value=legacy_alias_value,
+    )
+
+
+@pytest.mark.integration
+@given(scenario=_p_erase_scenario())
+@example(scenario=_EraseScenario(suffix="p7shared01"))
+@_SETTINGS
+def test_p_erase_7_legacy_value_survives_when_sharing_a_prop_with_an_erased_value(
+    scenario: _EraseScenario,
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+    minio: tuple[str, str, str],
+) -> None:
+    """P-ERASE-7 — fix-round NEW-2 (MEDIUM): the positive-attribution gate must be VALUE-level,
+    not prop-level, for a multi-valued prop.
+
+    RED today: ``compared_props[prop_name]`` is computed from the fold's RECONSTRUCTED value
+    set (``sorted(str(v) for v in fold_entity.get(fold_prop))``), which only ever contains
+    values the (remaining) statement log still carries. The legacy, never-logged
+    ``legacy_alias_value`` is NOT in the fold's set either — even though ``legacy_src`` was
+    never named in this erasure at all — so it is wiped ALONGSIDE the genuinely-erased value.
+    Only the kept, STILL-logged value survives.
+    """
+    _cleanup_postgres(postgres_dsn)
+    clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+
+    engine = make_engine(postgres_dsn)
+    try:
+        create_all(engine)
+        sessions = session_factory(engine)
+        landing = _landing(minio)
+
+        with sessions() as session:
+            corpus = _seed_p7_scenario(session, clean_graph, scenario)
+
+        pre = _read_node(clean_graph, corpus.survivor_id)
+        assert pre is not None
+        pre_alias = set(pre.get("alias") or [])
+        assert pre_alias == {
+            corpus.erased_alias_value,
+            corpus.kept_alias_value,
+            corpus.legacy_alias_value,
+        }, f"precondition: all three alias values must be live pre-erasure, got {pre_alias!r}"
+
+        from worldmonitor.erasure import erase_source
+
+        with sessions() as session:
+            erase_source(
+                neo4j=clean_graph,
+                session=session,
+                landing=landing,
+                source_id=corpus.erased_src,
+                authorized_by="p2-prop-op-7",
+            )
+            session.commit()
+
+        after = _read_node(clean_graph, corpus.survivor_id)
+        assert after is not None, "the multi-source survivor must SURVIVE a partial erase"
+        after_alias = set(after.get("alias") or [])
+
+        assert corpus.erased_alias_value not in after_alias, (
+            "P-ERASE-7 (a) VIOLATED: the genuinely erased-source-logged value survives: "
+            f"alias={after_alias!r}"
+        )
+        assert corpus.kept_alias_value in after_alias, (
+            "non-vacuity: the kept, still-logged value must survive"
+        )
+        assert corpus.legacy_alias_value in after_alias, (
+            "P-ERASE-7 (b) NEW-2 VIOLATED: the legacy (never statement-logged) alias value from "
+            f"an UN-erased source was wiped: alias={after_alias!r} — a PROP-level positive-"
+            "attribution gate wrongly wipes every value in a shared multi-valued prop whenever "
+            "ANY one of its values was genuinely erased, wiping innocent co-located values too"
+        )
+        assert after_alias == {corpus.kept_alias_value, corpus.legacy_alias_value}, (
+            f"P-ERASE-7 VIOLATED: expected EXACTLY the kept + legacy values, got {after_alias!r}"
+        )
+    finally:
+        engine.dispose()

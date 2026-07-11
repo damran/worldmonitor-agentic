@@ -653,3 +653,177 @@ def test_prune_live_to_fold_positive_attribution_gate_applies_to_anchors_too() -
         f"must be left untouched, got lei={props.get('lei')!r}"
     )
     engine.dispose()
+
+
+# ===========================================================================
+# prune_live_to_fold — caption recompute must not be gated on compared_props
+# (fix-round NEW-1, HIGH)
+# ===========================================================================
+
+
+def test_prune_live_to_fold_caption_recomputes_even_when_compared_props_is_empty() -> None:
+    """Fix-round NEW-1 (HIGH) at the unit level: the caption recompute must fire off
+    ``fold_entity`` ALONE — never gated on ``compared_props`` being non-empty.
+
+    Stubs the state AFTER ``erase_source_graph`` has ALREADY popped a sole-witnessed ``name``
+    prop from the live node (it is simply ABSENT from the stub's current props) and a
+    ``LogScrubResult`` whose ``erased_survivor_props`` names ONLY ``(survivor, "name")`` — the
+    survivor's OTHER prop (``alias``) is never touched by the erasure either, so
+    ``compared_props`` ends up completely EMPTY. A remaining ``alias`` ``StatementRecord`` row
+    still gives the fold a real ``caption`` pick.
+
+    RED today: ``prune_live_to_fold``'s caption gate is ``if compared_props and fold_entity is
+    not None:`` — with ``compared_props == {}`` this never fires, so ``new_caption`` is never
+    passed to ``set_node_values`` at all (the stub's stale caption is left byte-identical).
+    """
+    from worldmonitor.resolution.erasure_scrub import LogScrubResult, prune_live_to_fold
+
+    engine, sessions = _sqlite_sessions()
+    survivor_id = "surv-caption-gate-unit"
+    keep_src = "ksrc:caption-gate-unit"
+    with sessions() as session:
+        # The ONLY remaining statement row for this survivor after the (simulated) scrub —
+        # `name` was reached/deleted; `alias` was never touched.
+        session.add(_stmt(survivor_id, "m-keep", "alias", "Fold Picked Alias", keep_src))
+        session.commit()
+
+        scrub_result = LogScrubResult(
+            source_id="esrc:caption-gate-unit",
+            erased_member_ids=frozenset({"m-erased"}),
+            touched_survivors=frozenset({survivor_id}),
+            statements_scrubbed=1,
+            context_claims_scrubbed=0,
+            decisions_redacted=0,
+            erased_survivor_props=frozenset({(survivor_id, "name")}),
+        )
+
+        stub = _StubNeo4j(
+            {
+                "id": survivor_id,
+                "prov_source_id": keep_src,
+                "caption": "Stale Sole Witnessed Name",
+                # NOTE: no "name" key at all — simulates erase_source_graph already having
+                # popped it wholesale (its sole witness is gone) BEFORE this function ever runs.
+                "alias": ["Fold Picked Alias"],
+            }
+        )
+
+        prune_live_to_fold(session, stub, scrub_result)  # type: ignore[arg-type]
+
+    assert len(stub.write_calls) == 1, "exactly one Neo4j write for the one touched survivor"
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("caption") == "Fold Picked Alias", (
+        "NEW-1 VIOLATED: caption must be recomputed off the fold even when compared_props ends "
+        f"up empty, got caption={props.get('caption')!r}"
+    )
+    assert props.get("caption") != "Stale Sole Witnessed Name", (
+        "non-vacuity: the caption must actually change off the stale sole-witnessed value"
+    )
+    engine.dispose()
+
+
+# ===========================================================================
+# LogScrubResult.erased_survivor_values + the value-level positive-attribution filter
+# (fix-round NEW-2, MEDIUM)
+# ===========================================================================
+
+
+def test_scrub_log_lanes_erased_survivor_values_carries_the_literal_value() -> None:
+    """Fix-round NEW-2: ``scrub_log_lanes`` must additionally capture the literal
+    ``StatementRecord.value`` for every REACHED row, as ``(survivor, prop, value)`` triples —
+    from the SAME reach predicate/query, never a second query. A prop with TWO live values
+    (one from the erased source, one from a kept source) must have ONLY the erased one's
+    triple present.
+
+    RED today: ``LogScrubResult`` has no ``erased_survivor_values`` field —
+    ``AttributeError: 'LogScrubResult' object has no attribute 'erased_survivor_values'``.
+    """
+    engine, sessions = _sqlite_sessions()
+    erased_src = "esrc:values-1"
+    keep_src = "ksrc:values-1"
+    survivor_id = "surv-values-1"
+    m1, m2 = "m-values-1-erased", "m-values-1-kept"
+    erased_value = "ErasedValueOne"
+    kept_value = "KeptValueOne"
+
+    with sessions() as session:
+        session.add(_stmt(survivor_id, m1, "alias", erased_value, erased_src))
+        session.add(_stmt(survivor_id, m2, "alias", kept_value, keep_src))
+        session.commit()
+
+        result = scrub_log_lanes(session, erased_src)
+        session.commit()
+
+    erased_survivor_values = result.erased_survivor_values  # type: ignore[attr-defined]
+    assert (survivor_id, "alias", erased_value) in erased_survivor_values, (
+        "erased_survivor_values must carry the literal (survivor, prop, value) triple for "
+        f"every reached row, got {erased_survivor_values!r}"
+    )
+    assert (survivor_id, "alias", kept_value) not in erased_survivor_values, (
+        "a kept (non-reached) value must NEVER appear in erased_survivor_values, got "
+        f"{erased_survivor_values!r}"
+    )
+    engine.dispose()
+
+
+def test_prune_live_to_fold_value_level_filter_spares_legacy_value_sharing_a_prop() -> None:
+    """Fix-round NEW-2 at the unit level: the per-value positive-attribution filter must
+    compute ``compared_props[prop]`` as ``current_props[prop]`` MINUS exactly the values
+    ``erased_survivor_values`` positively attributes to THIS scrub — never the fold's
+    reconstructed value set (which silently wipes any never-logged/legacy value sharing the
+    same prop).
+
+    Stubs a live node holding THREE values for ``alias`` — erased (reached+logged), kept
+    (unreached, logged), legacy (never logged at all) — and a ``LogScrubResult`` whose
+    ``erased_survivor_values`` names ONLY the erased triple.
+
+    RED today: ``LogScrubResult`` has no ``erased_survivor_values`` field at all —
+    ``TypeError: __init__() got an unexpected keyword argument 'erased_survivor_values'`` (this
+    test constructs one directly) — and even once that field exists, ``prune_live_to_fold``
+    must actually USE it in place of the fold's reconstruction for this to go GREEN.
+    """
+    from worldmonitor.resolution.erasure_scrub import LogScrubResult, prune_live_to_fold
+
+    engine, sessions = _sqlite_sessions()
+    survivor_id = "surv-value-filter-unit"
+    keep_src = "ksrc:value-filter-unit"
+    erased_value = "ValueFilterErased"
+    kept_value = "ValueFilterKept"
+    legacy_value = "ValueFilterLegacy"
+    with sessions() as session:
+        # The ONLY remaining statement row for this survivor after the (simulated) scrub — the
+        # erased row was already deleted; this one (kept) remains.
+        session.add(_stmt(survivor_id, "m-keep", "alias", kept_value, keep_src))
+        session.commit()
+
+        scrub_result = LogScrubResult(
+            source_id="esrc:value-filter-unit",
+            erased_member_ids=frozenset({"m-erased"}),
+            touched_survivors=frozenset({survivor_id}),
+            statements_scrubbed=1,
+            context_claims_scrubbed=0,
+            decisions_redacted=0,
+            erased_survivor_props=frozenset({(survivor_id, "alias")}),
+            erased_survivor_values=frozenset({(survivor_id, "alias", erased_value)}),
+        )
+
+        stub = _StubNeo4j(
+            {
+                "id": survivor_id,
+                "prov_source_id": keep_src,
+                "alias": [erased_value, kept_value, legacy_value],
+            }
+        )
+
+        prune_live_to_fold(session, stub, scrub_result)  # type: ignore[arg-type]
+
+    assert len(stub.write_calls) == 1
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert sorted(props.get("alias") or []) == sorted([kept_value, legacy_value]), (
+        "NEW-2 VIOLATED: compared_props must be current_props MINUS exactly the positively-"
+        f"attributed erased value(s), got alias={props.get('alias')!r} (expected exactly "
+        f"[{kept_value!r}, {legacy_value!r}] — the legacy value sharing this prop must survive; "
+        "a fold-reconstruction-based replacement would wipe it alongside the genuinely erased "
+        "value)"
+    )
+    engine.dispose()
