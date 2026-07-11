@@ -17,6 +17,12 @@ This file holds BOTH:
 
 RED today: ``worldmonitor.erasure`` does not exist (imported lazily inside each test so the file
 collects); ``LandingStore.delete`` / ``delete_prefix`` are not implemented yet.
+
+Gate P2 (ADR 0107) additive extension, appended at the end of this file (``test_t9``/``test_t10``):
+erase_source ALSO reaches the Gate-2a/P1 statement-log dual-write and gains additive
+``TaskRun.stats`` scrub-count keys — added ON TOP of the existing, LOCKED ``_STATS_KEYS`` /
+``_COUNT_KEYS`` below (untouched, unweakened) and the existing ``test_t3``..``test_t6`` (untouched,
+including ``test_t4``'s idempotent zero-run assertion at what was originally line 372).
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from worldmonitor.db.models import (
     MergeAudit,
     ResolverJudgement,
     SignOff,
+    StatementRecord,
     TaskRun,
 )
 from worldmonitor.graph.constraints import ensure_constraints
@@ -61,6 +68,17 @@ _COUNT_KEYS = (
     "dead_letters_redacted",
 )
 _STATS_KEYS = ("source_id", "authorized_by", *_COUNT_KEYS)
+
+# Gate P2 (ADR 0107) — the ADDITIVE per-lane scrub-count fields ErasureResult/TaskRun.stats gain
+# ON TOP of the existing _COUNT_KEYS/_STATS_KEYS above (those stay byte-unchanged, locked by
+# test_t3/test_t4/test_t5a/test_t6 below — this is a SEPARATE, additive contract this gate's
+# builder must satisfy; it does not replace or narrow the original keys).
+_SCRUB_COUNT_KEYS = (
+    "statements_scrubbed",
+    "context_claims_scrubbed",
+    "decisions_redacted",
+    "survivors_value_pruned",
+)
 
 
 # ================================================ Docker-free pure-logic tests (no mark)
@@ -614,4 +632,143 @@ def test_t6_erase_preserves_ledger_judgements_signoff_and_audit(
         assert resolve_node_id(s, "mA") == durable
         via_alias = get_entity_by_alias(clean_graph, s, entity_id="mA")
         assert via_alias is not None and via_alias["id"] == durable
+    engine.dispose()
+
+
+# ============================================================ Gate P2 (ADR 0107) — ADDITIVE T9/T10
+#
+# Everything above this line is UNCHANGED from the pre-P2 file (byte-identical assertions,
+# including test_t4's idempotent zero-run over _COUNT_KEYS). The two tests below are NEW and
+# ADDITIVE: they extend erase_source's oracle to the Gate-2a/P1 statement-log lane this gate
+# wires the scrub into, and to the additive TaskRun.stats scrub-count keys (_SCRUB_COUNT_KEYS,
+# defined above, alongside — never replacing — the original _STATS_KEYS/_COUNT_KEYS).
+
+
+# =========================================================================================== T9
+
+
+@pytest.mark.integration
+def test_t9_erase_scrubs_the_statement_log_and_extends_stats_additively(
+    minio: tuple[str, str, str], postgres_dsn: str, clean_graph: Neo4jClient
+) -> None:
+    """Gate P2 (ADR 0107). ``resolve_pending`` already dual-writes ``StatementRecord`` rows for
+    every promoted cluster (Gate 2a, ``pipeline.py:487`` — unconditional, including singletons).
+    ``erase_source`` must ALSO scrub those rows for the erased source, and ``TaskRun.stats`` must
+    carry the ADDITIVE ``_SCRUB_COUNT_KEYS`` on top of the existing, unmodified ``_STATS_KEYS``.
+
+    RED today: no scrub runs at all — the statement row(s) survive erase_source, and
+    ``TaskRun.stats`` carries NONE of ``_SCRUB_COUNT_KEYS`` (``KeyError`` on lookup).
+    """
+    landing = _landing(minio)
+    engine, sessions = _sessions(postgres_dsn)
+    ensure_constraints(clean_graph)
+
+    pii = "Scrub Lane Testperson"
+    connector = _PiiConnector([_record("scrub-good")], name_for={"scrub-good": pii})
+    with sessions() as session:
+        run_ingest(connector, {"dataset": "scrub-lane"}, landing=landing, session=session)
+    with sessions() as session:
+        resolve_pending(session=session, neo4j=clean_graph)
+
+    source_id = "testsrc:scrub-lane"
+    with sessions() as session:
+        pre_rows = (
+            session.execute(select(StatementRecord).where(StatementRecord.dataset == source_id))
+            .scalars()
+            .all()
+        )
+    assert len(pre_rows) >= 1, "precondition: resolve_pending must dual-write statement rows"
+
+    from worldmonitor.erasure import erase_source
+
+    with sessions() as session:
+        erase_source(
+            neo4j=clean_graph,
+            session=session,
+            landing=landing,
+            source_id=source_id,
+            authorized_by="dpo-p2@worldmonitor",
+        )
+        session.commit()
+
+    with sessions() as session:
+        post_rows = (
+            session.execute(select(StatementRecord).where(StatementRecord.dataset == source_id))
+            .scalars()
+            .all()
+        )
+    assert post_rows == [], (
+        f"Gate P2 INV-ERASE-3LANE: statement rows for {source_id!r} must be scrubbed by "
+        f"erase_source, {len(post_rows)} survive"
+    )
+
+    with sessions() as session:
+        runs = session.execute(select(TaskRun).where(TaskRun.kind == "erase")).scalars().all()
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.stats is not None
+    for key in _STATS_KEYS:
+        assert key in run.stats, f"the EXISTING (locked) stats key {key!r} must still be present"
+    for key in _SCRUB_COUNT_KEYS:
+        assert key in run.stats, f"Gate P2: the ADDITIVE scrub-count key {key!r} must be present"
+    assert run.stats["statements_scrubbed"] >= 1, (
+        "at least one statement row (the singleton's) must be counted as scrubbed"
+    )
+    engine.dispose()
+
+
+# ========================================================================================== T10
+
+
+@pytest.mark.integration
+def test_t10_second_erase_scrub_counts_are_also_zero(
+    minio: tuple[str, str, str], postgres_dsn: str, clean_graph: Neo4jClient
+) -> None:
+    """Gate P2 (ADR 0107). A SECOND ``erase_source`` on an already-erased source has ALL-ZERO
+    ``_SCRUB_COUNT_KEYS`` too — extending ``test_t4``'s idempotent zero-run (over the ORIGINAL,
+    unmodified ``_COUNT_KEYS``) to the new lanes, without touching ``test_t4`` itself.
+
+    RED today: ``_SCRUB_COUNT_KEYS`` is simply absent from ``run.stats`` — ``KeyError`` on lookup.
+    """
+    landing = _landing(minio)
+    engine, sessions = _sessions(postgres_dsn)
+    ensure_constraints(clean_graph)
+
+    connector = _PiiConnector([_record("scrub2-a")], name_for={"scrub2-a": "Scrub Two Subject"})
+    with sessions() as session:
+        run_ingest(connector, {"dataset": "scrub-lane-2"}, landing=landing, session=session)
+    with sessions() as session:
+        resolve_pending(session=session, neo4j=clean_graph)
+
+    source_id = "testsrc:scrub-lane-2"
+    from worldmonitor.erasure import erase_source
+
+    for authorized_by in ("dpo-first", "dpo-second"):
+        with sessions() as session:
+            erase_source(
+                neo4j=clean_graph,
+                session=session,
+                landing=landing,
+                source_id=source_id,
+                authorized_by=authorized_by,
+            )
+            session.commit()
+
+    with sessions() as session:
+        runs = (
+            session.execute(
+                select(TaskRun).where(TaskRun.kind == "erase").order_by(TaskRun.started_at)
+            )
+            .scalars()
+            .all()
+        )
+    assert len(runs) == 2
+    second = runs[1]
+    assert second.stats is not None
+    for key in _SCRUB_COUNT_KEYS:
+        assert key in second.stats, f"the ADDITIVE key {key!r} must be present on EVERY run"
+        assert second.stats[key] == 0, (
+            f"Gate P2 idempotent zero-run: the SECOND erase's {key!r} must be 0, got "
+            f"{second.stats[key]!r}"
+        )
     engine.dispose()
