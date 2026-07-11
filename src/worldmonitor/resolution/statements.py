@@ -127,6 +127,7 @@ def record_decision(
     cluster: ResolvedCluster,
     *,
     reason: str,
+    decided_by: str = "auto:resolver",
 ) -> None:
     """``session.add`` one :class:`DecisionRecord` for a promoted merge (caller commits).
 
@@ -136,8 +137,11 @@ def record_decision(
 
     Append-only: ``supersedes`` / ``superseded_by`` stay ``NULL`` in step 1 (the
     un-merge / belief-revision write path is a Gate 3 concern, ADR 0099 §Deferred).
-    ``decided_by`` is ``"auto:resolver"`` — the automated decider identity; the
-    human-decision path (``decided_by=<operator>``) is a later gate.
+    ``decided_by`` DEFAULTS to ``"auto:resolver"`` — the automated decider identity,
+    keeping the pipeline's call byte-behaviour-identical. The reserved human-decision
+    path (Gate P3 / ADR 0108) passes ``decided_by=f"operator:{approver}"`` from
+    ``resolution/signoff.py``'s ``approve()`` so a rebuild can attribute a merge to the
+    human who approved it, distinct from the automated resolver's decisions.
     """
     if not cluster.is_merge:
         return  # no-op for singletons — safe to call unconditionally (P-STMT-3b)
@@ -149,7 +153,7 @@ def record_decision(
             kind="merge",
             member_ids=list(cluster.member_ids),
             score=cluster.score,
-            decided_by="auto:resolver",
+            decided_by=decided_by,
             evidence={"reason": reason} if reason else None,
             supersedes=None,
             superseded_by=None,

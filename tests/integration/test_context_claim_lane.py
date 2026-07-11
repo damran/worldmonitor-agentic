@@ -605,49 +605,56 @@ def test_migration_0012_upgrade_backfills_preseeded_checkpoint_default(
 # ===========================================================================
 
 
-def test_context_only_survivor_after_signoff_approve_is_projector_no_op(
+def test_context_only_survivor_without_statements_is_projector_no_op(
     clean_graph: Neo4jClient,
     postgres_dsn: str,
 ) -> None:
-    """(f): after signoff.approve() (context claims banked, ZERO statement rows — P1 does not
-    close the sign-off statement/decision gap, that is Gate P3), project(full_rebuild=True)
-    completes WITHOUT error and produces NO node for that survivor (dormant-until-P3, ADR
-    0106 §2.b.2 — a graceful no-op, never a crash).
+    """(f), FLIPPED (Gate P3 / ADR 0108): ``signoff.approve()`` now co-commits statement rows
+    for the survivor (P3 un-dormants a sign-off-approved survivor — see
+    ``tests/integration/test_signoff_spine.py``'s ``IT-SIGN-approve``), so the P1-era
+    "approve() -> zero statement rows -> no fold node" precondition this test used to pin no
+    longer holds through ``signoff.approve()``. The GENUINE projector no-op this test protects
+    — a context-claim-only survivor (zero statement rows) yields NO fold node, a graceful
+    no-op, never a crash (ADR 0106 §2.b.2: ``reconstruct_entities`` groups by statement rows)
+    — is repointed here to a SYNTHETIC statement-less survivor: a bare ``ContextClaimRecord``
+    with NO corresponding ``StatementRecord``, inserted directly (no signoff/pipeline call), so
+    this pin is now INDEPENDENT of whichever write path happens to route through the statement
+    spine. The sign-off-approve UN-DORMANTING itself is asserted by
+    ``tests/integration/test_signoff_spine.py``'s ``IT-SIGN-approve``, not here.
 
-    RED today: ImportError — ContextClaimRecord does not exist yet.
+    RED today: ImportError — ContextClaimRecord does not exist yet [Gate P1 precondition,
+    unchanged by this flip].
     """
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
 
+    canonical_id = "p3-flip-context-only-survivor"
     with sessions() as session:
-        _seed_and_resolve(session, clean_graph)
-
-    with sessions() as session:
-        parked_audit = session.execute(
-            select(MergeAudit).where(MergeAudit.decision == "pending_review")
-        ).scalar_one()
-        parked_canonical = parked_audit.canonical_id
-
-    with sessions() as session:
-        signoff.approve(
-            session,
-            clean_graph,
-            canonical_id=parked_canonical,
-            approver="ctx-lane-no-op-test",
-            reason="context-only no-op probe",
+        session.add(
+            ContextClaimRecord(
+                id=str(uuid.uuid4()),
+                canonical_id=canonical_id,
+                entity_id=f"{canonical_id}-member",
+                key="wikidata_id",
+                value="Q3FLIP0001",
+                dataset=_SRC,
+                method="connector:map",
+                retrieved_at=_RETRIEVED_AT,
+                scope="default",
+            )
         )
+        session.commit()
 
     with sessions() as session:
         stmt_count = session.execute(
             select(func.count())
             .select_from(StatementRecord)
-            .where(StatementRecord.canonical_id == parked_canonical)
+            .where(StatementRecord.canonical_id == canonical_id)
         ).scalar_one()
     assert stmt_count == 0, (
-        f"(f) precondition: expected 0 statement rows for signoff-approved canonical_id="
-        f"{parked_canonical!r} in P1 (statement/decision routing at signoff is Gate P3), "
-        f"got {stmt_count}"
+        f"(f) FLIPPED precondition: expected 0 statement rows for the SYNTHETIC statement-less "
+        f"survivor {canonical_id!r}, got {stmt_count}"
     )
 
     clean_graph.execute_write("MATCH (n) DETACH DELETE n")
@@ -655,15 +662,17 @@ def test_context_only_survivor_after_signoff_approve_is_projector_no_op(
     with sessions() as session:
         project(session, clean_graph, full_rebuild=True)  # must complete WITHOUT raising
 
-    rows = clean_graph.execute_read(
-        "MATCH (n {id: $cid}) RETURN count(n) AS cnt", cid=parked_canonical
-    )
+    rows = clean_graph.execute_read("MATCH (n {id: $cid}) RETURN count(n) AS cnt", cid=canonical_id)
     count = int(rows[0]["cnt"]) if rows else 0
     assert count == 0, (
-        f"(f) CONTEXT-ONLY-SURVIVOR NO-OP VIOLATED: {parked_canonical!r} produced a node after "
-        "project() despite having ZERO statement rows — expected a graceful no-op (ADR 0106 "
-        "§2.b.2: reconstruct_entities groups by statement rows, so a context-only survivor "
-        "yields no entity and no anchors until P3 wires the sign-off statement/decision spine)"
+        f"(f) FLIPPED CONTEXT-ONLY-SURVIVOR NO-OP VIOLATED: {canonical_id!r} produced a node "
+        "after project() despite having ZERO statement rows — expected a graceful no-op (ADR "
+        "0106 §2.b.2: reconstruct_entities groups by statement rows, so a context-claim-only "
+        "survivor yields no entity and no anchors). Gate P3 (ADR 0108) un-dormants a sign-off-"
+        "APPROVED survivor because approve() now writes statement rows for it — this pin is "
+        "repointed to a SYNTHETIC statement-less survivor so it stays independent of that "
+        "write path (the un-dormanting itself is asserted by "
+        "tests/integration/test_signoff_spine.py's IT-SIGN-approve)."
     )
 
     engine.dispose()
