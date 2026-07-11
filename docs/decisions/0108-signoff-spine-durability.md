@@ -181,10 +181,15 @@ the gate spec `docs/reviews/GATE_P3_SIGNOFF_SPINE_SPEC.md`; this section records
     direct node's (subject to clause (ii) below); exactly one `decision` row with `kind="merge"`,
     `decided_by="operator:<approver>"`, `set(member_ids) == set(source_ids)`; the ledger self-row +
     member aliases resolve members→survivor. Generator MUST include an **anchored**, an **unanchored (`wmc-`
-    self-row)**, an **edge-bearing** (an `Ownership` whose `owner` is a reviewed member and which is itself
-    independently promoted/statement-bearing — reuse `test_signoff.py`'s `_ownership`), and a **parked
-    singleton** (`is_merge=False`: statements fold the survivor at its own id, ZERO decision rows, ZERO ledger
-    aliases, `.total == 0`) example.
+    self-row)**, and an **edge-bearing** (an `Ownership` whose `owner` is a reviewed member and which is itself
+    independently promoted/statement-bearing — reuse `test_signoff.py`'s `_ownership`) example. **(Build-time
+    correction, 2026-07-11): there is NO parked-singleton case.** `guard/sensitivity.py::needs_review`
+    short-circuits `if not cluster.is_merge: return False` ("Singletons are never flagged — nothing is being
+    merged"), and every other park axis (size, anchor-conflict, Chow band on a cluster score) also requires a
+    merge — so **every parked cluster `approve()`/`reject()` ever sees is a 2+-member merge.** Planner
+    Surprise #4 mis-read this. `approve()`'s `is_merge=False` branch is therefore **defensive dead code**
+    (harmless, kept), and the parked-singleton P-SIGN-1 arm + the standalone parked-singleton IT test are
+    **removed** as asserting an unreachable state (not weakened — the state does not exist).
   - **P-SIGN-2** (reject round-trip) — each member AND each (statement-bearing) outbound edge folds to its
     own node/edge (`.total == 0`), no merge decision, no alias; edge-bearing example required.
   - **P-SIGN-3** (co-commit atomicity, RED-first with the positive control folded in) — the STATEMENT asserts

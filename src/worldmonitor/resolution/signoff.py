@@ -48,8 +48,14 @@ from worldmonitor.db.models import (
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
 from worldmonitor.ontology.ftm import FtmEntity, make_entity
+from worldmonitor.resolution.canonical import record_durable_id
+from worldmonitor.resolution.merge import ResolvedCluster
 from worldmonitor.resolution.referents import rewrite_referents
-from worldmonitor.resolution.statements import record_context_claims
+from worldmonitor.resolution.statements import (
+    record_context_claims,
+    record_decision,
+    record_statements,
+)
 
 # Bounded exception summary stored on a dead-letter row (mirrors the pipeline's bound).
 _ERROR_SUMMARY_MAX = 2000
@@ -299,6 +305,27 @@ def approve(
     # each approved member's canonical anchors (P1 does NOT add statement/decision rows here;
     # that sign-off statement/decision gap is Gate P3, see the module docstring).
     record_context_claims(session, canonical_id, [make_entity(r.raw_entity) for r in member_rows])
+    # Gate P3 (ADR 0108): co-commit the SoR spine writes beside the P1 context capture —
+    # statements (so a rebuild reconstructs this human-approved merge), a decision row
+    # attributing it to the operator, and the ledger self-row + member aliases (so
+    # survivor_of resolves the collapsed members AND rewrites the outbound edges' endpoints,
+    # SF-EDGE). SAME transaction as the SignOff/judgement rows: a crash before session.commit()
+    # rolls them ALL back (SF-2); the graph write above is idempotent on the B-1 re-run.
+    members = [make_entity(r.raw_entity) for r in member_rows]
+    signoff_cluster = ResolvedCluster(
+        canonical_id=canonical_id,
+        member_ids=tuple(sorted({m.id for m in members if m.id})),
+        entity=canonical,
+        score=audit.score,
+    )
+    by_id = {m.id: m for m in members if m.id}
+    if signoff_cluster.is_merge:
+        record_durable_id(
+            session, canonical_id, member_ids=list(signoff_cluster.member_ids), prior_id=None
+        )
+    record_statements(session, signoff_cluster, by_id)
+    if signoff_cluster.is_merge:
+        record_decision(session, signoff_cluster, reason=reason, decided_by=f"operator:{approver}")
     session.commit()
     return SignOffResult(canonical_id, "approved", 1, len(edges))
 
@@ -351,6 +378,18 @@ def reject(
         row.status = "resolved"
     audit.decision = "rejected"
     session.add(_signoff_row(canonical_id, source_ids, "rejected", approver, reason))
+    # Gate P3 (ADR 0108): co-commit statement rows for EACH rejected member kept as its own
+    # entity, so a rebuild reconstructs the reject-written member nodes (else a full rebuild
+    # silently drops them — consult §6b). Each member is its own canonical/survivor: NO merge
+    # decision, NO ledger alias. Outbound edges (unrewritten, endpoints = member ids)
+    # reconstruct from their own pipeline promotion (SF-EDGE). SAME transaction (SF-2).
+    for member in members:
+        if member.id is None:
+            continue
+        member_cluster = ResolvedCluster(
+            canonical_id=member.id, member_ids=(member.id,), entity=member, score=1.0
+        )
+        record_statements(session, member_cluster, {member.id: member})
     session.commit()
     return SignOffResult(canonical_id, "rejected", len(members), len(edges))
 

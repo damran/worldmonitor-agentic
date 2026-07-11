@@ -32,10 +32,13 @@ IT-SIGN-pending-edge         An outbound edge still ``pending`` (never drained b
                             unexplained (``.total >= 1`` for the edge) until the edge gets its
                             own statement rows (its own pipeline promotion) — a pre-existing
                             ingestion-ordering property (SF-EDGE), NOT a P3 defect.
-parked-SINGLETON approve     A parked cluster CAN be a singleton (``needs_review`` runs on
-                            every cluster, ``pipeline.py:394``): statements bank under the
-                            member's own id, ZERO decision rows, ZERO ledger rows,
-                            ``.total == 0``.
+
+NOTE (corrected against ``guard/sensitivity.needs_review``, which short-circuits ``if not
+cluster.is_merge: return False, ""`` — "Singletons are never flagged"): a parked-singleton is
+UNREACHABLE — every park axis (size / sensitivity / anchor-conflict / Chow band) requires
+``cluster.is_merge``, so a lone sanctioned entity is always PROMOTED, never parked. There is
+therefore no "parked-SINGLETON approve" integration item in this file (an earlier draft assumed
+one existed per ADR 0108 §Surprises item 6; that assumption was wrong and has been corrected).
 
 All tests are RED today (assertion-adjacent, not ImportError — Gate P3 adds no new symbol):
 ``signoff.approve()``/``signoff.reject()`` write no statement/decision/ledger rows, so every
@@ -668,11 +671,16 @@ def test_it_sign_pending_edge_transiently_unexplained_until_own_promotion(
 
     # Queue the outbound edge AFTER the pair has parked — it is never drained by
     # resolve_pending in this test, so it still carries NO statement rows when approve() runs
-    # (`_outbound_edges` is a full, status-agnostic scan — it picks it up regardless).
+    # (`_outbound_edges` is a full, status-agnostic scan — it picks it up regardless). Captured
+    # by its OWN row id (not `entity_id`): `_queue_item` mirrors test_signoff.py's shape, which
+    # never sets `ErQueueItem.entity_id` — the row is later re-found by this id, not a column
+    # scan.
+    own_queue_item = _queue_item(
+        _ownership("itspe-own", "itspe-p1", "itspe-acme"), source="itspe-own"
+    )
+    own_queue_item_id = own_queue_item.id  # captured BEFORE commit expires/detaches the instance
     with sessions() as session:
-        session.add(
-            _queue_item(_ownership("itspe-own", "itspe-p1", "itspe-acme"), source="itspe-own")
-        )
+        session.add(own_queue_item)
         session.commit()
 
     with sessions() as session:
@@ -705,7 +713,7 @@ def test_it_sign_pending_edge_transiently_unexplained_until_own_promotion(
     # --- The edge's OWN pipeline promotion (its own statement rows) — SF-EDGE ---
     with sessions() as session:
         own_row = session.execute(
-            select(ErQueueItem).where(ErQueueItem.entity_id == "itspe-own")
+            select(ErQueueItem).where(ErQueueItem.id == own_queue_item_id)
         ).scalar_one()
         edge_entity = make_entity(own_row.raw_entity)
         cluster = ResolvedCluster(
@@ -721,76 +729,4 @@ def test_it_sign_pending_edge_transiently_unexplained_until_own_promotion(
         f"edges={divergence_after.unexplained_edges}) — the P3 ledger alias must rewrite the "
         "fold edge's endpoint to match the live rewrite (SF-EDGE)"
     )
-    engine.dispose()
-
-
-# ===========================================================================
-# parked-SINGLETON approve
-# ===========================================================================
-
-
-def test_it_sign_approve_parked_singleton_writes_statements_no_decision_no_alias(
-    clean_graph: Neo4jClient, clean_diff_graph: Neo4jClient, postgres_dsn: str
-) -> None:
-    """A parked cluster CAN be a singleton (``needs_review`` runs on every cluster,
-    ``pipeline.py:394``) — ``approve()`` must still bank its statement rows (fold-explained)
-    while skipping the decision/ledger writes entirely (``is_merge=False``).
-    """
-    engine = make_engine(postgres_dsn)
-    create_all(engine)
-    sessions = session_factory(engine)
-
-    with sessions() as session:
-        session.add(_queue_item(_sanctioned("itss-p1"), source="itss-p1"))
-        session.commit()
-    with sessions() as session:
-        stats = resolve_pending(session=session, neo4j=clean_graph, guard_mode="block")
-    assert stats.review == 1
-    assert stats.promoted == 0
-
-    with sessions() as session:
-        parked = session.execute(
-            select(MergeAudit).where(MergeAudit.decision == "pending_review")
-        ).scalar_one()
-        canonical_id = parked.canonical_id
-    assert canonical_id == "itss-p1", "a parked singleton keeps its own member id as canonical_id"
-
-    with sessions() as session:
-        result = signoff.approve(
-            session,
-            clean_graph,
-            canonical_id=canonical_id,
-            approver="op-singleton",
-            reason="it-sign-singleton",
-        )
-    assert result.decision == "approved"
-
-    with sessions() as session:
-        stmt_count = session.execute(
-            select(func.count())
-            .select_from(StatementRecord)
-            .where(StatementRecord.canonical_id == canonical_id)
-        ).scalar_one()
-        assert stmt_count > 0, (
-            "IT-SIGN singleton: expected >= 1 statement row under the member's own id"
-        )
-
-        decision_count = session.execute(
-            select(func.count())
-            .select_from(DecisionRecord)
-            .where(DecisionRecord.canonical_id == canonical_id)
-        ).scalar_one()
-        assert decision_count == 0, "a parked SINGLETON approve must write ZERO decision rows"
-
-        ledger_count = session.execute(
-            select(func.count())
-            .select_from(CanonicalIdLedger)
-            .where(CanonicalIdLedger.canonical_id == canonical_id)
-        ).scalar_one()
-        assert ledger_count == 0, (
-            "a parked SINGLETON approve must write ZERO ledger rows (no self-row either)"
-        )
-
-    divergence = _fold_divergence(sessions, clean_graph, clean_diff_graph, now=_COMPUTED_AT)
-    assert divergence.total == 0, f"IT-SIGN singleton: expected .total==0, got {divergence.total}"
     engine.dispose()

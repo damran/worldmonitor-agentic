@@ -109,8 +109,10 @@ if signoff_cluster.is_merge:
 - `prior_id=None`: the parked cluster is already rekeyed to its durable id; the prior `wmc-` fingerprint was
   never materialised in the graph. The durable id is an `wm-anchor-…` id when the members anchor, **else the
   `wmc-` fingerprint itself** — a `wmc-` ledger self-row is VALID (INV-SIGN-LEDGER).
-- The `is_merge` guards make the (rare) **parked-singleton** case fall out: `record_durable_id`/
-  `record_decision` skip; `record_statements` still banks the single member under its own id.
+- The `is_merge` guards are **defensive dead code** (build-time correction, 2026-07-11): `needs_review`
+  short-circuits on `not cluster.is_merge` and every park axis requires a merge, so `approve()`/`reject()`
+  only ever see 2+-member merges — there is **no reachable parked-singleton case**. The guards stay (cheap,
+  harmless), but the parked-singleton test examples are removed as unreachable (see ADR 0108 §Decided P-SIGN-1).
 - Imports (signoff.py): `from worldmonitor.resolution.merge import ResolvedCluster`;
   `from worldmonitor.resolution.canonical import record_durable_id`; extend the statements import to
   `record_context_claims, record_decision, record_statements`. (No import cycle — `merge`/`canonical` do not
@@ -155,9 +157,9 @@ is `measure_divergence(...).total == 0` (nodes AND edges) — never `unexplained
   `canonical_id_ledger` holds the self-row (`canonical == alias == survivor`) + one alias per collapsed
   member, and `survivor_of(member_id) == survivor`.
 - *Generator:* `@given` over parked merges — MUST include an **anchored** example, an **unanchored (`wmc-`
-  durable id / `wmc-` self-row)** example, an **edge-bearing** example (an `Ownership` whose `owner` is a
-  reviewed member, itself independently promoted/statement-bearing in the setup — reuse `_ownership`), and a
-  **parked-singleton** example (`is_merge=False`: statements fold the survivor at its own id, ZERO decision
+  durable id / `wmc-` self-row)** example, and an **edge-bearing** example (an `Ownership` whose `owner` is a
+  reviewed member, itself independently promoted/statement-bearing in the setup — reuse `_ownership`).
+  **No parked-singleton example** (build-time correction: singletons are never parked — see §2/§Surprises). The
   rows, ZERO ledger aliases, `.total == 0`).
 - *Oracle:* `measure_divergence` (guard predicate) + independent DB reads of `decision`/`canonical_id_ledger`;
   anchors re-derived from the direct node.
@@ -408,9 +410,12 @@ stamps ADR 0108's `human_cosign` dated line at the accept flip / merge.
 5. **FtM `Statement.id` preimage is `(dataset, entity_id, prop, value)`** — not `canonical_id`, not `schema`
    (verified first-hand). The fold's D3 dedup keys on member-claim content independent of canonical; moot for
    the sign-off single-commit, but underwrites edges (a)/(b).
-6. **A parked cluster can be a SINGLETON** (`needs_review` runs on every cluster, `pipeline.py:394`); the
-   `is_merge` guards make `approve()` handle it (statements under the member's own id; no ledger/decision).
-   Pinned by the parked-singleton P-SIGN-1 example.
+6. **A parked cluster is NEVER a singleton** (build-time correction, 2026-07-11 — this reverses the planner's
+   original Surprise #6). `guard/sensitivity.py::needs_review` short-circuits `if not cluster.is_merge:
+   return False` ("Singletons are never flagged — nothing is being merged"), and every other park axis (size,
+   anchor-conflict, Chow band on a cluster score) also presupposes a merge. So every parked cluster reaching
+   `approve()`/`reject()` is a 2+-member merge; `approve()`'s `is_merge=False` branch is **defensive dead
+   code** (kept, harmless). No parked-singleton test example exists (removed as unreachable).
 7. **The parked `audit.canonical_id` IS the durable id** — an `wm-anchor-…` id when the members anchor, ELSE
    the `wmc-` fingerprint itself (the durable fallback; `resolve_durable_id` returns `fallback_id` +
    `rekey_cluster` is a no-op when unanchored, `canonical.py:320-324`, `merge.py:269`). `prior_id=None` either

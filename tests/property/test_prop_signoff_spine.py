@@ -13,23 +13,29 @@ P-SIGN-1  Approved-merge fold round-trip (Slice P3-a). After a real park (via
           (provenance-stamped members); exactly one ``decision`` row (``kind="merge"``,
           ``decided_by == f"operator:{approver}"``, member-id set matches); the
           ``canonical_id_ledger`` self-row + member aliases resolve every member onto the
-          survivor. Generator (``_p_sign_1_scenario``) draws over four kinds — **anchored**,
-          **unanchored** (``wmc-`` durable id / ``wmc-`` self-row), **edge-bearing** (an
-          ``Ownership`` whose owner is a reviewed member), and **parked-singleton**
-          (``is_merge=False``: statements fold the survivor at its own id, ZERO decision rows,
-          ZERO ledger aliases) — with ``@example`` pins guaranteeing every kind actually runs at
-          least once regardless of Hypothesis's random exploration (the non-vacuity fence: an
-          arm-selecting generator over a small discrete kind-space is not, by itself, a
-          *guarantee* of coverage — house precedent: ``test_prop_llm_role_and_caller.py``'s
-          ``@example`` fallback pin).
+          survivor. Generator (``_p_sign_1_scenario``) draws over three kinds — **anchored**,
+          **unanchored** (``wmc-`` durable id / ``wmc-`` self-row), and **edge-bearing** (an
+          ``Ownership`` whose owner is a reviewed member) — with ``@example`` pins guaranteeing
+          every kind actually runs at least once regardless of Hypothesis's random exploration
+          (the non-vacuity fence: an arm-selecting generator over a small discrete kind-space is
+          not, by itself, a *guarantee* of coverage — house precedent:
+          ``test_prop_llm_role_and_caller.py``'s ``@example`` fallback pin). NOTE (corrected
+          against ``guard/sensitivity.needs_review``, which short-circuits
+          ``if not cluster.is_merge: return False, ""`` — "Singletons are never flagged"): a
+          **parked-singleton is unreachable** — every park axis (size / sensitivity /
+          anchor-conflict / Chow band) requires ``cluster.is_merge``, so a lone sanctioned
+          entity is always PROMOTED, never parked, and ``signoff.approve()`` never actually
+          observes ``is_merge=False`` on a real parked cluster (the ``is_merge`` guards in the
+          spine block are defensive dead code on the current guard). No arm/example exercises
+          this case.
 
 P-SIGN-2  Reject round-trip to member nodes (Slice P3-b). After ``signoff.reject()``: each
           member folds to its OWN node (with its own statements) and each statement-bearing
           outbound edge folds correctly (endpoints stay member ids, matching the unrewritten
           live edge) — ``.total == 0``; NO ``decision`` row; NO ``canonical_id_ledger`` alias
           for the members. Generator over the three merge kinds (anchored / unanchored / edge —
-          a reject has no "is_merge=False" special case worth pinning separately from P-SIGN-1's
-          singleton arm).
+          a reject has no "is_merge=False" special case: a singleton is never parked in the
+          first place, see the P-SIGN-1 NOTE above).
 
 P-SIGN-3  Co-commit atomicity, RED-first WITH the positive control folded in (both slices). A
           **successful** commit writes the spine rows (statement + decision(if merge) + ledger
@@ -153,26 +159,35 @@ def diff_neo4j_client() -> Iterator[Neo4jClient]:
 
 @dataclass(frozen=True)
 class _ParkedScenario:
-    kind: str  # "anchored" | "unanchored" | "edge" | "singleton"
+    kind: str  # "anchored" | "unanchored" | "edge"
     suffix: str
     n_members: int
 
 
-_ALL_KINDS = ("anchored", "unanchored", "edge", "singleton")
+# No "singleton" kind: guard/sensitivity.needs_review short-circuits
+# `if not cluster.is_merge: return False, ""` ("Singletons are never flagged") — EVERY park
+# axis requires is_merge, so a lone sanctioned entity is always promoted, never parked. A
+# parked-singleton is unreachable; see the module docstring's P-SIGN-1 NOTE.
 _MERGE_KINDS = ("anchored", "unanchored", "edge")
+# Reject writes each member as its OWN node; N nodes sharing one canonical anchor violate the
+# production uniqueness constraint (graph/constraints.py), and members with DISTINCT anchors do
+# not cluster (the anchor IS the match signal) so they never park. So a reject corpus can carry
+# anchors on neither axis: P-SIGN-2 omits the "anchored" kind and proves reject durability on
+# unanchored + edge members (anchors are P1's lane, covered by P-SIGN-1's approve path).
+_REJECT_KINDS = ("unanchored", "edge")
 
 
 @st.composite
 def _p_sign_1_scenario(draw: st.DrawFn) -> _ParkedScenario:
-    kind = draw(st.sampled_from(_ALL_KINDS))
+    kind = draw(st.sampled_from(_MERGE_KINDS))
     suffix = draw(st.text(alphabet=_ALNUM, min_size=4, max_size=8))
-    n_members = 1 if kind == "singleton" else draw(st.integers(min_value=2, max_value=3))
+    n_members = draw(st.integers(min_value=2, max_value=3))
     return _ParkedScenario(kind=kind, suffix=suffix, n_members=n_members)
 
 
 @st.composite
 def _p_sign_2_scenario(draw: st.DrawFn) -> _ParkedScenario:
-    kind = draw(st.sampled_from(_MERGE_KINDS))
+    kind = draw(st.sampled_from(_REJECT_KINDS))
     suffix = draw(st.text(alphabet=_ALNUM, min_size=4, max_size=8))
     n_members = draw(st.integers(min_value=2, max_value=3))
     return _ParkedScenario(kind=kind, suffix=suffix, n_members=n_members)
@@ -265,7 +280,15 @@ def _anchor_value(suffix: str) -> str:
 def _build_scenario(
     scenario: _ParkedScenario,
 ) -> tuple[list[ErQueueItem], list[str], str | None]:
-    """Return ``(queue_items, member_ids, asset_id_or_None)`` for ``scenario``."""
+    """Return ``(queue_items, member_ids, asset_id_or_None)`` for ``scenario``.
+
+    Anchored members share ONE ``wikidata_id`` (they are the same real-world entity — the whole
+    point of the merge). This corpus is only used for APPROVE scenarios: a reject would write
+    each member as its own node and N nodes sharing one canonical ID violate the production
+    uniqueness constraint (``graph/constraints.py::ensure_constraints`` — "the same real-world
+    identifier can't land twice"), which is a pre-existing property, not a P3 concern. So
+    ``P-SIGN-2`` (reject) deliberately omits the anchored kind (see its generator).
+    """
     prefix = f"p3sign-{scenario.kind}-{scenario.suffix}"
     member_ids = [f"{prefix}-m{i}" for i in range(scenario.n_members)]
     anchor = _anchor_value(scenario.suffix) if scenario.kind == "anchored" else None
@@ -366,7 +389,6 @@ def _crash_first_commit(session: Session) -> None:
 @example(scenario=_ParkedScenario(kind="anchored", suffix="pin1anch", n_members=2))
 @example(scenario=_ParkedScenario(kind="unanchored", suffix="pin2unan", n_members=2))
 @example(scenario=_ParkedScenario(kind="edge", suffix="pin3edge0", n_members=2))
-@example(scenario=_ParkedScenario(kind="singleton", suffix="pin4sing", n_members=1))
 @_SETTINGS
 def test_p_sign_1_approved_merge_fold_round_trip(
     scenario: _ParkedScenario,
@@ -377,9 +399,14 @@ def test_p_sign_1_approved_merge_fold_round_trip(
     """P-SIGN-1 / INV-SIGN-APPROVE-SPINE + INV-SIGN-DECIDED-BY + INV-SIGN-LEDGER +
     INV-SIGN-FOLD-EXPLAINED.
 
-    RED today: approve() writes NO statement/decision/ledger rows — the merge-kind decision
-    assertion fails outright (0 rows, not 1) and ``measure_divergence(...).total > 0`` for every
-    kind (the survivor is unexplained by an empty fold).
+    Every ``_p_sign_1_scenario`` draw is a genuine MERGE (>= 2 members): a parked-singleton is
+    unreachable under ``guard/sensitivity.needs_review`` (it short-circuits
+    ``if not cluster.is_merge: return False, ""`` — every park axis requires ``is_merge``), so
+    ``signoff.approve()`` never actually observes ``is_merge=False`` on a real parked cluster.
+
+    RED today: approve() writes NO statement/decision/ledger rows — the decision-row assertion
+    fails outright (0 rows, not 1) and ``measure_divergence(...).total > 0`` for every kind
+    (the survivor is unexplained by an empty fold).
     """
     _cleanup_postgres(postgres_dsn)
     clean_graph.execute_write("MATCH (n) DETACH DELETE n")
@@ -390,7 +417,6 @@ def test_p_sign_1_approved_merge_fold_round_trip(
         sessions = session_factory(engine)
         canonical_id, member_ids, asset_id = _seed_and_park(sessions, clean_graph, scenario)
         approver = f"p3-op-{scenario.suffix}"
-        is_merge = scenario.n_members > 1
 
         with sessions() as session:
             result = signoff.approve(
@@ -416,35 +442,24 @@ def test_p_sign_1_approved_merge_fold_round_trip(
             ).scalar_one_or_none()
             survivor_of = build_survivor_of(session)
 
-        if is_merge:
-            assert len(decisions) == 1, (
-                f"P-SIGN-1 INV-SIGN-APPROVE-SPINE VIOLATED (kind={scenario.kind!r}): expected "
-                f"exactly 1 decision row for a promoted merge, got {len(decisions)}"
-            )
-            decision = decisions[0]
-            assert decision.kind == "merge"
-            assert decision.decided_by == f"operator:{approver}", (
-                f"P-SIGN-1 INV-SIGN-DECIDED-BY VIOLATED: decided_by={decision.decided_by!r} != "
-                f"'operator:{approver}'"
-            )
-            assert set(decision.member_ids) == set(member_ids)
-            assert ledger_self is not None, (
-                "P-SIGN-1 INV-SIGN-LEDGER VIOLATED: no ledger self-row for a promoted merge "
-                f"(canonical_id={canonical_id!r})"
-            )
-            for member_id in member_ids:
-                assert survivor_of(member_id) == canonical_id, (
-                    f"P-SIGN-1 INV-SIGN-LEDGER VIOLATED: survivor_of({member_id!r}) != "
-                    f"{canonical_id!r}"
-                )
-        else:
-            assert decisions == [], (
-                f"P-SIGN-1 parked-singleton VIOLATED: expected ZERO decision rows, got "
-                f"{len(decisions)}"
-            )
-            assert ledger_self is None, (
-                "P-SIGN-1 parked-singleton VIOLATED: expected ZERO ledger rows (no self-row "
-                "either — is_merge=False skips record_durable_id)"
+        assert len(decisions) == 1, (
+            f"P-SIGN-1 INV-SIGN-APPROVE-SPINE VIOLATED (kind={scenario.kind!r}): expected "
+            f"exactly 1 decision row for a promoted merge, got {len(decisions)}"
+        )
+        decision = decisions[0]
+        assert decision.kind == "merge"
+        assert decision.decided_by == f"operator:{approver}", (
+            f"P-SIGN-1 INV-SIGN-DECIDED-BY VIOLATED: decided_by={decision.decided_by!r} != "
+            f"'operator:{approver}'"
+        )
+        assert set(decision.member_ids) == set(member_ids)
+        assert ledger_self is not None, (
+            "P-SIGN-1 INV-SIGN-LEDGER VIOLATED: no ledger self-row for a promoted merge "
+            f"(canonical_id={canonical_id!r})"
+        )
+        for member_id in member_ids:
+            assert survivor_of(member_id) == canonical_id, (
+                f"P-SIGN-1 INV-SIGN-LEDGER VIOLATED: survivor_of({member_id!r}) != {canonical_id!r}"
             )
 
         if scenario.kind == "edge":
@@ -490,7 +505,6 @@ def test_p_sign_1_approved_merge_fold_round_trip(
 
 @pytest.mark.integration
 @given(scenario=_p_sign_2_scenario())
-@example(scenario=_ParkedScenario(kind="anchored", suffix="pin5anch", n_members=2))
 @example(scenario=_ParkedScenario(kind="unanchored", suffix="pin6unan", n_members=2))
 @example(scenario=_ParkedScenario(kind="edge", suffix="pin7edge0", n_members=2))
 @_SETTINGS
