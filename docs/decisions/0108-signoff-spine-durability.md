@@ -1,16 +1,17 @@
 # 0108 — Human-decision lane durability (Gate P3): route sign-off through the SoR spine
 
-- **Status:** PROPOSED (2026-07-05) — **DRAFT skeleton, awaiting user cosign before build.** Planner-staged
-  decision-space document for Gate P3, committed by the P1-0 docs-only slice (see §ADR-index coupling);
-  byte-unchanged through the Gate-P1 code PR. P3's own planning gate fills the DECIDED lines and obtains
-  the cosign.
+- **Status:** ACCEPTED (2026-07-11; proposed 2026-07-05) — decision-space filled by the P3 planning gate
+  (3-lens plan-verify + fix round), user-cosigned before build, built via the full fleet (test-author
+  RED-first → builder → 6-agent INV/adversarial verify → fix round → judge). See §Build record.
 - **Date:** 2026-07-05
 - **human_fork:** false — the co-commit-vs-re-route sub-fork is a reversible engineering choice with a
   recommended default, not a product/architecture fork.
 - **person_affecting:** **true** — P3 alters the mechanics of the **human sign-off path** (the
   `MERGE_GUARD_MODE=block` lane that fires on exactly the sensitive, person-affecting merges the guard
   parks). Person-affecting by construction. **human_cosign REQUIRED before build.**
-- **human_cosign:** PENDING — Gate P3 user cosign REQUIRED before build (person_affecting:true).
+- **human_cosign:** Mithat 2026-07-11 — cosigned before the code build (person_affecting:true), findings
+  disclosed: the deliberate fail-closed behavioral delta (SF-2), the honest guard-green scope (post-P3
+  survivors only; pre-P3 nodes await Gate 2b), and the two mid-build corrections recorded in §Build record.
 - **Realises:** the **sign-off** blocking-3b prerequisite of the Fable log-capture consult
   (`docs/fable-review/80_LOG_CAPTURE_CONSULT.md` §6b, §7-2 — the discovered **CRITICAL**) and pre-cutover
   gate **P3** (`docs/fable-review/81_PRECUTOVER_GATE_SEQUENCE.md`). **Builds on:** ADR 0099 (the spine
@@ -289,6 +290,39 @@ approve/reject decision are unchanged). **Person-affecting → user cosign befor
 remove the spine writes from `approve()`/`reject()`. **Revisit trigger:** SF-1 re-route becomes worth it if
 the fusion paths converge. **Scope reminder:** P3 fixes the sign-off write **flow** for future decisions;
 the **stock** of PRE-P3 sign-off nodes is Gate 2b's backfill (see Guard-green scope).
+
+## Build record (2026-07-11)
+
+Built via the full fleet on `gate/p3-signoff-spine`. Diff = 2 additive src files: `signoff.py` gains the
+`approve()` co-commit block (`record_statements` + is_merge-gated `record_durable_id` + `record_decision`)
+and the `reject()` per-member `record_statements` loop, both inside the existing single transaction before
+the sole `session.commit()`; `statements.py::record_decision` gains one defaulted `decided_by` param.
+Tests: `P-SIGN-1..4` (`tests/property/test_prop_signoff_spine.py`) + `IT-SIGN-*`
+(`tests/integration/test_signoff_spine.py`) + the context-lane no-op flip. Battery green (unit 1178,
+integration 224). **Verification:** 6-agent INV/adversarial workflow + a closing checker — **all 12
+`INV-SIGN-*` + `INV-FROZEN` independently reproduced PASS at runtime** (incl. legacy `test_signoff.py`
+green ⇒ `INV-SIGN-NO-GRAPH-CHANGE`); 0 blockers, 0 majors.
+
+**Two mid-build corrections (reverse two planner surprises — verified accurate against code):**
+1. **Parked singletons are UNREACHABLE.** `guard/sensitivity.py::needs_review` short-circuits
+   `if not cluster.is_merge: return False`, and every park axis presupposes a merge — so `approve()`/
+   `reject()` only ever see 2+-member merges and `approve()`'s `is_merge=False` branch is defensive dead
+   code (kept, harmless). The planner's Surprise #4/#6 mis-read this; the parked-singleton test + the
+   P-SIGN-1 singleton arm were removed as asserting an unreachable state (not a weakening).
+2. **`P-SIGN-2` (reject) omits the anchored kind.** `graph/constraints.py::ensure_constraints` puts a
+   production UNIQUE constraint on every canonical-ID field, so two reject-written nodes sharing a
+   `wikidata_id` violate it — and distinct-anchor members do not cluster (the anchor *is* the match
+   signal), so they never park. A reject corpus therefore carries anchors on neither axis; reject
+   durability is proven on unanchored + edge members (anchors are P1's lane, covered by P-SIGN-1's approve
+   path).
+
+**Backlog (LOW, non-blocking, surfaced by verify):** (a) if two `pending_review` queue rows ever shared a
+`raw_entity` id, `by_id` would keep one entity while `_merge_members` merges all — a claim could reach the
+graph canonical but miss the statement log; not reachable from the pipeline's distinct-member-id park path
+and the same shape pre-exists in the pipeline's own `by_id`. (b) the spec prescribed extending
+`test_statements.py`/`test_signoff.py`; the equivalent invariants were instead pinned by the new
+`test_signoff_spine.py` IT-SIGN suite + the existing `test_record_decision_decided_by_is_auto_resolver`
+unit test — a coverage-location deviation, not a gap.
 
 ## Explicitly NOT in P3
 
