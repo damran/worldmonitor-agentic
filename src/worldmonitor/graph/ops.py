@@ -183,20 +183,30 @@ def erase_source_graph(neo4j: Neo4jClient, source_id: str) -> GraphErasureCounts
     )
 
 
+# Gate P2 fix-round (SS2/SS4) — a genuine sentinel for `set_node_values`'s `new_caption` default.
+# A bare `str | None = None` default would be AMBIGUOUS with "explicitly clear the caption to
+# empty" (`new_caption=None`); `_UNSET` (a distinct `object()`, never a valid caption value) marks
+# "argument omitted, leave `caption` untouched". Typed `Any` so it type-checks as the default for
+# a `str | None`-declared parameter under `typeCheckingMode = "strict"` without an explicit cast.
+_UNSET: Any = object()
+
+
 def set_node_values(
     neo4j: Neo4jClient,
     node_id: str,
     *,
     compared_props: dict[str, list[str]],
     remove_anchor_keys: list[str],
+    new_caption: str | None = _UNSET,
+    remove_dataset_ids: list[str] | None = None,
 ) -> None:
     """Provenance-preserving value/anchor prune-to-fold writer (Gate P2 / ADR 0107, SF-4).
 
     Reads the node's FULL current properties FIRST (mirrors :func:`erase_source_graph`'s
     read-current-props-then-merge idiom above) and merges ``compared_props`` /
-    ``remove_anchor_keys`` into a COPY, then issues ONE full-property-replace ``SET n = $props``
-    — never a bare partial-map ``SET`` built only from the compared/anchor deltas, which would
-    silently wipe ``prov_source_id`` / ``prov_witnesses`` / ``id`` / ``caption`` / ``datasets``
+    ``remove_anchor_keys`` / ``new_caption`` / ``remove_dataset_ids`` into a COPY, then issues
+    ONE full-property-replace ``SET n = $props`` — never a bare partial-map ``SET`` built only
+    from the deltas, which would silently wipe ``prov_source_id`` / ``prov_witnesses`` / ``id``
     (G1, plan-verify HIGH-1).
 
     ``compared_props``: ``{prop: new_value_list}`` — a NON-EMPTY list REPLACES the property's
@@ -209,6 +219,18 @@ def set_node_values(
     surfacing a previously omit-on-conflict value could collide with another node and abort the
     erasure mid-transaction. A key absent from ``remove_anchor_keys`` is left untouched (no
     gratuitous anchor rebuild).
+
+    ``new_caption`` (Gate P2 fix-round, SS2): ``caption`` is a Neo4j SCALAR string
+    (``graph/ftmg_fork/transform.py:103``), never routed through ``compared_props`` (which
+    always writes a Python ``list`` — wrapping a scalar in a 1-element list would corrupt it).
+    Omitted (the ``_UNSET`` sentinel default) leaves ``caption`` COMPLETELY untouched; an
+    explicit ``str`` SETs it, an explicit ``None`` CLEARs it — both are genuine, distinct
+    intents from "don't touch", which is exactly why the default cannot be bare ``None``.
+
+    ``remove_dataset_ids`` (Gate P2 fix-round, SS3): literal ``datasets`` (plain Neo4j list of
+    source ids, ``graph/ftmg_fork/transform.py:104``) entries to strip, if present — no
+    fold-based inference (the caller already knows the exact erased ``source_id``). ``None`` or
+    an empty list is a no-op; every other entry + the list's order is otherwise preserved.
 
     A missing node (e.g. already ``DETACH DELETE``d by a sole-source :func:`erase_source_graph`
     prune) is a silent no-op — nothing left to prune.
@@ -230,6 +252,17 @@ def set_node_values(
             new_props.pop(prop, None)
     for key in remove_anchor_keys:
         new_props.pop(key, None)
+
+    if new_caption is not _UNSET:
+        new_props["caption"] = new_caption  # scalar assignment — never list-wrapped
+
+    if remove_dataset_ids:
+        strip = set(remove_dataset_ids)
+        current_datasets = new_props.get("datasets")
+        if isinstance(current_datasets, list):
+            new_props["datasets"] = [
+                dataset for dataset in cast("list[Any]", current_datasets) if dataset not in strip
+            ]
 
     neo4j.execute_write(
         "MATCH (n:Entity {id: $id}) SET n = $props",

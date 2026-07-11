@@ -199,7 +199,7 @@ def erase_source(
         # removal (Neo4j, immediate). See erasure_scrub's module docstring for the cross-store
         # non-atomicity + idempotent-retry-recovers contract this ordering relies on.
         scrub = scrub_log_lanes(session, source_id)
-        prune_live_to_fold(session, neo4j, scrub.touched_survivors)
+        prune_live_to_fold(session, neo4j, scrub)
 
         result = ErasureResult(
             source_id=source_id,

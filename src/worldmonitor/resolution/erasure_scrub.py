@@ -16,14 +16,23 @@ Public surface (SF-1/SF-2/SF-4/SF-5, spec ``docs/reviews/GATE_P2_ERASURE_SPEC.md
   (reached by ``(dataset == source_id) OR (entity_id IN erased_member_ids)``) and REDACTS
   ``decision.member_ids`` for every decision that referenced an erased member. Rows are
   PRESERVED (redacted, never dropped); ``canonical_id_ledger`` / ``ResolverJudgement`` /
-  ``SignOff`` / ``MergeAudit`` are NEVER touched (the ADR-0049 no-un-merge carve-out).
+  ``SignOff`` / ``MergeAudit`` are NEVER touched (the ADR-0049 no-un-merge carve-out). ALSO
+  returns :attr:`LogScrubResult.erased_survivor_props` — the ``(survivor, prop_or_key)``
+  positive-attribution set :func:`prune_live_to_fold` gates its live-value prune on (fix-round
+  CRITICAL fix SS1), derived from the SAME reached rows, never a second query.
 * :func:`prune_live_to_fold` — for every survivor touched by the scrub, reconstructs the
   post-scrub target via the FROZEN pure :func:`~worldmonitor.resolution.projector.
   reconstruct_entities` (the single source of truth — no second, hand-rolled value-diff) and
   prunes the LIVE node to match via :func:`~worldmonitor.graph.ops.set_node_values`
   (provenance-preserving; anchors REMOVE-only, never SET — a Neo4j ``UNIQUE`` constraint on
   every ``CANONICAL_ID_FIELDS`` prop makes a surfaced conflict-resolved anchor value a
-  transaction-aborting hazard).
+  transaction-aborting hazard). Every candidate prop/anchor is FIRST gated through
+  :attr:`LogScrubResult.erased_survivor_props` (positive-attribution, fix-round CRITICAL fix
+  SS1) — never inferred from the fold's silence, which would wipe legacy/pre-dual-write live
+  data the fold was never going to have evidence for regardless of this erasure. Also recomputes
+  the live ``caption`` scalar off the fold (fix-round HIGH fix SS2, gated on positive evidence
+  too) and strips the erased ``source_id`` from the live ``datasets`` list (fix-round HIGH fix
+  SS3, no fold inference needed — the erased id is known with certainty).
 * :func:`scrub_stock` — the one-off retroactive driver over the dual-write window: enumerates
   every erasure via ``TaskRun(kind="erase", status="ok").stats["source_id"]`` (read PYTHON-SIDE,
   never a Postgres-only ``stats->>`` query, so this also runs on the Docker-free SQLite unit
@@ -42,7 +51,6 @@ transient, never permanent (pinned by
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -52,7 +60,7 @@ from sqlalchemy.orm import Session
 
 from worldmonitor.db.models import ContextClaimRecord, DecisionRecord, StatementRecord, TaskRun
 from worldmonitor.graph.neo4j_client import Neo4jClient
-from worldmonitor.graph.ops import set_node_values
+from worldmonitor.graph.ops import _UNSET, set_node_values  # pyright: ignore[reportPrivateUsage]
 from worldmonitor.ontology.anchors import CANONICAL_ID_FIELDS, get_anchors
 from worldmonitor.resolution.divergence import _excluded  # pyright: ignore[reportPrivateUsage]
 from worldmonitor.resolution.projector import build_survivor_of, reconstruct_entities
@@ -70,6 +78,15 @@ class LogScrubResult:
     statements_scrubbed: int
     context_claims_scrubbed: int
     decisions_redacted: int
+    erased_survivor_props: frozenset[tuple[str, str]]
+    """``(survivor_of(canonical_id), prop_or_key)`` for every REACHED row (Gate P2 fix-round,
+    CRITICAL fix SS1) — the positive-attribution set :func:`prune_live_to_fold` gates
+    ``compared_props``/``remove_anchor_keys`` on. Derived from the SAME reached rows as
+    :attr:`touched_survivors` (the ``prop`` column for a ``statement`` row, the ``key`` column
+    for a ``context_claim`` row — where anchor claims like ``wikidata_id`` live), never a second
+    query. A ``(survivor, prop)`` pair absent here means THIS scrub never carried evidence that
+    ``prop`` was erased-source-attributable — it must be left byte-identical on the live node,
+    regardless of whether the post-scrub fold happens to have (or lack) a value for it."""
 
 
 def scrub_log_lanes(session: Session, source_id: str) -> LogScrubResult:
@@ -93,6 +110,22 @@ def scrub_log_lanes(session: Session, source_id: str) -> LogScrubResult:
     PRESERVED, never deleted. ``canonical_id_ledger`` / ``ResolverJudgement`` / ``SignOff`` /
     ``MergeAudit`` are NEVER touched here (the ADR-0049 no-un-merge carve-out).
 
+    KNOWN RESIDUAL — a narrow TOCTOU race (adversarial review, fix-round, 3/3 refuters
+    confirmed), CURRENTLY 100% LATENT: ``erased_member_ids``/``reached_canonical_ids``/
+    ``erased_survivor_props`` are computed via SELECTs, then the DELETEs are issued as SEPARATE
+    statements. Under Postgres READ COMMITTED, a row that lands (INSERT) matching the reach
+    predicate in the gap between the SELECTs and the DELETEs is re-swept by the DELETE (which
+    re-evaluates its own ``WHERE`` fresh at execute time) WITHOUT ever being reflected in the
+    already-materialized Python sets above — it is deleted from Postgres but escapes
+    ``touched_survivors``-driven live pruning AND decision redaction for THIS call. A verified
+    grep of the whole tree (``rg 'erase_source\\('``) confirms ``erase_source`` has NO live
+    API/runner/MCP caller anywhere in this codebase yet, so no concurrent writer can currently
+    land in that gap — the window is real but unreachable. This becomes reachable the moment
+    ``erase_source`` gets a live caller with concurrent ingestion in flight; close it THEN via a
+    SQL-subquery-embedded reach predicate (so the SELECT-derived sets and the DELETEs share one
+    statement-level snapshot) or a ``pg_advisory_xact_lock(hashtext(source_id))`` held for the
+    duration of the scrub.
+
     Caller commits (staged on ``session``, mirrors ``erasure.py``'s existing DB-write split).
     """
     erased_member_ids: set[str] = set(
@@ -114,16 +147,30 @@ def scrub_log_lanes(session: Session, source_id: str) -> LogScrubResult:
         ContextClaimRecord.entity_id.in_(erased_member_ids),
     )
 
-    # touched_survivors: the (pre-delete) canonical ids of every REACHED row, resolved through
-    # the FULL canonical_id_ledger — the SF-4 live-prune orchestrator's input.
+    # touched_survivors / erased_survivor_props: the (pre-delete) canonical ids — PLUS the
+    # prop/key each reached row carried — resolved through the FULL canonical_id_ledger. Both
+    # are derived from the SAME two SELECTs (upgraded to also pull `prop`/`key`, never a second
+    # query per row set): touched_survivors is the SF-4 live-prune orchestrator's input;
+    # erased_survivor_props is the Gate-P2-fix-round CRITICAL fix's positive-attribution set
+    # (prune_live_to_fold's compared_props/remove_anchor_keys gate, SS1).
     survivor_of = build_survivor_of(session)
-    reached_canonical_ids: set[str] = set(
-        session.execute(select(StatementRecord.canonical_id).where(stmt_reach)).scalars()
-    )
-    reached_canonical_ids |= set(
-        session.execute(select(ContextClaimRecord.canonical_id).where(ctx_reach)).scalars()
-    )
+    stmt_reach_rows = session.execute(
+        select(StatementRecord.canonical_id, StatementRecord.prop).where(stmt_reach)
+    ).all()
+    ctx_reach_rows = session.execute(
+        select(ContextClaimRecord.canonical_id, ContextClaimRecord.key).where(ctx_reach)
+    ).all()
+
+    reached_canonical_ids: set[str] = {canonical_id for canonical_id, _prop in stmt_reach_rows}
+    reached_canonical_ids |= {canonical_id for canonical_id, _key in ctx_reach_rows}
     touched_survivors = {survivor_of(canonical_id) for canonical_id in reached_canonical_ids}
+
+    erased_survivor_props: set[tuple[str, str]] = {
+        (survivor_of(canonical_id), prop) for canonical_id, prop in stmt_reach_rows
+    }
+    erased_survivor_props |= {
+        (survivor_of(canonical_id), key) for canonical_id, key in ctx_reach_rows
+    }
 
     stmt_delete_result = cast(
         "CursorResult[Any]", session.execute(delete(StatementRecord).where(stmt_reach))
@@ -155,6 +202,7 @@ def scrub_log_lanes(session: Session, source_id: str) -> LogScrubResult:
         statements_scrubbed=statements_scrubbed,
         context_claims_scrubbed=context_claims_scrubbed,
         decisions_redacted=decisions_redacted,
+        erased_survivor_props=frozenset(erased_survivor_props),
     )
 
 
@@ -169,9 +217,7 @@ def _read_node_props(neo4j: Neo4jClient, node_id: str) -> dict[str, Any] | None:
     return cast("dict[str, Any]", props) if isinstance(props, dict) else None
 
 
-def prune_live_to_fold(
-    session: Session, neo4j: Neo4jClient, touched_survivors: Iterable[str]
-) -> None:
+def prune_live_to_fold(session: Session, neo4j: Neo4jClient, scrub_result: LogScrubResult) -> None:
     """Prune every touched survivor's LIVE node to the fold's row-granular result (SF-4).
 
     For each survivor, reconstructs the post-scrub target via the FROZEN pure
@@ -179,24 +225,49 @@ def prune_live_to_fold(
     scrubbed) ``statement``/``context_claim`` history — the single source of truth; no second,
     hand-rolled value-diff. ``compared_props`` is built from every NON-``_excluded`` property
     currently on the live node (``resolution.divergence._excluded`` — the SAME predicate the
-    projection-divergence guard applies), set to the fold's value-set for that property (a
-    property the fold no longer carries any value for is REMOVEd). Anchor keys
-    (``ontology.anchors.CANONICAL_ID_FIELDS``) present on the live node but ABSENT from the
-    fold's :func:`~worldmonitor.ontology.anchors.get_anchors` are REMOVEd — REMOVE-only, NEVER
-    surfaced/SET (every anchor carries a Neo4j ``UNIQUE`` constraint,
-    ``graph/constraints.py``; a surfaced conflict-resolved value could collide with another node
-    and abort the erasure mid-transaction).
+    projection-divergence guard applies) that ALSO passes the positive-attribution gate below,
+    set to the fold's value-set for that property (a property the fold no longer carries any
+    value for is REMOVEd). Anchor keys (``ontology.anchors.CANONICAL_ID_FIELDS``) present on the
+    live node, ABSENT from the fold's :func:`~worldmonitor.ontology.anchors.get_anchors`, AND
+    ALSO passing the same gate are REMOVEd — REMOVE-only, NEVER surfaced/SET (every anchor
+    carries a Neo4j ``UNIQUE`` constraint, ``graph/constraints.py``; a surfaced conflict-resolved
+    value could collide with another node and abort the erasure mid-transaction).
+
+    Positive-attribution gate (Gate P2 fix-round CRITICAL fix, SS1): a prop/anchor is ONLY
+    eligible to enter ``compared_props``/``remove_anchor_keys`` at all if THIS scrub's deleted
+    rows actually carried it — ``(survivor, prop_name) in scrub_result.erased_survivor_props``;
+    otherwise it is skipped entirely (``continue``) and the live value stays byte-identical no
+    matter what the fold shows or doesn't show for it. The PRIOR implementation defaulted every
+    fold-silent prop to "erased-source-only" (an empty ``compared_props`` entry), which wrongly
+    wiped legacy/pre-dual-write live data (or data from a source that was never itself
+    statement-logged) — data the fold was NEVER going to have evidence for, regardless of this
+    erasure. The gate is a POSITIVE inclusion test, never an inference from fold-absence.
+
+    ``caption``/``datasets`` (Gate P2 fix-round HIGH fix, SS2/SS3): both are
+    ``resolution.divergence._excluded`` from the loop above (a Neo4j SCALAR pick / a plain list,
+    not an FtM multi-valued prop) so they get separate, explicit handling via
+    :func:`~worldmonitor.graph.ops.set_node_values`'s ``new_caption``/``remove_dataset_ids``:
+    * ``caption`` is recomputed off the post-scrub fold ONLY when the positive-attribution gate
+      found at least one genuinely-erased prop for this survivor (``compared_props`` non-empty)
+      AND a fold entity still exists — no recomputation without positive evidence.
+    * ``datasets`` needs no fold inference: the erased ``source_id`` (``scrub_result.source_id``)
+      is known with certainty, so it is stripped whenever present on the live node's current
+      ``datasets`` list, independent of the fold/positive-attribution gate entirely.
 
     A survivor whose live node is already gone (e.g. a sole-source node
     :func:`~worldmonitor.graph.ops.erase_source_graph` already ``DETACH DELETE``d) is a no-op —
     nothing left to prune. A survivor with NO remaining fold entity (every contributing row was
-    erased) has every non-excluded live value/anchor removed (no evidence survives to keep it).
+    erased) has every gated live value/anchor removed (no evidence survives to keep it); one
+    :func:`~worldmonitor.graph.ops.set_node_values` write is issued per touched survivor whose
+    live node exists (a same-value ``SET n = $props`` is a safe, idempotent no-op when the gate
+    above ultimately finds nothing to change).
 
     Writes Neo4j IMMEDIATELY (see the module docstring's cross-store non-atomicity contract).
     """
-    touched = {survivor for survivor in touched_survivors if survivor}
+    touched = {survivor for survivor in scrub_result.touched_survivors if survivor}
     if not touched:
         return
+    erased_props = scrub_result.erased_survivor_props
 
     survivor_of = build_survivor_of(session)
     remaining_stmt_rows = list(session.execute(select(StatementRecord)).scalars())
@@ -220,6 +291,8 @@ def prune_live_to_fold(
         for prop_name in current_props:
             if _excluded(prop_name):
                 continue
+            if (survivor, prop_name) not in erased_props:
+                continue  # positive-attribution gate: no evidence THIS scrub erased it (SS1)
             fold_prop = fold_entity.schema.get(prop_name) if fold_entity is not None else None
             if (
                 fold_entity is not None
@@ -232,11 +305,29 @@ def prune_live_to_fold(
 
         fold_anchors = get_anchors(fold_entity) if fold_entity is not None else {}
         remove_anchor_keys = [
-            key for key in CANONICAL_ID_FIELDS if key in current_props and key not in fold_anchors
+            key
+            for key in CANONICAL_ID_FIELDS
+            if key in current_props
+            and key not in fold_anchors
+            and (survivor, key) in erased_props  # positive-attribution gate (SS1)
         ]
 
+        new_caption: str | None = _UNSET
+        if compared_props and fold_entity is not None:
+            new_caption = fold_entity.caption
+
+        remove_dataset_ids: list[str] = []
+        current_datasets = current_props.get("datasets")
+        if isinstance(current_datasets, list) and scrub_result.source_id in current_datasets:
+            remove_dataset_ids = [scrub_result.source_id]
+
         set_node_values(
-            neo4j, survivor, compared_props=compared_props, remove_anchor_keys=remove_anchor_keys
+            neo4j,
+            survivor,
+            compared_props=compared_props,
+            remove_anchor_keys=remove_anchor_keys,
+            new_caption=new_caption,
+            remove_dataset_ids=remove_dataset_ids,
         )
 
 
@@ -265,6 +356,6 @@ def scrub_stock(session: Session, *, neo4j: Neo4jClient) -> list[LogScrubResult]
             continue
         seen.add(source_id)
         result = scrub_log_lanes(session, source_id)
-        prune_live_to_fold(session, neo4j, result.touched_survivors)
+        prune_live_to_fold(session, neo4j, result)
         results.append(result)
     return results
