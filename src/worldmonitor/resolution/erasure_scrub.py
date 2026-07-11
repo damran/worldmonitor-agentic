@@ -34,9 +34,11 @@ Public surface (SF-1/SF-2/SF-4/SF-5, spec ``docs/reviews/GATE_P2_ERASURE_SPEC.md
   (positive-attribution, fix-round CRITICAL fix SS1) — never inferred from the fold's silence,
   which would wipe legacy/pre-dual-write live data the fold was never going to have evidence for
   regardless of this erasure. A prop that passes that gate is then pruned at VALUE granularity
-  off :attr:`LogScrubResult.erased_survivor_values` (fix-round MEDIUM fix NEW-2) — a positive
-  removal filter over the CURRENT live values, never the fold's reconstructed value-set, so a
-  legacy/never-logged value sharing the same prop as a genuinely-erased value survives. Also
+  off :attr:`LogScrubResult.erased_survivor_values` (fix-round MEDIUM fix NEW-2), refined in
+  fix-round-3 (NEW-3) to ALSO require fold-absence — a value is only removed if it is BOTH
+  erased-attributed AND no longer reconstructable from the post-scrub fold, so a value
+  co-witnessed by a surviving source (same literal, different erased/kept row, dedup-collided
+  by Neo4j/FtM) survives. Also
   recomputes the live ``caption`` scalar off the fold whenever a fold entity still exists at all
   (fix-round HIGH fix SS2 — NOT gated on ``compared_props`` being non-empty; ``erase_source_graph``
   may already have popped the sole-witnessed caption-source prop before this loop ever runs) and
@@ -63,6 +65,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
+from followthemoney import registry
 from sqlalchemy import CursorResult, delete, or_, select
 from sqlalchemy.orm import Session
 
@@ -281,14 +284,18 @@ def prune_live_to_fold(session: Session, neo4j: Neo4jClient, scrub_result: LogSc
       wiped legacy/pre-dual-write live data (or data from a source that was never itself
       statement-logged) — data the fold was NEVER going to have evidence for, regardless of this
       erasure.
-    * VALUE-level (MEDIUM fix NEW-2): a prop that passes the prop-level gate is pruned by
-      REMOVING exactly the CURRENT live values THIS scrub's deleted rows carried —
-      ``(survivor, prop_name, value) in scrub_result.erased_survivor_values`` — never by
-      replacing the whole value-set with the fold's reconstruction. The fold can only ever
-      contain values the (remaining) statement log still carries, so reconstructing from it wipes
-      any OTHER live value on that same prop the log never carried at all (legacy/pre-dual-write
-      data from a source that was never itself erased) alongside the genuinely-erased one. Both
-      gates are POSITIVE inclusion tests, never an inference from fold-absence.
+    * VALUE-level (MEDIUM fix NEW-2, refined fix-round-3 NEW-3): a prop that passes the prop-level
+      gate is pruned by REMOVING a CURRENT live value ``v`` iff it is BOTH erased-attributed
+      (``(survivor, prop_name, v) in scrub_result.erased_survivor_values``) AND NOT still present
+      in the post-scrub fold's reconstructed value-set for that prop (``fold_entity.get(
+      fold_prop)``, non-entity-typed props only). Round-2 used erased-attribution ALONE: since
+      Neo4j/FtM store a prop's values deduplicated, a value co-witnessed by BOTH the erased
+      source and a SURVIVING source (identical literal, different row, never reached by the
+      scrub) collapses onto one live value and was wrongly wiped. Fold-presence is now an
+      ADDITIONAL signal, never the SOLE value-set source (round-1's bug — that wiped
+      legacy/never-logged values the fold never had evidence for) nor absent entirely (round-2's
+      bug, above): a legacy value with zero log coverage is never in ``erased_survivor_values``,
+      so it survives via that disjunct regardless of fold-presence.
 
     ``caption``/``datasets`` (Gate P2 fix-round HIGH fix, SS2/SS3): both are
     ``resolution.divergence._excluded`` from the loop above (a Neo4j SCALAR pick / a plain list,
@@ -350,10 +357,24 @@ def prune_live_to_fold(session: Session, neo4j: Neo4jClient, scrub_result: LogSc
             current_values = current_props[prop_name]
             if not isinstance(current_values, list):
                 continue  # never a regular FtM multi-valued prop otherwise (defensive only)
+            # Combined-filter (fix-round-3): a value is removed only if it is BOTH
+            # erased-attributed AND no longer fold-attested (no surviving row still yields it).
+            # fold_values is the SECOND, independent signal — a still-vouched-for co-witnessed
+            # value (same literal, a surviving source's row) stays covered by `in fold_values`
+            # even though it is ALSO (correctly) present in `erased_values`.
+            fold_prop = fold_entity.schema.get(prop_name) if fold_entity is not None else None
+            fold_values: set[str] = set()
+            if (
+                fold_entity is not None
+                and fold_prop is not None
+                and fold_prop.type != registry.entity
+            ):
+                fold_values = {str(v) for v in fold_entity.get(fold_prop)}
             compared_props[prop_name] = [
                 str(value)
                 for value in cast("list[Any]", current_values)
-                if (survivor, prop_name, str(value)) not in erased_values  # value-level (NEW-2)
+                if str(value) in fold_values
+                or (survivor, prop_name, str(value)) not in erased_values  # value-level (NEW-2)
             ]
 
         fold_anchors = get_anchors(fold_entity) if fold_entity is not None else {}
