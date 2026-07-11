@@ -827,3 +827,79 @@ def test_prune_live_to_fold_value_level_filter_spares_legacy_value_sharing_a_pro
         "value)"
     )
     engine.dispose()
+
+
+# ===========================================================================
+# prune_live_to_fold — the COMBINED per-value filter (round-3 narrower bug, checker-confirmed
+# against round-2's fix): remove `v` iff erased-attributed AND NOT still fold-vouched
+# ===========================================================================
+
+
+def test_prune_live_to_fold_value_level_filter_keeps_a_value_still_vouched_by_the_fold() -> None:
+    """Round-3 narrower bug (checker-confirmed runtime reproduction against round-2's fix): the
+    per-value filter must combine BOTH signals — remove ``v`` iff it is (a) erased-attributed
+    (``(survivor, prop, v) in scrub_result.erased_survivor_values``) AND (b) NOT still present
+    in the post-scrub fold's reconstructed value-set for that prop. A value that IS
+    erased-attributed (this scrub's deleted rows carried it) but is ALSO still reconstructable
+    from a SURVIVING source's remaining row must be KEPT, never removed.
+
+    Stubs a live node with TWO ``alias`` values — ``shared_value`` (erased-attributed: the
+    erased source's now-deleted row carried it, but a SURVIVING source's row for the SAME
+    literal value is STILL present in the session) and ``erased_only_value`` (erased-attributed
+    with NO surviving row anywhere) — and a ``LogScrubResult.erased_survivor_values`` naming
+    BOTH as erased-attributed (mirroring what a real scrub over the erased member's two
+    now-deleted rows would produce). Only a kept ``StatementRecord`` row for ``shared_value``
+    remains in the session, giving the fold real reconstructable evidence for it.
+
+    RED today: round-2's filter removes a value whenever it is erased-attributed,
+    UNCONDITIONALLY — never consulting the fold for a second, independent "is it still
+    vouched-for" signal — so BOTH values are wiped, leaving ``compared_props["alias"] == []``
+    instead of the expected ``[shared_value]``.
+    """
+    from worldmonitor.resolution.erasure_scrub import LogScrubResult, prune_live_to_fold
+
+    engine, sessions = _sqlite_sessions()
+    survivor_id = "surv-combined-filter-unit"
+    keep_src = "ksrc:combined-filter-unit"
+    shared_value = "CombinedFilterShared"
+    erased_only_value = "CombinedFilterErasedOnly"
+    with sessions() as session:
+        # The ONLY remaining statement row for this survivor after the (simulated) scrub — a
+        # SURVIVING source's row for the SAME literal value the erased source also carried.
+        session.add(_stmt(survivor_id, "m-keep", "alias", shared_value, keep_src))
+        session.commit()
+
+        scrub_result = LogScrubResult(
+            source_id="esrc:combined-filter-unit",
+            erased_member_ids=frozenset({"m-erased"}),
+            touched_survivors=frozenset({survivor_id}),
+            statements_scrubbed=2,
+            context_claims_scrubbed=0,
+            decisions_redacted=0,
+            erased_survivor_props=frozenset({(survivor_id, "alias")}),
+            erased_survivor_values=frozenset(
+                {
+                    (survivor_id, "alias", shared_value),
+                    (survivor_id, "alias", erased_only_value),
+                }
+            ),
+        )
+
+        stub = _StubNeo4j(
+            {
+                "id": survivor_id,
+                "prov_source_id": keep_src,
+                "alias": [shared_value, erased_only_value],
+            }
+        )
+
+        prune_live_to_fold(session, stub, scrub_result)  # type: ignore[arg-type]
+
+    assert len(stub.write_calls) == 1, "exactly one Neo4j write for the one touched survivor"
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("alias") == [shared_value], (
+        "COMBINED FILTER VIOLATED: expected compared_props['alias'] == "
+        f"[{shared_value!r}] (the surviving source's fold-vouched value KEPT, the "
+        f"erased-only value REMOVED), got alias={props.get('alias')!r}"
+    )
+    engine.dispose()

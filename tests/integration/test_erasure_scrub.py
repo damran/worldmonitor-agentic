@@ -1504,3 +1504,102 @@ def test_it_erase_legacy_value_survives_sharing_a_multivalued_prop_with_an_erase
     )
 
     engine.dispose()
+
+
+# =========================================================================================
+# IT-ERASE-shared-identical-value (round-3 narrower bug, checker-confirmed against round-2's
+# fix — a value co-witnessed by a SURVIVING source must not be wiped merely because the erased
+# source ALSO logged the identical literal value)
+# =========================================================================================
+
+
+def test_it_erase_identical_value_from_surviving_source_survives_erasure(
+    minio: tuple[str, str, str],
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+) -> None:
+    """IT-ERASE-shared-identical-value — round-3 narrower bug (checker-confirmed runtime
+    reproduction against round-2's fix).
+
+    ``m1`` (the erased member) logs TWO ``alias`` values via TWO separate statement rows:
+    ``shared_alias_value`` — the SAME literal ALSO independently logged by ``m2`` (a surviving
+    member, different ``entity_id``/``dataset``) — and ``erased_only_alias_value``, logged ONLY
+    by ``m1``. Round-2's per-prop value filter removes a live value ``v`` whenever
+    ``(survivor, prop, v) in scrub_result.erased_survivor_values`` — i.e. whenever THIS scrub's
+    deleted rows carried that exact literal value, with no regard for whether a surviving
+    source's row (never reached by the scrub) ALSO independently carries it.
+
+    RED today: BOTH ``shared_alias_value`` AND ``erased_only_alias_value`` are wiped from the
+    live node's ``alias`` list — ``shared_alias_value`` is removed purely because the erased
+    source's OWN row happened to carry the identical literal, even though ``m2``'s row for it
+    was never reached by the scrub at all.
+    """
+    erased_src = "esrc-identical:it"
+    keep_src = "ksrc-identical:it"
+    survivor_id = "surv-identical-it"
+    m1 = f"{survivor_id}-m1"
+    m2 = f"{survivor_id}-m2"
+    shared_name = "Identical Value Shared Name"
+    shared_alias_value = "Identical Shared Alias"
+    erased_only_alias_value = "Identical Erased Only Alias"
+
+    engine, sessions = _sessions(postgres_dsn)
+    with sessions() as session:
+        session.add(_stmt(survivor_id, m1, "name", shared_name, erased_src))
+        session.add(_stmt(survivor_id, m2, "name", shared_name, keep_src))
+        session.add(_stmt(survivor_id, m1, "alias", shared_alias_value, erased_src))
+        session.add(_stmt(survivor_id, m1, "alias", erased_only_alias_value, erased_src))
+        session.add(_stmt(survivor_id, m2, "alias", shared_alias_value, keep_src))
+        session.commit()
+
+    ensure_constraints(clean_graph)
+    by_id = {
+        m1: _person(
+            m1,
+            erased_src,
+            {"name": [shared_name], "alias": [shared_alias_value, erased_only_alias_value]},
+        ),
+        m2: _person(m2, keep_src, {"name": [shared_name], "alias": [shared_alias_value]}),
+    }
+    merged, dropped = _merge_entities(survivor_id, (m1, m2), by_id)
+    assert dropped == ()
+    write_entities(clean_graph, [merged])
+
+    pre = _read_node(clean_graph, survivor_id)
+    assert pre is not None
+    pre_alias = set(pre.get("alias") or [])
+    assert pre_alias == {shared_alias_value, erased_only_alias_value}, (
+        f"precondition: both alias values must be live pre-erasure, got {pre_alias!r}"
+    )
+
+    from worldmonitor.erasure import erase_source
+
+    with sessions() as session:
+        erase_source(
+            neo4j=clean_graph,
+            session=session,
+            landing=_landing(minio),
+            source_id=erased_src,
+            authorized_by="it-erase-identical-op",
+        )
+        session.commit()
+
+    after = _read_node(clean_graph, survivor_id)
+    assert after is not None, "the multi-source survivor must SURVIVE a partial erase"
+    after_alias = set(after.get("alias") or [])
+
+    assert shared_alias_value in after_alias, (
+        "IT-ERASE-shared-identical-value VIOLATED: a value co-witnessed by a SURVIVING source "
+        "was wiped from the live node merely because the erased source's OWN (now-deleted) row "
+        f"ALSO logged the identical literal value: alias={after_alias!r}"
+    )
+    assert erased_only_alias_value not in after_alias, (
+        "IT-ERASE-shared-identical-value non-vacuity VIOLATED: the genuinely erased-source-only "
+        f"value must still be removed: alias={after_alias!r}"
+    )
+    assert after_alias == {shared_alias_value}, (
+        "IT-ERASE-shared-identical-value VIOLATED: expected EXACTLY the surviving-source-vouched "
+        f"value, got {after_alias!r}"
+    )
+
+    engine.dispose()

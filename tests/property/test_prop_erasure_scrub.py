@@ -422,6 +422,21 @@ def test_p_erase_1_round_trip_both_surfaces(
         )
         assert "OnlyFromKept" in live_alias, "non-vacuity: the KEPT value must survive live too"
 
+        # Checker-flagged gap (round-3): `_seed_corpus` ALSO co-witnesses `name` with the
+        # IDENTICAL literal value "Shared Name" across BOTH m1 (erased_src) and m2 (keep_src) —
+        # but until now nothing asserted on the live `name` VALUE post-erasure. A removal filter
+        # keyed ONLY on "this scrub's deleted rows carried this exact literal value" (ignoring
+        # whether a surviving source's row ALSO still yields it) wipes "Shared Name" here even
+        # though m2's (survivor_id, "name", "Shared Name", keep_src) row is never reached by the
+        # scrub at all — the round-2 narrower bug this round's fix must close.
+        assert live_survivor.get("name") == ["Shared Name"], (
+            "P-ERASE-1 CHECKER-FLAGGED GAP VIOLATED: the identical `name` value co-witnessed by "
+            "BOTH the erased source (m1) and a SURVIVING source (m2) must survive on the LIVE "
+            f"node, got name={live_survivor.get('name')!r} — a removal filter keyed only on "
+            "erased-attribution (never consulting the post-scrub fold for a second, independent "
+            "still-vouched-for signal) wipes a value a surviving source still legitimately holds"
+        )
+
         # Anchor-oracle vacuity fence (MANDATORY, SF-6): a DIRECT live-node property read — NEVER
         # measure_divergence, which `_excludes` CANONICAL_ID_FIELDS (divergence.py:96-102) and
         # would go green with a residual erased anchor still on the node.
@@ -1228,6 +1243,163 @@ def test_p_erase_7_legacy_value_survives_when_sharing_a_prop_with_an_erased_valu
         )
         assert after_alias == {corpus.kept_alias_value, corpus.legacy_alias_value}, (
             f"P-ERASE-7 VIOLATED: expected EXACTLY the kept + legacy values, got {after_alias!r}"
+        )
+    finally:
+        engine.dispose()
+
+
+# ===========================================================================
+# P-ERASE-8: a value co-witnessed by a SURVIVING source must not be wiped merely because
+# the erased source ALSO logged the identical literal value (round-3 narrower bug, checker-
+# confirmed against round-2's fix)
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class _SharedValueCorpusIds:
+    erased_src: str
+    keep_src: str
+    survivor_id: str
+    m1: str
+    m2: str
+    shared_alias_value: str
+    erased_only_alias_value: str
+
+
+def _seed_p8_scenario(
+    session: Session, neo4j: Neo4jClient, scenario: _EraseScenario
+) -> _SharedValueCorpusIds:
+    """Seed the round-3 corpus: ONE multi-valued prop (``alias``) where the erased member
+    (``m1``) contributes TWO values via TWO separate statement rows — ``shared_alias_value``
+    (the SAME literal ALSO independently logged by the surviving member ``m2``, a DIFFERENT
+    ``entity_id``/``dataset``) and ``erased_only_alias_value`` (logged ONLY by ``m1``, no other
+    row anywhere carries it). Both of ``m1``'s rows land in ``erased_survivor_values`` once
+    ``erased_src`` is scrubbed (both are literally erased-attributed) — but ONLY
+    ``erased_only_alias_value`` should actually disappear from the live node:
+    ``shared_alias_value`` is STILL vouched for by ``m2``'s row, which this scrub never reaches
+    at all (``m2``'s dataset is ``keep_src``, its entity_id is never in ``erased_member_ids``).
+    """
+    sfx = scenario.suffix
+    erased_src = f"esrc8:{sfx}"
+    keep_src = f"ksrc8:{sfx}"
+    survivor_id = f"surv8-{sfx}"
+    m1 = f"{survivor_id}-m1"
+    m2 = f"{survivor_id}-m2"
+    shared_name = f"SharedNameEight-{sfx}"
+    shared_alias_value = f"SharedAliasEight-{sfx}"
+    erased_only_alias_value = f"ErasedOnlyAliasEight-{sfx}"
+
+    # --- Postgres: m1 logs BOTH alias values; m2 independently logs the SHARED one too. ---
+    session.add(_stmt(survivor_id, m1, "name", shared_name, erased_src))
+    session.add(_stmt(survivor_id, m2, "name", shared_name, keep_src))
+    session.add(_stmt(survivor_id, m1, "alias", shared_alias_value, erased_src))
+    session.add(_stmt(survivor_id, m1, "alias", erased_only_alias_value, erased_src))
+    session.add(_stmt(survivor_id, m2, "alias", shared_alias_value, keep_src))
+    session.commit()
+
+    # --- Neo4j: the LIVE graph mirroring that log (SAME production merge/write path). ---
+    ensure_constraints(neo4j)
+    by_id = {
+        m1: _person(
+            m1,
+            erased_src,
+            {"name": [shared_name], "alias": [shared_alias_value, erased_only_alias_value]},
+        ),
+        m2: _person(m2, keep_src, {"name": [shared_name], "alias": [shared_alias_value]}),
+    }
+    merged, dropped = _merge_entities(survivor_id, (m1, m2), by_id)
+    assert dropped == (), f"unexpected schema-incompatible drop: {dropped!r}"
+    write_entities(neo4j, [merged])
+
+    return _SharedValueCorpusIds(
+        erased_src=erased_src,
+        keep_src=keep_src,
+        survivor_id=survivor_id,
+        m1=m1,
+        m2=m2,
+        shared_alias_value=shared_alias_value,
+        erased_only_alias_value=erased_only_alias_value,
+    )
+
+
+@pytest.mark.integration
+@given(scenario=_p_erase_scenario())
+@example(scenario=_EraseScenario(suffix="p8shared01"))
+@_SETTINGS
+def test_p_erase_8_identical_value_survives_when_the_erased_source_also_matches_it(
+    scenario: _EraseScenario,
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+    minio: tuple[str, str, str],
+) -> None:
+    """P-ERASE-8 — round-3 narrower bug (checker-confirmed runtime reproduction against
+    round-2's fix).
+
+    Round-2's per-prop value filter removes a live value ``v`` whenever
+    ``(survivor, prop, v) in scrub_result.erased_survivor_values`` — i.e. whenever THIS
+    scrub's deleted rows carried that exact literal value, with NO regard for whether a
+    DIFFERENT, non-erased source ALSO independently logged the identical literal value on the
+    same prop. Since Neo4j/FtM store a prop's value-set deduplicated, erasing ``m1`` makes
+    ``(survivor, "alias", shared_alias_value)`` appear in ``erased_survivor_values`` (from
+    ``m1``'s now-deleted row) even though ``m2``'s row for the SAME literal value was NEVER
+    reached by the scrub at all — the correct removal condition must ALSO consult whether the
+    post-scrub fold still reconstructs that value for the prop (a surviving source still
+    vouches for it) before removing it.
+
+    RED today: BOTH ``shared_alias_value`` AND ``erased_only_alias_value`` are wiped from the
+    live node's ``alias`` list — the filter has no fold-consultation at all, so
+    ``shared_alias_value`` is removed purely because the erased source's OWN row also happened
+    to carry the identical literal, with no regard for ``m2``'s still-present, never-reached row.
+    """
+    _cleanup_postgres(postgres_dsn)
+    clean_graph.execute_write("MATCH (n) DETACH DELETE n")
+
+    engine = make_engine(postgres_dsn)
+    try:
+        create_all(engine)
+        sessions = session_factory(engine)
+        landing = _landing(minio)
+
+        with sessions() as session:
+            corpus = _seed_p8_scenario(session, clean_graph, scenario)
+
+        pre = _read_node(clean_graph, corpus.survivor_id)
+        assert pre is not None
+        pre_alias = set(pre.get("alias") or [])
+        assert pre_alias == {corpus.shared_alias_value, corpus.erased_only_alias_value}, (
+            f"precondition: both alias values must be live pre-erasure, got {pre_alias!r}"
+        )
+
+        from worldmonitor.erasure import erase_source
+
+        with sessions() as session:
+            erase_source(
+                neo4j=clean_graph,
+                session=session,
+                landing=landing,
+                source_id=corpus.erased_src,
+                authorized_by="p2-prop-op-8",
+            )
+            session.commit()
+
+        after = _read_node(clean_graph, corpus.survivor_id)
+        assert after is not None, "the multi-source survivor must SURVIVE a partial erase"
+        after_alias = set(after.get("alias") or [])
+
+        assert corpus.shared_alias_value in after_alias, (
+            "P-ERASE-8 VIOLATED: a value co-witnessed by a SURVIVING, non-erased source "
+            f"(dataset={corpus.keep_src!r}) was wiped from the live node merely because the "
+            "erased source's OWN (now-deleted) row ALSO logged the identical literal value: "
+            f"alias={after_alias!r} — the removal filter must check fold-presence too, not just "
+            "erased-attribution"
+        )
+        assert corpus.erased_only_alias_value not in after_alias, (
+            "P-ERASE-8 non-vacuity VIOLATED: the genuinely erased-source-only value must still "
+            f"be removed: alias={after_alias!r}"
+        )
+        assert after_alias == {corpus.shared_alias_value}, (
+            "P-ERASE-8 VIOLATED: expected EXACTLY the surviving-source-vouched value, got "
+            f"{after_alias!r}"
         )
     finally:
         engine.dispose()
