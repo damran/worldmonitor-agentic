@@ -38,7 +38,9 @@ Public surface (SF-1/SF-2/SF-4/SF-5, spec ``docs/reviews/GATE_P2_ERASURE_SPEC.md
   fix-round-3 (NEW-3) to ALSO require fold-absence — a value is only removed if it is BOTH
   erased-attributed AND no longer reconstructable from the post-scrub fold, so a value
   co-witnessed by a surviving source (same literal, different erased/kept row, dedup-collided
-  by Neo4j/FtM) survives. Also
+  by Neo4j/FtM) survives PROVIDED the surviving source's contribution is statement-logged — see
+  :func:`prune_live_to_fold`'s KNOWN RESIDUAL note for the one remaining, narrower,
+  over-removal-only gap (an exact-literal coincidence with an UNLOGGED legacy source). Also
   recomputes the live ``caption`` scalar off the fold whenever a fold entity still exists at all
   (fix-round HIGH fix SS2 — NOT gated on ``compared_props`` being non-empty; ``erase_source_graph``
   may already have popped the sole-witnessed caption-source prop before this loop ever runs) and
@@ -294,8 +296,28 @@ def prune_live_to_fold(session: Session, neo4j: Neo4jClient, scrub_result: LogSc
       scrub) collapses onto one live value and was wrongly wiped. Fold-presence is now an
       ADDITIONAL signal, never the SOLE value-set source (round-1's bug — that wiped
       legacy/never-logged values the fold never had evidence for) nor absent entirely (round-2's
-      bug, above): a legacy value with zero log coverage is never in ``erased_survivor_values``,
-      so it survives via that disjunct regardless of fold-presence.
+      bug, above).
+
+      **KNOWN RESIDUAL (checker-confirmed runtime repro, over-removal ONLY, never a leak,
+      bounded to the pre-F1-cutover dual-write window).** The combined filter can still
+      over-remove ONE narrow class: a live value ``v`` that is BOTH (a) erased-attributed (an
+      erased source's now-deleted row logged the exact literal ``v`` on this prop) AND (b)
+      independently held by a SURVIVING source whose contribution was NEVER
+      statement/context-claim-logged (legacy/pre-dual-write live-graph data), with an EXACT
+      literal-string match between the two. Because ``prov_witnesses`` is PROP-granular
+      (``{prop: [datasets]}``, no per-value attribution), the post-``erase_source_graph``
+      witness map cannot say WHICH value the surviving legacy source vouches for, and the
+      post-scrub fold has zero log evidence for ``v`` — so ``v in fold_values`` is False AND
+      ``(survivor, prop_name, v) not in erased_values`` is False, and ``v`` is removed even
+      though the legacy source still legitimately holds it. Direction is over-removal ONLY: the
+      erased source's own data is always truly gone (GDPR completeness intact); the residual
+      never keeps an erased-only value. A correct fix needs VALUE-granular live-graph
+      provenance (``{prop: {value: [datasets]}}``, built in ``graph/writer.py``), FROZEN for
+      this gate (spec §8); a filter-only workaround would re-open NEW-2's over-retention (the
+      leak direction), so it is NOT attempted here. **Self-healing:** closes at Gate 2b (ADR
+      0099 step 2, the statement-log backfill) — once the legacy contribution has a row, the
+      fold reconstructs ``v`` and keeps it. **Revisit trigger:** Gate 2b backfill completion
+      (log-completeness), OR any move to a value-granular live-graph witness map.
 
     ``caption``/``datasets`` (Gate P2 fix-round HIGH fix, SS2/SS3): both are
     ``resolution.divergence._excluded`` from the loop above (a Neo4j SCALAR pick / a plain list,
