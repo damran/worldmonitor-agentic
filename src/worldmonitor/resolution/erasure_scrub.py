@@ -320,7 +320,9 @@ def prune_live_to_fold(session: Session, neo4j: Neo4jClient, scrub_result: LogSc
       anchor claim never logged, so the prop-level gate never offers it for removal) is a
       SEPARATE, PRE-EXISTING log-completeness boundary — not introduced or widened by this
       residual, present in ``erase_source_graph`` before P2 too, and disclosed at the ADR level
-      (SF-5, ``P-ERASE-5``). A correct fix for the value-level residual above needs VALUE-granular
+      (SF-5, ``P-ERASE-5`` — the log-completeness-boundary property this note describes,
+      formally defined and owned by Gate 2b / ADR 0113, which closes it via the statement-log
+      backfill). A correct fix for the value-level residual above needs VALUE-granular
       live-graph provenance (``{prop: {value: [datasets]}}``, built in ``graph/writer.py``),
       FROZEN for this gate (spec §8); a filter-only workaround would re-open NEW-2's
       over-retention (the leak direction for LOGGED data), so it is NOT attempted here.
