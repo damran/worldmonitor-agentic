@@ -55,6 +55,8 @@ _DASHBOARD_PUBLIC_PREFIXES: frozenset[str] = frozenset({"/api/dashboard", "/app"
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _STATIC_DIR = Path(__file__).parent / "static"
+# The vendored single-page consumption dashboard (ADR 0115, Slice D); served at /app (public).
+_APP_DIR = _STATIC_DIR / "app"
 
 
 def _build_verifier(settings: Settings) -> TokenVerifier | None:
@@ -192,6 +194,9 @@ def create_app(
         return {"subject": principal.subject}
 
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+    # The consumption dashboard SPA (ADR 0115). ``html=True`` serves index.html at /app/; the
+    # /app prefix is public (see ``_DASHBOARD_PUBLIC_PREFIXES``). It calls only /api/dashboard.
+    app.mount("/app", StaticFiles(directory=str(_APP_DIR), html=True), name="dashboard-app")
 
     app.include_router(auth_web.router)
     app.include_router(graph_router)

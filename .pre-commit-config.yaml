@@ -26,7 +26,9 @@ repos:
     hooks:
       - id: detect-secrets
         args: ["--baseline", ".secrets.baseline"]
-        exclude: ^uv\.lock$
+        # Skip the lock file and vendored third-party minified bundles (globe.gl/three.js,
+        # force-graph) — high-entropy strings in vendored assets are noise, not our secrets.
+        exclude: '(^uv\.lock$)|(/static/app/vendor/)'
 
   # --- lint / format / type-check (project-pinned via uv) ---
   - repo: local
