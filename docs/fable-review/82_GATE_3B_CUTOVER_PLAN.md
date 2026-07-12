@@ -168,7 +168,11 @@ person-affecting op).
   multiplicity term** and NOT let `alias_collapse = |live| − |distinct survivors|` **absorb** a same-id
   duplicate (numerically identical: 2 live → 1 fold). A duplicate carrying an un-logged **anchor**
   (excluded from R4) otherwise vanishes count-clean. Wire A1's "no id materialised more than once" check
-  as a hard R-gate here.
+  as a hard R-gate here. **`duplicate_live_node_ids == 0` (and its edge analogue) is its OWN MUST-gate —
+  the operator MUST NOT rely on the scalar `node_residual == 0` alone:** the residual surfaces the duplicate
+  in its own additive term, but an *independent* vanished-survivor deficit
+  (`fold − distinct_live_survivors − fold_extras < 0`) can arithmetically cancel it back to 0 (the vanished
+  survivor is separately caught by the R4 `measure_divergence` instrument these are paired with).
 
 **PASS = all MUST-gates green + every residual named benign + zero erased-value resurrection (R9/R9b) +
 zero unexplained fold→live value (R9c) + count residual exactly 0 (R11/R12) + per-id multiplicity 0
