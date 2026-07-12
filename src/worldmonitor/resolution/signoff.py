@@ -51,6 +51,7 @@ from worldmonitor.ontology.ftm import FtmEntity, make_entity
 from worldmonitor.resolution.canonical import record_durable_id
 from worldmonitor.resolution.merge import ResolvedCluster
 from worldmonitor.resolution.referents import rewrite_referents
+from worldmonitor.resolution.spine_lock import acquire_spine_writer_lock
 from worldmonitor.resolution.statements import (
     record_context_claims,
     record_decision,
@@ -273,6 +274,12 @@ def approve(
     if audit.decision == "rejected":
         raise SignOffError(f"merge {canonical_id!r} was already rejected; cannot approve")
 
+    # ADR 0110 / INV-SINGLE-WRITER (rider-3, ADR 0112): sign-off is a second, unguarded SoR-spine
+    # writer — take the transaction-scoped advisory lock before this promote transaction's spine
+    # writes (after the idempotency early-returns above). Xact-scoped; auto-releases at this
+    # function's session.commit() below. No-op on SQLite.
+    acquire_spine_writer_lock(session)
+
     source_ids = list(audit.source_ids)
     # Orphan guard (mirror of reject's): a parked cluster is never written during resolution,
     # so a member node already in the graph means a prior REJECT wrote the members standalone.
@@ -349,6 +356,12 @@ def reject(
         return SignOffResult(canonical_id, "rejected", 0, 0, already_applied=True)
     if audit.decision == "merged":
         raise SignOffError(f"merge {canonical_id!r} was already approved; cannot reject")
+
+    # ADR 0110 / INV-SINGLE-WRITER (rider-3, ADR 0112): sign-off is a second, unguarded SoR-spine
+    # writer — take the transaction-scoped advisory lock before this promote transaction's spine
+    # writes (after the idempotency early-returns above). Xact-scoped; auto-releases at this
+    # function's session.commit() below. No-op on SQLite.
+    acquire_spine_writer_lock(session)
 
     # Orphan guard: a parked cluster is never written during resolution, so a canonical node
     # in the graph means a prior approve already wrote it. Completing a reject would write the

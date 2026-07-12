@@ -55,6 +55,7 @@ from worldmonitor.resolution.spine_integrity import (
     IncompleteAliasedSurvivorError,
     find_incomplete_aliased_survivors,
 )
+from worldmonitor.resolution.statements import WM_EXISTS
 
 
 @dataclass
@@ -188,8 +189,12 @@ def reconstruct_entities(
         witnesses: dict[str, set[str]] = defaultdict(set)
 
         for row in rows:
-            if row.prop == "id":
-                continue  # exclude id pseudo-property (ADR 0100 D3)
+            if row.prop in ("id", WM_EXISTS):
+                # exclude the id pseudo-property (ADR 0100 D3) and the WM_EXISTS existence-claim
+                # sentinel (ADR 0112, Gate WPI-1) from FtM-property assignment AND the witness
+                # map — but the survivor GROUP is still non-empty (it has >= 1 row), so a bare
+                # node is still built below.
+                continue
             value = row.value
             # Entity-typed property: rewrite value through survivor_of (D2 global referent rewrite)
             # Same test as resolution.referents.rewrite_referents uses.

@@ -325,19 +325,32 @@ def fuse_statement_entity(
     Renamed from ``_fuse_statement_entity`` to the public ``fuse_statement_entity`` (Gate 2a /
     ADR 0099): makes one authoritative fusion feed both the witness map and the statement log. Pure
     identifier rename — ZERO logic, threshold, score, or value change.
+
+    Gate WPI-1 (ADR 0112): a member with ZERO FtM properties yields ZERO
+    :func:`_member_statements` (not even the ``id`` pseudo-statement, which FtM synthesises only
+    when >= 1 real statement exists), so calling ``StatementEntity.from_statements(dataset, [])``
+    for it RAISES ``InvalidData: No valid schema for entity: None``. A member whose statement list
+    is empty is therefore SKIPPED here (never fed to ``from_statements``); ``fused`` is seeded from
+    the first NON-empty member and every subsequent non-empty member is merged in. Returns ``None``
+    when EVERY member is propertyless (nothing to fuse) — the existing sentinel both callers
+    already handle. This is byte-behaviour-preserving for every currently-fusing input: any member
+    with >= 1 property still contributes every statement, and ``StatementEntity.merge`` unions
+    statement SETS, so the fused statement set (and the witness map derived from it) is identical
+    regardless of skip/merge order.
     """
     if not kept_ids:
         return None
-    base = by_id[kept_ids[0]]
-    fused = StatementEntity.from_statements(
-        _FUSION_DATASET, _member_statements(canonical_id, base, _member_source(base))
-    )
+    fused: StatementEntity | None = None
     for member_id in kept_ids:
         member = by_id[member_id]
-        member_entity = StatementEntity.from_statements(
-            _FUSION_DATASET, _member_statements(canonical_id, member, _member_source(member))
-        )
-        fused.merge(member_entity)
+        stmts = _member_statements(canonical_id, member, _member_source(member))
+        if not stmts:
+            continue  # zero-prop member: no statements to fuse (ADR 0112 crash->None hardening)
+        member_entity = StatementEntity.from_statements(_FUSION_DATASET, stmts)
+        if fused is None:
+            fused = member_entity
+        else:
+            fused.merge(member_entity)
     return fused
 
 
