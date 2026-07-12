@@ -84,11 +84,15 @@ LLM-egress audit ADR 0105 #170). The log-capture consult (`docs/fable-review/80_
   dormant-guard hardening. **Paused** to fund the consumption-dashboard MVP (see below); code is
   committed and its branch intact — revisit trigger in ADR 0115. See
   `docs/fable-review/81_PRECUTOVER_GATE_SEQUENCE.md` §7 and `82_GATE_3B_CUTOVER_PLAN.md`.
-- [ ] **Consumption dashboard MVP ← CURRENT (ADR 0115)** — an interactive, graph-native product: a
-  3D globe of geo-located events + a live feed rail + a click-through entity relationship panel with
-  provenance receipts + AI-synthesized briefs. A **read-model** over the resolved graph (bounded
-  Cypher; never writes it); Neo4j stays the live SoR for the MVP. Thin slices, light process (no
-  gate fleet — the product lane touches no person-affecting invariant).
+- [x] **Consumption dashboard MVP ✅ COMPLETE (ADR 0115, 2026-07-13)** — an interactive, graph-native
+  product at `/app`: a 3D globe of geo-located events + a live feed rail + a click-through entity
+  relationship panel with provenance receipts + entity search + AI-synthesized briefs with citations.
+  A **read-model** over the resolved graph (bounded Cypher; never writes it); Neo4j stays the live SoR.
+  Five thin slices, light process (the product lane touches no person-affecting invariant): **A**
+  seed + open-read carve-out (#186) · **C** dashboard read API (#187) · **D** 3D globe SPA (#188) · **B**
+  news→event LLM extraction, default-OFF (#189, adversarially reviewed) · **E** AI briefs (#190). Run:
+  `docker compose up` → open `/app`. News→event extraction + briefs need Ollama on the host +
+  `EXTRACTION_ENABLED=true`.
 - [ ] **Gate 3b cutover + retire the direct write** — human-gated, irreversible, LAST; the first
   sanctioned live `full_rebuild` consumes Gate 2b's output. Blocked on the operator preconditions
   (run the 2b backfill, enable the guard, green over N cycles) + the human cutover sign-off.
