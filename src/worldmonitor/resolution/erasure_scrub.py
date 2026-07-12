@@ -309,15 +309,26 @@ def prune_live_to_fold(session: Session, neo4j: Neo4jClient, scrub_result: LogSc
       witness map cannot say WHICH value the surviving legacy source vouches for, and the
       post-scrub fold has zero log evidence for ``v`` — so ``v in fold_values`` is False AND
       ``(survivor, prop_name, v) not in erased_values`` is False, and ``v`` is removed even
-      though the legacy source still legitimately holds it. Direction is over-removal ONLY: the
-      erased source's own data is always truly gone (GDPR completeness intact); the residual
-      never keeps an erased-only value. A correct fix needs VALUE-granular live-graph
-      provenance (``{prop: {value: [datasets]}}``, built in ``graph/writer.py``), FROZEN for
-      this gate (spec §8); a filter-only workaround would re-open NEW-2's over-retention (the
-      leak direction), so it is NOT attempted here. **Self-healing:** closes at Gate 2b (ADR
-      0099 step 2, the statement-log backfill) — once the legacy contribution has a row, the
-      fold reconstructs ``v`` and keeps it. **Revisit trigger:** Gate 2b backfill completion
-      (log-completeness), OR any move to a value-granular live-graph witness map.
+      though the legacy source still legitimately holds it. Direction is over-removal ONLY
+      **for every value this residual's own mechanism can touch**: a value THIS scrub reaches
+      (logged, erased-attributed) never survives it — the residual never keeps an erased-only
+      value that was itself statement/context-claim-logged. **Scope note (judge review):** this
+      claim is precise for reached/logged data, not a blanket "100% of everything the erased
+      source ever contributed is now gone" — an erased source's contribution that was ITSELF
+      never statement/context-claim-logged (an unlogged co-witnessed value sharing a prop with a
+      logged erased value that trips the ``not in erased_values`` disjunct, or a sole-erased
+      anchor claim never logged, so the prop-level gate never offers it for removal) is a
+      SEPARATE, PRE-EXISTING log-completeness boundary — not introduced or widened by this
+      residual, present in ``erase_source_graph`` before P2 too, and disclosed at the ADR level
+      (SF-5, ``P-ERASE-5``). A correct fix for the value-level residual above needs VALUE-granular
+      live-graph provenance (``{prop: {value: [datasets]}}``, built in ``graph/writer.py``),
+      FROZEN for this gate (spec §8); a filter-only workaround would re-open NEW-2's
+      over-retention (the leak direction for LOGGED data), so it is NOT attempted here.
+      **Self-healing:** both the value-level residual and the separate log-completeness boundary
+      close at Gate 2b (ADR 0099 step 2, the statement-log backfill) — once every contribution
+      has a row, the fold reconstructs every surviving value and keeps it. **Revisit trigger:**
+      Gate 2b backfill completion (log-completeness), OR any move to a value-granular live-graph
+      witness map.
 
     ``caption``/``datasets`` (Gate P2 fix-round HIGH fix, SS2/SS3): both are
     ``resolution.divergence._excluded`` from the loop above (a Neo4j SCALAR pick / a plain list,
