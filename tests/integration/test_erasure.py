@@ -127,19 +127,24 @@ def test_landing_prefix_is_slash_terminated_and_collision_safe() -> None:
     assert not a.startswith(b), "erasing 'ofac-eu:sdn' must not sweep 'ofac:sdn'"
 
 
-def test_t7_erase_source_requires_authorized_by() -> None:
-    """T7 (authorization). ``authorized_by`` is a REQUIRED keyword-only argument (no default); a
-    call omitting it is rejected before any store is touched (it can never run anonymously)."""
+def test_t7_erase_source_authorization_is_keyword_only_and_runtime_enforced() -> None:
+    """T7 (authorization). ``authorized_by`` is keyword-only. ADR 0109 changed it from a
+    signature-REQUIRED argument to one with an ``""`` default: authorization is now enforced at
+    RUNTIME under the DEFAULT strict enforcement profile (a blank auth fails closed with a
+    ValueError before any store is touched — pinned by
+    ``tests/unit/test_enforcement_switch.py``), and may be bypassed ONLY when the operator sets
+    the enforcement switch off. The ADR-0049 authorization obligation is thus the default, now
+    operator-toggleable (ADR 0109)."""
     from worldmonitor.erasure import erase_source
 
     sig = inspect.signature(erase_source)
     assert "authorized_by" in sig.parameters
     param = sig.parameters["authorized_by"]
     assert param.kind is inspect.Parameter.KEYWORD_ONLY, "authorized_by must be keyword-only"
-    assert param.default is inspect.Parameter.empty, "authorized_by must be REQUIRED (no default)"
-
-    with pytest.raises(TypeError):
-        erase_source(neo4j=None, session=None, landing=None, source_id="conn:ds")  # type: ignore[arg-type, call-arg]
+    assert param.default == "", (
+        "ADR 0109: authorized_by defaults to '' (runtime-enforced under the strict profile, "
+        "not signature-required)"
+    )
 
 
 # ========================================================= integration test scaffolding

@@ -125,4 +125,5 @@
 | [0106](0106-context-claim-capture-lane.md) | Context-claim capture lane (Gate P1): bank anchor/enricher evidence into the SoR spine as provenance-stamped claims, and make the fold reproduce anchors | ACCEPTED | 2026-07-11 | false | false |
 | [0107](0107-erasure-reaches-sor.md) | Right-to-forget reaches the SoR (Gate P2): scrub all three log lanes, keep a defined live-removal mechanism, reconcile granularities | ACCEPTED | 2026-07-12 | false | true |
 | [0108](0108-signoff-spine-durability.md) | Human-decision lane durability (Gate P3): route sign-off through the SoR spine | ACCEPTED | 2026-07-11 | false | true |
+| [0109](0109-enforcement-switch.md) | Runtime enforcement switch: operator-toggleable safety guards | ACCEPTED | 2026-07-12 | false | true |
 <!-- END GENERATED ADR INDEX -->

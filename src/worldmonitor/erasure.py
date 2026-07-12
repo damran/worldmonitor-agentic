@@ -45,6 +45,7 @@ from worldmonitor.resolution.erasure_scrub import prune_live_to_fold, scrub_log_
 # The single source of truth for the landing-key path sanitizer — REUSED, never duplicated (spec
 # §4.1), so the derived erase prefix is provably a true prefix of the real ingest key.
 from worldmonitor.runner.ingest import _safe_segment  # pyright: ignore[reportPrivateUsage]
+from worldmonitor.settings import get_settings
 from worldmonitor.storage.landing import LandingStore
 
 logger = logging.getLogger(__name__)
@@ -159,7 +160,7 @@ def erase_source(
     session: Session,
     landing: LandingStore,
     source_id: str,
-    authorized_by: str,
+    authorized_by: str = "",
 ) -> ErasureResult:
     """Remove ``source_id``'s PII from landing + ER queue + dead-letter + the graph (GDPR erasure).
 
@@ -178,10 +179,18 @@ def erase_source(
             "erase_source: source_id must be '<connector_id>:<dataset>' with a non-empty "
             f"connector AND dataset; refusing a connector-wide/whole-bucket erase ({source_id!r})"
         )
-    if not authorized_by.strip():
-        raise ValueError(
-            "erase_source: authorized_by must name the human operator who authorized the erase "
-            "(non-blank); a GDPR erase can never run (or be audited) anonymously"
+    if get_settings().is_enforced("erasure_authorization"):
+        if not authorized_by.strip():
+            raise ValueError(
+                "erase_source: authorized_by must name the human operator who authorized the "
+                "erase (non-blank); a GDPR erase can never run (or be audited) anonymously"
+            )
+    elif not authorized_by.strip():
+        # Enforcement switch OFF (ADR 0109): allow an unauthorized erase, but never silently.
+        logger.warning(
+            "erase_source: authorization enforcement is OFF — running an UNAUTHORIZED erase "
+            "of %s (audited with a blank authorized_by)",
+            source_id,
         )
 
     run = TaskRun(id=str(uuid.uuid4()), kind="erase", status="running")

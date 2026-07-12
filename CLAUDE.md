@@ -42,6 +42,10 @@ layer above it changes.
 - **Self-improvement is GATED:** any agent-driven change to the live system (params, rules, models) goes
   **propose → evaluate → gate → promote**, versioned, with rollback + audit. Changes affecting a real
   person (ER thresholds, individual-affecting scores) **always** need human sign-off. Never silent in-place mutation.
+- **Enforcement switch (ADR 0109):** the *runtime* guards above (catastrophic-merge/sensitivity park,
+  erasure authorization) are operator-toggleable via `enforcement_profile` (**default `strict` = this
+  production posture**); a self-hosted dev/test instance may set it `off`. These invariants remain the
+  production default, not a hard-wired constant. **Provenance stamping is NOT toggleable** (data-integrity).
 
 ## Plugin / connector rules (`docs/30_PLUGIN_FRAMEWORK.md`)
 - A plugin = manifest + `config.schema.json` (drives the UI form) + impl + tests.

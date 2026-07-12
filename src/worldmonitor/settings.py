@@ -6,11 +6,19 @@ placeholders so the app can boot and serve ``/health`` before the stack is
 fully provisioned. See ``.env.example``.
 """
 
+import logging
 from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+# The runtime safety guards the enforcement switch (ADR 0109) can toggle. Each name maps to a
+# `settings.enforce_<name>` override field and an `is_enforced("<name>")` call at the guard's
+# choke point. Add a new guard here + its `enforce_<name>` field + one `is_enforced` check.
+_ENFORCEABLE_GUARDS = ("merge_guard", "erasure_authorization")
 
 # Placeholder/weak markers a non-development boot refuses (ADR 0061). A secret the app
 # reads is rejected if it is empty or contains one of these — the realistic "forgot to
@@ -81,6 +89,40 @@ class Settings(BaseSettings):
     # only the ACTION on a flagged cluster differs. Returned to "block" with human
     # sign-off, fulfilling the ADR 0024 obligation.
     merge_guard_mode: Literal["alert", "block"] = "block"
+
+    # --- Enforcement switch (ADR 0109) ---
+    # Master switch for the runtime safety guards. "strict" (DEFAULT — production posture)
+    # enforces every guard; "off" bypasses all of them. Per-guard `enforce_*` overrides win
+    # over the profile when set (None = inherit). Disabled guards are logged at startup
+    # (log_enforcement_status) so an "off" profile can't silently ride into production.
+    # This is operator config for a single-tenant, self-hosted deploy: keep it "strict" in
+    # production; set "off" (or per-guard False) only in a dev/test instance on test data.
+    enforcement_profile: Literal["strict", "off"] = "strict"
+    enforce_merge_guard: bool | None = None
+    enforce_erasure_authorization: bool | None = None
+
+    def is_enforced(self, guard: str) -> bool:
+        """Is ``guard`` active? A per-guard ``enforce_<guard>`` override wins; otherwise the
+        guard follows ``enforcement_profile`` ("strict" -> on, "off" -> off)."""
+        override = getattr(self, f"enforce_{guard}", None)
+        if override is not None:
+            return bool(override)
+        return self.enforcement_profile == "strict"
+
+    def disabled_enforcements(self) -> list[str]:
+        """The guards currently bypassed (for the startup warning)."""
+        return [g for g in _ENFORCEABLE_GUARDS if not self.is_enforced(g)]
+
+    def log_enforcement_status(self) -> None:
+        """Warn (once, at boot) if any safety guard is disabled — never silent."""
+        disabled = self.disabled_enforcements()
+        if disabled:
+            logger.warning(
+                "ENFORCEMENT: safety guards DISABLED (NOT production-safe) — %s "
+                "[enforcement_profile=%s]. Set enforcement_profile=strict for production.",
+                ", ".join(disabled),
+                self.enforcement_profile,
+            )
 
     # Max ER-queue candidates resolved per batch (ADR 0026). resolve_pending drains
     # the pending queue in windows of this size, committing per batch, so memory and
