@@ -142,6 +142,23 @@ def search_entities(client: Neo4jClient, *, term: str, limit: int) -> list[dict[
     return client.execute_read(query, term=term)
 
 
+def recent_events(client: Neo4jClient, *, limit: int) -> list[dict[str, Any]]:
+    """Recent derived Event nodes (newest first) with their source-article citation (ADR 0115).
+
+    Each row: the Event's display name + country, and the ``PROOF``-linked source Article's title +
+    URL (the receipt) — the AI brief's substrate. Empty until the Slice-B extraction pass runs.
+    """
+    query = (
+        "MATCH (e:Event) "
+        "OPTIONAL MATCH (e)-[:PROOF]->(a) "
+        "RETURN e.id AS id, head(e.name) AS name, head(e.country) AS country, "
+        "head(a.title) AS source_title, head(a.sourceUrl) AS source_url "
+        "ORDER BY coalesce(head(e.date), e.prov_retrieved_at) DESC "
+        f"LIMIT {_dash_limit(limit)}"
+    )
+    return client.execute_read(query)
+
+
 def graph_stats(client: Neo4jClient) -> dict[str, int]:
     """Return coarse graph counts (nodes, edges, articles) for the dashboard status bar."""
     nodes = client.execute_read("MATCH (n:Entity) RETURN count(n) AS c")

@@ -100,6 +100,23 @@ async function loadFeed() {
   }
 }
 
+async function loadBrief() {
+  try {
+    const data = await api("/brief");
+    const body = $("brief-body");
+    body.textContent = data.brief || "";
+    const sources = (data.sources || []).filter((s) => s.url).slice(0, 6);
+    if (sources.length) {
+      const cites = sources
+        .map((s, i) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">[${i + 1}]</a>`)
+        .join(" ");
+      body.insertAdjacentHTML("beforeend", ` <span class="cites">${cites}</span>`);
+    }
+  } catch (e) {
+    console.warn(e);
+  }
+}
+
 function renderGraph(data) {
   const el = $("graph-canvas");
   if (!fg) {
@@ -193,10 +210,12 @@ function init() {
   loadStats();
   loadPoints();
   loadFeed();
+  loadBrief();
   // Refresh the live layers periodically (the driver ingests on its cadence).
   setInterval(loadStats, 60000);
   setInterval(loadPoints, 120000);
   setInterval(loadFeed, 120000);
+  setInterval(loadBrief, 300000);
 }
 
 window.addEventListener("DOMContentLoaded", init);

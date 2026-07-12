@@ -16,6 +16,7 @@ from worldmonitor.graph.queries import (
     graph_stats,
     neighborhood,
     recent_articles,
+    recent_events,
     search_entities,
 )
 from worldmonitor.graph.writer import write_entities
@@ -132,3 +133,33 @@ def test_graph_stats_counts(clean_graph: Neo4jClient) -> None:
     assert stats["articles"] >= 1
     assert stats["nodes"] >= 4  # article + person + company + address (edge is a relationship)
     assert stats["edges"] >= 1  # the ownership relationship
+
+
+def test_recent_events_reads_event_with_its_source_citation(clean_graph: Neo4jClient) -> None:
+    """recent_events (Slice E) reads Event nodes + their PROOF-linked source article."""
+    ensure_constraints(clean_graph)
+    article = _stamped(
+        {
+            "id": "art-e1",
+            "schema": "Article",
+            "properties": {"title": ["Quake report"], "sourceUrl": ["https://n/e1"]},
+            "datasets": ["feeds"],
+        }
+    )
+    event = _stamped(
+        {
+            "id": "evt-1",
+            "schema": "Event",
+            "properties": {"name": ["Quake in region"], "country": ["tr"], "proof": ["art-e1"]},
+            "datasets": ["events"],
+        }
+    )
+    write_entities(clean_graph, [article, event])
+
+    rows = recent_events(clean_graph, limit=10)
+    match = next((r for r in rows if r["id"] == "evt-1"), None)
+    assert match is not None, f"recent_events must read the Event; got {rows}"
+    assert match["name"] == "Quake in region"
+    assert match["country"] == "tr"
+    assert match["source_title"] == "Quake report"  # via the PROOF edge
+    assert match["source_url"] == "https://n/e1"

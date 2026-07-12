@@ -297,6 +297,14 @@ services:
       # WM_LLM_TOKEN when running --profile agent so Hermes' /v1 bearer calls are verified.
       ZITADEL_DOMAIN: ${ZITADEL_DOMAIN:-}
       ZITADEL_CLIENT_ID: ${ZITADEL_CLIENT_ID:-}
+      # LLM gateway → Ollama on the WINDOWS host (LOCAL mode), for the dashboard AI-brief endpoint
+      # (ADR 0115, Slice E). Same target as the driver; requires OLLAMA_HOST=0.0.0.0:11434 on Windows.
+      LLM_MODE: ${LLM_MODE:-local}
+      LLM_OLLAMA_BASE_URL: ${LLM_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      LLM_OLLAMA_MODEL: ${LLM_OLLAMA_MODEL:-llama3.2}
+    # host.docker.internal → the Docker host (the Windows machine running Ollama).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # On BOTH networks: `default` for store reachability, `sandbox_net` to POST to the sidecar.
     # (Declaring `networks:` removes the implicit `default`, so it MUST be listed explicitly.)
     networks:

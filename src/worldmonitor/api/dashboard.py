@@ -13,16 +13,18 @@ centroid (``geo_precision="country"``) so the globe has geo before precise extra
 
 from __future__ import annotations
 
+import time
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
-from worldmonitor.api.deps import get_neo4j
+from worldmonitor.api.deps import get_llm_gateway, get_neo4j
 from worldmonitor.graph import queries
 from worldmonitor.graph.geo import country_centroid
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.queries import get_entity, get_provenance
 from worldmonitor.graph.read_guards import DASHBOARD_RESULT_LIMIT, ID_PATTERN
+from worldmonitor.llm.gateway import LLMGateway, LLMGatewayError
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -169,6 +171,103 @@ def entity(
         "links": links,
         "provenance": get_provenance(client, entity_id=entity_id),
     }
+
+
+# AI brief: served from a short in-process TTL cache so a public, unauthenticated endpoint can't
+# be spammed into one LLM call per request (the brief changes slowly; freshness to the minute is
+# irrelevant). LOCAL/Ollama egress is free, but this bounds cost under any mode + request rate.
+_BRIEF_TTL_SECONDS = 300.0
+
+
+def _build_brief_prompt(events: list[dict[str, Any]], articles: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    if events:
+        lines.append("Recent geo-located events:")
+        lines += [
+            f"- {e.get('name')}" + (f" [{e['country']}]" if e.get("country") else "")
+            for e in events[:20]
+        ]
+    if articles:
+        lines.append("\nRecent headlines:")
+        lines += [f"- {a.get('title')}" for a in articles[:20]]
+    return (
+        "You are an OSINT analyst. Write a concise 3-4 sentence situational brief of the current "
+        "world state from the events and headlines below. Be factual and neutral; do NOT speculate "
+        "beyond what is listed. Plain prose, no markdown.\n\n" + "\n".join(lines)
+    )
+
+
+def _brief_content(response: Any) -> str:
+    """Defensively read the completion text (mirrors ``api/llm.py``'s ModelResponse handling)."""
+    choices: Any = getattr(response, "choices", None)
+    if choices and len(choices) > 0:
+        message: Any = getattr(choices[0], "message", None)
+        if message is not None:
+            content: Any = getattr(message, "content", "")
+            return str(content) if content is not None else ""
+    return ""
+
+
+def _brief_sources(
+    events: list[dict[str, Any]], articles: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The receipts behind the brief: deduped source titles + urls."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for event in events:
+        url = event.get("source_url")
+        if isinstance(url, str) and url not in seen:
+            seen.add(url)
+            out.append({"title": event.get("source_title") or event.get("name"), "url": url})
+    for article in articles:
+        url = article.get("url")
+        if isinstance(url, str) and url not in seen:
+            seen.add(url)
+            out.append({"title": article.get("title"), "url": url})
+    return out[:12]
+
+
+@router.get("/brief")
+def brief(
+    request: Request,
+    client: Annotated[Neo4jClient, Depends(get_neo4j)],
+    gateway: Annotated[LLMGateway, Depends(get_llm_gateway)],
+) -> dict[str, Any]:
+    """An AI-synthesized situational brief with citation receipts (server-controlled egress).
+
+    The prompt is built from recent events + headlines (public data) — never from caller input — so
+    this stays public-read-safe. Cached for ``_BRIEF_TTL_SECONDS`` to bound LLM calls.
+    """
+    state = request.app.state
+    cache: dict[str, Any] = getattr(state, "brief_cache", None) or {}
+    state.brief_cache = cache
+    now = time.monotonic()
+    hit = cache.get("brief")
+    if hit is not None and now - hit["at"] < _BRIEF_TTL_SECONDS:
+        return cast("dict[str, Any]", hit["body"])
+
+    events = queries.recent_events(client, limit=20)
+    articles = queries.recent_articles(client, limit=20)
+    if not events and not articles:
+        # Not cached — recompute as soon as the driver has ingested something.
+        return {
+            "brief": "No activity yet — the driver is still ingesting curated feeds.",
+            "sources": [],
+        }
+
+    try:
+        response = gateway.chat(
+            [{"role": "user", "content": _build_brief_prompt(events, articles)}],
+            caller_tag="dashboard-brief",
+        )
+    except LLMGatewayError as exc:
+        raise HTTPException(
+            status_code=502, detail="AI brief unavailable (LLM gateway error)"
+        ) from exc
+
+    body = {"brief": _brief_content(response), "sources": _brief_sources(events, articles)}
+    cache["brief"] = {"at": now, "body": body}
+    return body
 
 
 def _next_str(value: object) -> str | None:
