@@ -37,6 +37,13 @@ DEFAULT_PUBLIC_PATHS: frozenset[str] = frozenset(
     {"/health", "/ready", "/docs", "/redoc", "/openapi.json"}
 )
 
+# Public path PREFIXES — a whole subtree reachable without auth (the read-only consumption
+# dashboard: its JSON read API + the vendored SPA, ADR 0115). Matched at a segment boundary
+# (``/api/dashboard`` matches ``/api/dashboard/events`` but NOT ``/api/dashboardX``) so a prefix
+# can never accidentally open a sibling route. The write/operator surface (integrations, review,
+# ``/v1/chat/completions``) is NOT prefixed here and stays auth-gated.
+DEFAULT_PUBLIC_PREFIXES: frozenset[str] = frozenset()
+
 
 def _unauthorized(detail: str) -> JSONResponse:
     return JSONResponse({"detail": detail}, status_code=401)
@@ -51,10 +58,23 @@ class AuthMiddleware:
         *,
         verifier: TokenVerifier | None,
         public_paths: Iterable[str] = DEFAULT_PUBLIC_PATHS,
+        public_prefixes: Iterable[str] = DEFAULT_PUBLIC_PREFIXES,
     ) -> None:
         self._app = app
         self._verifier = verifier
         self._public_paths = frozenset(public_paths)
+        self._public_prefixes = tuple(public_prefixes)
+
+    def _is_public(self, path: str) -> bool:
+        """A path is public if it is an exact public path OR under a public prefix.
+
+        Prefix matching is anchored at a path-segment boundary (``path == prefix`` or
+        ``path`` starts with ``prefix + "/"``) so ``/api/dashboard`` never opens
+        ``/api/dashboardX`` — only the intended subtree.
+        """
+        if path in self._public_paths:
+            return True
+        return any(path == p or path.startswith(p + "/") for p in self._public_prefixes)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -77,7 +97,7 @@ class AuthMiddleware:
         caller). With no header we try the signed session, then redirect a browser to ``/login`` /
         401 an API caller.
         """
-        if request.url.path in self._public_paths:
+        if self._is_public(request.url.path):
             return None
         if request.headers.get("Authorization"):
             return self._authenticate(request)
@@ -85,7 +105,7 @@ class AuthMiddleware:
 
     def _authenticate(self, request: Request) -> Response | None:
         """Return an error response, or ``None`` to let the request through."""
-        if request.url.path in self._public_paths:
+        if self._is_public(request.url.path):
             return None
 
         header = request.headers.get("Authorization", "")

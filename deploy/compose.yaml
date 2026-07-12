@@ -186,6 +186,31 @@ services:
     environment:
       POSTGRES_DSN: postgresql://${POSTGRES_USER:-worldmonitor}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-worldmonitor}
 
+  # --- One-shot curated-connector seed (ADR 0115) ---
+  # Populates connector_instance with a curated starter set (news feeds across categories + a
+  # bounded OpenSanctions dataset; Bluesky seeded disabled) so a fresh stack ingests REAL data
+  # immediately instead of sitting on an empty graph. Idempotent (deterministic ids) — safe to
+  # re-run on every `up`; an already-present row is skipped so operator edits survive. Not named
+  # in the compose-boot CI job, so it only runs on a full `docker compose up`; the driver picks up
+  # the seeded instances on its next tick.
+  seed:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: runtime
+    image: worldmonitor-app:dev
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -m
+      - worldmonitor.db.seed
+    environment:
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-worldmonitor}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-worldmonitor}
+      CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
+
   # --- One-shot landing-bucket bootstrap (Gate B-4c) ---
   # The API's /ready probe does a read-only head_bucket on the landing bucket; on a fresh stack
   # that bucket does not exist yet (it was previously created lazily by the first ingest), so
