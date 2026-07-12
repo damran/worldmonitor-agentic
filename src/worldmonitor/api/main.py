@@ -28,7 +28,11 @@ from worldmonitor.api.deps import get_principal
 from worldmonitor.api.graph import router as graph_router
 from worldmonitor.api.integrations import router as integrations_router
 from worldmonitor.api.llm import router as llm_router
-from worldmonitor.api.middleware import DEFAULT_PUBLIC_PATHS, AuthMiddleware
+from worldmonitor.api.middleware import (
+    DEFAULT_PUBLIC_PATHS,
+    DEFAULT_PUBLIC_PREFIXES,
+    AuthMiddleware,
+)
 from worldmonitor.api.readiness import ReadinessResult, build_default_readiness
 from worldmonitor.api.review import router as review_router
 from worldmonitor.authz.oidc import Principal, TokenVerifier, ZitadelTokenVerifier
@@ -40,6 +44,13 @@ from worldmonitor.settings import Settings, get_settings
 
 # Browser OIDC routes are PUBLIC so an unauthenticated browser can complete the login flow.
 _AUTH_WEB_PUBLIC_PATHS: frozenset[str] = frozenset({"/login", "/auth/callback", "/logout"})
+
+# The read-only consumption dashboard is public (ADR 0115): its JSON read API (``/api/dashboard/*``,
+# Slice C), the vendored single-page app (``/app``, Slice D), and the static assets it loads
+# (``/static/*``). Read-only, public news data, single-tenant self-hosted — the write/operator
+# surface (integrations, review, ``/v1/chat/completions``) is deliberately NOT listed and stays
+# auth-gated.
+_DASHBOARD_PUBLIC_PREFIXES: frozenset[str] = frozenset({"/api/dashboard", "/app", "/static"})
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -140,6 +151,7 @@ def create_app(
         AuthMiddleware,
         verifier=verifier,
         public_paths=DEFAULT_PUBLIC_PATHS | _AUTH_WEB_PUBLIC_PATHS,
+        public_prefixes=DEFAULT_PUBLIC_PREFIXES | _DASHBOARD_PUBLIC_PREFIXES,
     )
     # The session-cookie signing key. ``validate_production_secrets`` (called above) already raised
     # in any non-{development,test} boot with an empty ``session_secret_key``, so the random

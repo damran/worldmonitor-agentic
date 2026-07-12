@@ -78,11 +78,17 @@ LLM-egress audit ADR 0105 #170). The log-capture consult (`docs/fable-review/80_
   `full_rebuild` reconstructs the whole graph and the WPI-2 completeness obligation is discharged
   (`find_incomplete_aliased_survivors == ∅`). Mechanism merged + tested; **running** it over a
   real-seed corpus is operator-blocked (per-cohort fidelity spike, SF-4).
-- [ ] **3b-planning-proper ← CURRENT** — exclusion-surface audit · one-time (two-directional + count)
-  reconciliation · driver LOWs (single ledger read · handshake-refusal observability · snapshot
-  streaming) · write-path-retirement carve-outs. Planning/docs + dormant-guard hardening (the guard is
-  default-off, additive, reversible); see `docs/fable-review/81_PRECUTOVER_GATE_SEQUENCE.md` §7 and
-  `docs/fable-review/82_GATE_3B_CUTOVER_PLAN.md`.
+- [ ] **3b-planning-proper — PAUSED (ADR 0115, 2026-07-12)** — exclusion-surface audit · one-time
+  (two-directional + count) reconciliation · driver LOWs (single ledger read · handshake-refusal
+  observability · snapshot streaming) · write-path-retirement carve-outs. Planning/docs +
+  dormant-guard hardening. **Paused** to fund the consumption-dashboard MVP (see below); code is
+  committed and its branch intact — revisit trigger in ADR 0115. See
+  `docs/fable-review/81_PRECUTOVER_GATE_SEQUENCE.md` §7 and `82_GATE_3B_CUTOVER_PLAN.md`.
+- [ ] **Consumption dashboard MVP ← CURRENT (ADR 0115)** — an interactive, graph-native product: a
+  3D globe of geo-located events + a live feed rail + a click-through entity relationship panel with
+  provenance receipts + AI-synthesized briefs. A **read-model** over the resolved graph (bounded
+  Cypher; never writes it); Neo4j stays the live SoR for the MVP. Thin slices, light process (no
+  gate fleet — the product lane touches no person-affecting invariant).
 - [ ] **Gate 3b cutover + retire the direct write** — human-gated, irreversible, LAST; the first
   sanctioned live `full_rebuild` consumes Gate 2b's output. Blocked on the operator preconditions
   (run the 2b backfill, enable the guard, green over N cycles) + the human cutover sign-off.
