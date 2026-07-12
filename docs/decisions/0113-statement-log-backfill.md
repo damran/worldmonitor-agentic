@@ -1,6 +1,6 @@
 # 0113 — Statement/context-claim log backfill (Gate 2b): complete the SoR spine from the retained ingest substrate
 
-- **Status:** PROPOSED (2026-07-12)
+- **Status:** ACCEPTED (2026-07-12; proposed 2026-07-12)
 - **Date:** 2026-07-12
 - **human_fork:** false — every sub-fork below is a reversible default with a revisit trigger; the
   backfill writes are append-only INSERTs into `statement`/`context_claim`(/`decision`) undone by
@@ -12,9 +12,15 @@
   the P2 over-removal residual (restoring surviving values erasure wrongly dropped — correct direction),
   and a wrong backfill SOURCE could resurrect an already-erased subject's claims into the
   never-forgetting log. Erasure/GDPR surface. human_cosign REQUIRED before build.
-- **human_cosign:** PENDING — stamped before the code build (a genuine person-affecting classification,
-  not a waiver) with all findings disclosed; the accept-flip (PROPOSED→ACCEPTED + index regen) happens
-  at gate end per the house pattern and must not flip on a PENDING line (ADR 0097 §5).
+- **human_cosign:** Mithat 2026-07-12 — cosigned before the code build (a genuine person-affecting
+  classification, not a waiver), with the four disclosures (SF-1 er_queue substrate; person-data into
+  the permanent SoR guarded by forget-safety; erasure self-heals over-removal; fidelity spike
+  blocked-on-real-seed) presented. The build then surfaced, via an adversarial multi-lens verify + an
+  Opus judge (fresh-context runtime reproduction), two engineering gaps — a missing WPI-3 single-writer
+  lock and vacuous edge coverage — both fixed + tested; the judge APPROVEd with one MEDIUM
+  (evolving-snapshot union under-capture, deterministic-order-mitigated, the SF-1 landing-re-map revisit
+  trigger) + two LOWs, none forget-safety-affecting (see §Verification record). The person-affecting
+  forget-safety invariant held and was reproduced non-vacuously throughout.
 - **Realises:** ADR 0095 step 2 — the statement-log becomes **complete**, so a `full_rebuild`
   reconstructs the whole graph and the Gate 3b cutover is safe; and the Fable log-capture consult's
   Gate-2b line (`docs/fable-review/80_LOG_CAPTURE_CONSULT.md` §5, §9). **Builds on:** ADR 0099 (the
