@@ -76,7 +76,9 @@ class ExtractStats:
     skipped: int = 0
     errors: int = 0
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self) -> dict[str, object]:
+        # ``object`` (not ``int``) so it slots into the driver's ``_finalize(stats: dict[str,
+        # object] | None)`` — dict value types are invariant under pyright strict.
         return {
             "scanned": self.scanned,
             "extracted": self.extracted,
