@@ -1,0 +1,905 @@
+"""Unit tests for Gate P2 — ``resolution/erasure_scrub.py`` + ``graph/ops.py::set_node_values``
+(ADR 0107, spec §4). Docker-free where possible (SQLite in-memory for the Postgres-side pieces;
+a duck-typed stub for the Neo4j-side piece — no testcontainer needed for either).
+
+Covers:
+  * the ``erased_member_ids`` derivation ordering — COMPUTE BEFORE DELETE (surprise #2: a
+    delete-first bug returns an EMPTY set, since the SELECT would then find nothing).
+  * the ``(dataset == source_id) OR (entity_id IN erased_member_ids)`` reach predicate (SF-1
+    fallback-keyed residual closure) — a member with BOTH a ``dataset``-keyed row AND a
+    ``member.id``-keyed fallback row (the P1-writer ``dataset = source_id or member.id or ""``
+    residual) has BOTH rows reached.
+  * decision-row redaction REASSIGNS the JSONB list — an in-place ``.remove()`` does NOT persist
+    (a plain JSONB column with no ``MutableList``/``as_mutable`` — SQLAlchemy change-detection
+    never sees it); a standalone failing-idiom probe demonstrates the underlying gotcha directly
+    (independent of ``scrub_log_lanes``, using only the EXISTING ``DecisionRecord`` model — this
+    probe test alone is NOT import-RED, but the whole file still collection-errors on the
+    module-level import below, per the gate's named import-RED exception list).
+  * ``set_node_values`` reads the node's CURRENT full props before merging — a stubbed node
+    retains ``prov_*``/``id``/``caption`` untouched by the compared-prop/anchor write (HIGH-1),
+    the write is a SINGLE full-dict ``SET`` (never a partial-map / dynamic-property write), and
+    anchor removal is REMOVE-only (an anchor key present pre-write and NOT re-affirmed by
+    ``remove_anchor_keys`` is absent post-write; no NEW anchor value is ever introduced,
+    HIGH-2).
+
+RED today: ``ImportError`` — neither ``worldmonitor.resolution.erasure_scrub`` nor
+``worldmonitor.graph.ops.set_node_values`` exists yet. This whole file is one of the gate's
+NAMED import-RED exceptions (it necessarily exercises the new surface throughout).
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.orm import Session, sessionmaker
+
+from worldmonitor.db.engine import create_all, make_engine, session_factory
+from worldmonitor.db.models import ContextClaimRecord, DecisionRecord, StatementRecord
+from worldmonitor.graph.ops import set_node_values  # NEW surface — does not exist yet
+from worldmonitor.resolution.erasure_scrub import (
+    scrub_log_lanes,
+)  # NEW surface — does not exist yet
+
+_RETRIEVED_AT = "2026-07-11T00:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# SQLite JSONB shim (idempotent if already registered by another test module) — this file
+# must be self-contained: it fails standalone without it (other JSONB-bearing tables reachable
+# from Base.metadata, e.g. er_queue_item.raw_entity/task_run.stats, don't compile to SQLite).
+# ---------------------------------------------------------------------------
+
+
+@compiles(JSONB, "sqlite")
+def _jsonb_as_sqlite_json(_element: Any, _compiler: Any, **_kw: Any) -> str:
+    return "JSON"
+
+
+def _sqlite_sessions() -> tuple[Any, sessionmaker[Session]]:
+    """A fresh, Docker-free in-memory SQLite engine + session factory (SQLite gets the
+    ``_assign_sqlite_seq`` ``before_insert`` treatment already wired on ``StatementRecord``/
+    ``ContextClaimRecord``/``DecisionRecord``, so ``session.add`` + ``session.commit`` works the
+    same shape as the Postgres path for these tables)."""
+    engine = make_engine("sqlite:///:memory:")
+    create_all(engine)
+    return engine, session_factory(engine)
+
+
+def _stmt(
+    canonical_id: str, entity_id: str, prop: str, value: str, dataset: str
+) -> StatementRecord:
+    return StatementRecord(
+        id=str(uuid.uuid4()),
+        statement_id=str(uuid.uuid4()),
+        canonical_id=canonical_id,
+        entity_id=entity_id,
+        schema="Person",
+        prop=prop,
+        value=value,
+        dataset=dataset,
+        reliability="A",
+        retrieved_at=_RETRIEVED_AT,
+        raw_pointer=f"s3://landing/{dataset}/{entity_id}.json",
+        first_seen=_RETRIEVED_AT,
+        last_seen=_RETRIEVED_AT,
+        method=None,
+        scope="default",
+    )
+
+
+# ===========================================================================
+# erased_member_ids — compute-before-delete ordering (surprise #2)
+# ===========================================================================
+
+
+def test_erased_member_ids_is_computed_before_the_delete() -> None:
+    """A delete-first implementation bug returns an EMPTY ``erased_member_ids`` (the SELECT
+    finds nothing once the rows are already gone) — this directly probes the ordering, not just
+    the end-state row count."""
+    engine, sessions = _sqlite_sessions()
+    with sessions() as session:
+        session.add(_stmt("surv-1", "m1", "name", "Ordering Probe", "esrc:ordering"))
+        session.commit()
+
+        result = scrub_log_lanes(session, "esrc:ordering")
+        session.commit()
+
+    assert "m1" in result.erased_member_ids, (
+        "erased_member_ids must be computed BEFORE the delete — got "
+        f"{result.erased_member_ids!r} (empty/missing 'm1' means the implementation deleted "
+        "first, then computed against an already-empty table)"
+    )
+    engine.dispose()
+
+
+# ===========================================================================
+# The (dataset == source_id) OR (entity_id IN erased_member_ids) reach predicate (SF-1)
+# ===========================================================================
+
+
+def test_reach_predicate_sweeps_the_fallback_keyed_residual_row_too() -> None:
+    """A member with ONE ``dataset``-keyed row (reachable directly) AND ONE ``member.id``-keyed
+    fallback row (the P1-writer ``dataset = source_id or member.id or ""`` residual,
+    ``statements.py:196``) must have BOTH rows swept — the fallback row is reached via
+    ``entity_id IN erased_member_ids``, not via ``dataset`` (its dataset is the bare member id,
+    never equal to the erased ``source_id``)."""
+    engine, sessions = _sqlite_sessions()
+    erased_src = "esrc:fallback"
+    with sessions() as session:
+        # The reachable row (dataset == source_id).
+        session.add(_stmt("surv-2", "m-fallback", "name", "Reachable", erased_src))
+        # The fallback-keyed row: dataset == the member's OWN id (statements.py:196's `or
+        # member.id` branch), NOT the source_id — unreachable by a bare `dataset == source_id`.
+        session.add(_stmt("surv-2", "m-fallback", "alias", "FallbackKeyed", "m-fallback"))
+        # An UNRELATED row that must survive (non-vacuity).
+        session.add(_stmt("surv-3", "m-other", "name", "Untouched", "ksrc:other"))
+        session.commit()
+
+        scrub_log_lanes(session, erased_src)
+        session.commit()
+
+    with sessions() as session:
+        remaining = {
+            (row.entity_id, row.dataset)
+            for row in session.execute(select(StatementRecord)).scalars()
+        }
+    assert ("m-fallback", erased_src) not in remaining
+    assert ("m-fallback", "m-fallback") not in remaining, (
+        "the fallback-keyed row (dataset == member.id) must ALSO be swept via "
+        "entity_id IN erased_member_ids, not just the dataset-matched row"
+    )
+    assert ("m-other", "ksrc:other") in remaining, "an unrelated member's row must survive"
+    engine.dispose()
+
+
+def test_reach_predicate_also_sweeps_context_claim_rows() -> None:
+    """The SAME ``(dataset OR entity_id)`` reach predicate applies to the ``context_claim`` lane
+    (SF-1: ``statement`` and ``context_claim`` reached identically)."""
+    engine, sessions = _sqlite_sessions()
+    erased_src = "esrc:ctx-reach"
+    with sessions() as session:
+        session.add(
+            ContextClaimRecord(
+                id=str(uuid.uuid4()),
+                canonical_id="surv-ctx",
+                entity_id="m-ctx",
+                key="wikidata_id",
+                value="Q4242",
+                dataset=erased_src,
+                method="connector:map",
+                retrieved_at=_RETRIEVED_AT,
+                scope="default",
+            )
+        )
+        session.commit()
+
+        scrub_log_lanes(session, erased_src)
+        session.commit()
+
+    with sessions() as session:
+        remaining = list(session.execute(select(ContextClaimRecord)).scalars())
+    assert remaining == [], (
+        f"context_claim row(s) with dataset={erased_src!r} must be swept, got {remaining!r}"
+    )
+    engine.dispose()
+
+
+# ===========================================================================
+# Decision-row redaction — REASSIGN, never in-place .remove()
+# ===========================================================================
+
+
+def test_inplace_remove_on_jsonb_list_does_not_persist_the_underlying_gotcha() -> None:
+    """The failing-idiom PROBE (independent of ``scrub_log_lanes``): ``DecisionRecord.member_ids``
+    is a plain JSONB column with no ``MutableList``/``as_mutable`` wrapper, so an in-place
+    ``list.remove()`` mutation is invisible to SQLAlchemy's change-detection and is silently
+    LOST on commit — proving WHY the redaction must reassign a new list."""
+    engine, sessions = _sqlite_sessions()
+    with sessions() as session:
+        session.add(
+            DecisionRecord(
+                id="probe-decision",
+                canonical_id="surv-probe",
+                kind="merge",
+                member_ids=["m1", "m2"],
+                score=0.5,
+                decided_by="auto:resolver",
+                evidence=None,
+                supersedes=None,
+                superseded_by=None,
+                scope="default",
+            )
+        )
+        session.commit()
+
+    with sessions() as session:
+        row = session.execute(
+            select(DecisionRecord).where(DecisionRecord.id == "probe-decision")
+        ).scalar_one()
+        row.member_ids.remove("m1")  # THE FAILING IDIOM — in-place mutation, never reassigned
+        session.commit()
+
+    with sessions() as fresh_session:
+        reread = fresh_session.execute(
+            select(DecisionRecord).where(DecisionRecord.id == "probe-decision")
+        ).scalar_one()
+    assert reread.member_ids == ["m1", "m2"], (
+        "SQLAlchemy change-detection did NOT persist the in-place .remove() — "
+        f"got {reread.member_ids!r} (if this list is now ['m2'], SQLAlchemy's JSONB tracking "
+        "changed and the underlying gotcha this probe demonstrates no longer holds — the "
+        "builder's redaction must still explicitly reassign, never rely on in-place mutation)"
+    )
+    engine.dispose()
+
+
+def test_scrub_log_lanes_redaction_reassigns_and_persists() -> None:
+    """The REAL redaction (via ``scrub_log_lanes``) must actually persist across a fresh
+    session — proving it reassigns (or ``flag_modified``s) rather than relying on the
+    in-place-mutation idiom the sibling probe test shows is silently lost."""
+    engine, sessions = _sqlite_sessions()
+    erased_src = "esrc:redact"
+    with sessions() as session:
+        session.add(_stmt("surv-redact", "m-redact", "name", "Redact Me", erased_src))
+        session.add(
+            DecisionRecord(
+                id="redact-decision",
+                canonical_id="surv-redact",
+                kind="merge",
+                member_ids=["m-redact", "m-keep"],
+                score=0.6,
+                decided_by="auto:resolver",
+                evidence=None,
+                supersedes=None,
+                superseded_by=None,
+                scope="default",
+            )
+        )
+        session.commit()
+
+        scrub_log_lanes(session, erased_src)
+        session.commit()
+
+    with sessions() as fresh_session:
+        reread = fresh_session.execute(
+            select(DecisionRecord).where(DecisionRecord.id == "redact-decision")
+        ).scalar_one()
+    assert reread.member_ids == ["m-keep"], (
+        f"the redaction must PERSIST across a fresh session (reassign, not in-place .remove()); "
+        f"got member_ids={reread.member_ids!r}"
+    )
+    engine.dispose()
+
+
+# ===========================================================================
+# set_node_values — read-current-props-then-merge (HIGH-1) + REMOVE-only anchors (HIGH-2)
+# ===========================================================================
+
+
+class _StubNeo4j:
+    """A duck-typed Neo4j-client stub (mirrors ``Neo4jClient.execute_read``/``execute_write``'s
+    signature only) — no testcontainer needed for this write-shape unit test."""
+
+    def __init__(self, node_props: dict[str, Any]) -> None:
+        self._node_props = dict(node_props)
+        self.write_calls: list[dict[str, Any]] = []
+
+    def execute_read(self, query: str, /, **params: Any) -> list[dict[str, Any]]:
+        return [{"props": dict(self._node_props)}]
+
+    def execute_write(self, query: str, /, **params: Any) -> list[dict[str, Any]]:
+        self.write_calls.append({"query": query, "params": params})
+        return []
+
+
+def _sole_dict_param(params: dict[str, Any]) -> dict[str, Any]:
+    """The one dict-valued kwarg among an ``execute_write`` call's params — the full-prop-replace
+    payload — without hardcoding the builder's exact kwarg NAME (only that there is EXACTLY one,
+    proving a single full-map write, never a Cypher call built from multiple scalar params that
+    would imply a dynamic/partial SET)."""
+    dicts = [v for v in params.values() if isinstance(v, dict)]
+    assert len(dicts) == 1, (
+        f"expected exactly one dict-valued execute_write param (the full-prop-replace map), "
+        f"got {params!r}"
+    )
+    return dicts[0]
+
+
+def test_set_node_values_reads_current_props_and_preserves_provenance() -> None:
+    """HIGH-1: the write MUST read the node's CURRENT full props first and merge — a bare
+    ``SET n = <partial map>`` built ONLY from ``compared_props``/anchors would wipe
+    ``prov_source_id``/``prov_witnesses``/``id``/``caption`` (G1). A stubbed node with those
+    fields set must retain them, byte-unchanged, in the write payload."""
+    stub = _StubNeo4j(
+        {
+            "id": "surv-stub",
+            "caption": "Stub Survivor",
+            "prov_source_id": "keep-src",
+            "prov_witnesses": '{"name": ["keep-src"]}',
+            "datasets": ["keep-src"],
+            "name": ["Stub Survivor"],
+            "alias": ["OnlyFromErased", "OnlyFromKept"],
+            "wikidata_id": "Q555555",
+        }
+    )
+
+    set_node_values(
+        stub,  # type: ignore[arg-type]
+        "surv-stub",
+        compared_props={"alias": ["OnlyFromKept"]},
+        remove_anchor_keys=["wikidata_id"],
+    )
+
+    assert len(stub.write_calls) == 1, "exactly one Neo4j write for one node"
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+
+    assert props.get("id") == "surv-stub", "HIGH-1 VIOLATED: id must be preserved"
+    assert props.get("caption") == "Stub Survivor", "HIGH-1 VIOLATED: caption must be preserved"
+    assert props.get("prov_source_id") == "keep-src", (
+        "HIGH-1 VIOLATED: prov_source_id must be preserved (G1)"
+    )
+    assert props.get("prov_witnesses") == '{"name": ["keep-src"]}', (
+        "HIGH-1 VIOLATED: prov_witnesses must be preserved (G1)"
+    )
+    assert props.get("datasets") == ["keep-src"], "HIGH-1 VIOLATED: datasets must be preserved"
+    assert props.get("alias") == ["OnlyFromKept"], (
+        "the compared prop must be updated to the fold's row-granular result"
+    )
+    assert "wikidata_id" not in props, "HIGH-2: the erased-source anchor must be REMOVEd"
+
+
+def test_set_node_values_anchor_removal_is_remove_only_never_sets_a_new_value() -> None:
+    """HIGH-2: ``remove_anchor_keys`` may only REMOVE an existing anchor — it must never
+    introduce/replace it with a NEW value (which would risk a UNIQUE-constraint collision,
+    ``graph/constraints.py:24-30``). A ``compared_props`` write that does NOT mention an anchor
+    key at all must leave that anchor untouched (no gratuitous rebuild)."""
+    stub = _StubNeo4j(
+        {
+            "id": "surv-stub-2",
+            "prov_source_id": "keep-src",
+            "wikidata_id": "Q777777",
+            "geonames_id": "999",
+            "name": ["Untouched Name"],
+        }
+    )
+
+    set_node_values(
+        stub,  # type: ignore[arg-type]
+        "surv-stub-2",
+        compared_props={},
+        remove_anchor_keys=["geonames_id"],
+    )
+
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("wikidata_id") == "Q777777", (
+        "an anchor NOT named in remove_anchor_keys must be left untouched"
+    )
+    assert "geonames_id" not in props, "the named anchor must be REMOVEd"
+    assert props.get("name") == ["Untouched Name"], "an unrelated prop must be preserved"
+
+
+def test_set_node_values_empty_compared_prop_removes_it_from_the_node() -> None:
+    """A ``compared_props`` entry with an EMPTY value list means the fold's row-granular result
+    for that prop is now empty (every value was erased-source-only) — the prop must be REMOVEd
+    from the node entirely, not left as a stale non-empty list."""
+    stub = _StubNeo4j(
+        {
+            "id": "surv-stub-3",
+            "prov_source_id": "keep-src",
+            "passportNumber": ["P-9-SECRET"],
+        }
+    )
+
+    set_node_values(
+        stub,  # type: ignore[arg-type]
+        "surv-stub-3",
+        compared_props={"passportNumber": []},
+        remove_anchor_keys=[],
+    )
+
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert "passportNumber" not in props, (
+        "an emptied compared prop must be REMOVEd from the node, not left stale"
+    )
+    assert props.get("prov_source_id") == "keep-src"
+
+
+# ===========================================================================
+# set_node_values — NEW parameters (fix design SS2/SS4: new_caption, remove_dataset_ids)
+# ===========================================================================
+
+
+def test_set_node_values_new_caption_sets_scalar_without_list_wrapping() -> None:
+    """Fix design SS2/SS4: ``new_caption`` must set ``caption`` as a SCALAR string — NEVER
+    routed through ``compared_props`` (which always writes a Python ``list``, which would
+    corrupt a scalar into a 1-element array). G1 (``prov_source_id``/``id``) must still be
+    preserved untouched.
+
+    RED today: ``set_node_values`` has no ``new_caption`` parameter — ``TypeError: unexpected
+    keyword argument 'new_caption'``.
+    """
+    stub = _StubNeo4j(
+        {
+            "id": "surv-caption-unit",
+            "caption": "Stale Caption",
+            "prov_source_id": "keep-src",
+            "name": ["Kept Name"],
+        }
+    )
+
+    set_node_values(
+        stub,  # type: ignore[arg-type]
+        "surv-caption-unit",
+        compared_props={},
+        remove_anchor_keys=[],
+        new_caption="Recomputed Caption",
+    )
+
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("caption") == "Recomputed Caption", (
+        "new_caption must set the recomputed scalar caption"
+    )
+    assert isinstance(props.get("caption"), str), (
+        f"caption must stay a SCALAR string, never list-wrapped: got {props.get('caption')!r}"
+    )
+    assert props.get("prov_source_id") == "keep-src", "G1: prov_source_id must be preserved"
+    assert props.get("id") == "surv-caption-unit", "HIGH-1: id must be preserved"
+
+
+def test_set_node_values_new_caption_default_sentinel_leaves_caption_untouched() -> None:
+    """Fix design SS4: the "don't touch" default must genuinely leave ``caption`` untouched —
+    a plain ``str | None = None`` default would be AMBIGUOUS with "explicitly clear the caption
+    to empty", so the builder must use a real sentinel, never bare ``None``. This call omits
+    ``new_caption`` entirely: since the parameter does not exist yet, this exercises TODAY's
+    existing (already-correct, caption-untouched) behaviour under the OLD signature too —
+    GREEN both before and after the fix (the additive default must be backward-compatible; a
+    genuinely new-RED probe for the sentinel-vs-None distinction is impractical to observe from
+    the outside — the sentinel is an internal implementation detail — this test locks the
+    externally-observable CONTRACT: omitted ``new_caption`` never touches caption).
+    """
+    stub = _StubNeo4j(
+        {
+            "id": "surv-caption-unit-2",
+            "caption": "Untouched Caption",
+            "prov_source_id": "keep-src",
+        }
+    )
+
+    set_node_values(
+        stub,  # type: ignore[arg-type]
+        "surv-caption-unit-2",
+        compared_props={},
+        remove_anchor_keys=[],
+    )
+
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("caption") == "Untouched Caption", (
+        "the default (no new_caption passed) must leave caption COMPLETELY untouched"
+    )
+
+
+def test_set_node_values_remove_dataset_ids_strips_exactly_the_named_ids() -> None:
+    """Fix design SS3/SS4: ``remove_dataset_ids`` strips EXACTLY the named id(s) from the plain
+    ``datasets`` list, leaving every other entry untouched — no fold-based inference, a literal
+    -string removal (the caller already knows the exact erased ``source_id``). G1 preserved.
+
+    RED today: ``set_node_values`` has no ``remove_dataset_ids`` parameter — ``TypeError:
+    unexpected keyword argument 'remove_dataset_ids'``.
+    """
+    stub = _StubNeo4j(
+        {
+            "id": "surv-datasets-unit",
+            "prov_source_id": "keep-src",
+            "datasets": ["erased-src", "keep-src", "other-src"],
+        }
+    )
+
+    set_node_values(
+        stub,  # type: ignore[arg-type]
+        "surv-datasets-unit",
+        compared_props={},
+        remove_anchor_keys=[],
+        remove_dataset_ids=["erased-src"],
+    )
+
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert sorted(props.get("datasets") or []) == ["keep-src", "other-src"], (
+        f"remove_dataset_ids must strip EXACTLY the named id(s), got {props.get('datasets')!r}"
+    )
+    assert props.get("prov_source_id") == "keep-src", "G1: prov_source_id must be preserved"
+    assert props.get("id") == "surv-datasets-unit", "HIGH-1: id must be preserved"
+
+
+def test_set_node_values_remove_dataset_ids_default_is_a_noop() -> None:
+    """The default (``remove_dataset_ids`` omitted) must leave ``datasets`` completely
+    untouched — mirrors the caption sentinel-default contract test above (GREEN both before
+    and after the fix, since the parameter is purely additive)."""
+    stub = _StubNeo4j(
+        {
+            "id": "surv-datasets-unit-2",
+            "prov_source_id": "keep-src",
+            "datasets": ["keep-src", "other-src"],
+        }
+    )
+
+    set_node_values(
+        stub,  # type: ignore[arg-type]
+        "surv-datasets-unit-2",
+        compared_props={},
+        remove_anchor_keys=[],
+    )
+
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert sorted(props.get("datasets") or []) == ["keep-src", "other-src"], (
+        "the default (no remove_dataset_ids passed) must leave datasets COMPLETELY untouched"
+    )
+
+
+# ===========================================================================
+# prune_live_to_fold — the positive-attribution gate (fix design SS1, the CRITICAL fix)
+# ===========================================================================
+
+
+def test_prune_live_to_fold_positive_attribution_gate_skips_unattributed_prop() -> None:
+    """Fix design SS1 — the CRITICAL fix's positive-attribution gate at the unit level: a prop
+    NOT named in ``LogScrubResult.erased_survivor_props`` for a survivor must NEVER be added to
+    ``compared_props`` at all — left byte-identical on the live node, no matter what the fold
+    shows or doesn't show for it.
+
+    Stubs a Neo4j node carrying a ``profession`` value with ZERO backing ``StatementRecord``
+    (so the fold has no evidence for it either — the CURRENT buggy code would infer
+    "erased-source-only" from that absence and wipe it) and a ``LogScrubResult`` whose
+    ``erased_survivor_props`` names ONLY ``(survivor, "alias")`` — never ``"profession"`` —
+    proving the gate is a POSITIVE inclusion test, never an inference from fold-absence.
+
+    RED today: ``LogScrubResult`` has no ``erased_survivor_props`` field — ``TypeError:
+    unexpected keyword argument 'erased_survivor_props'``. ``prune_live_to_fold`` also still
+    takes a bare ``touched_survivors: Iterable[str]``, not the whole ``LogScrubResult`` (fix
+    design SS1) — this test necessarily exercises the NEW signature.
+    """
+    from worldmonitor.resolution.erasure_scrub import (
+        LogScrubResult,  # NEW field — does not exist yet
+        prune_live_to_fold,
+    )
+
+    engine, sessions = _sqlite_sessions()
+    survivor_id = "surv-gate-unit"
+    keep_src = "ksrc:gate-unit"
+    with sessions() as session:
+        session.add(_stmt(survivor_id, "m-keep", "name", "Gate Unit Name", keep_src))
+        session.commit()
+
+        scrub_result = LogScrubResult(
+            source_id="esrc:gate-unit",
+            erased_member_ids=frozenset({"m-erased"}),
+            touched_survivors=frozenset({survivor_id}),
+            statements_scrubbed=1,
+            context_claims_scrubbed=0,
+            decisions_redacted=0,
+            erased_survivor_props=frozenset({(survivor_id, "alias")}),
+        )
+
+        stub = _StubNeo4j(
+            {
+                "id": survivor_id,
+                "prov_source_id": keep_src,
+                "name": ["Gate Unit Name"],
+                "profession": ["LegacyNeverLoggedProfession"],
+            }
+        )
+
+        prune_live_to_fold(session, stub, scrub_result)  # type: ignore[arg-type]
+
+    assert len(stub.write_calls) == 1, "exactly one Neo4j write for the one touched survivor"
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("profession") == ["LegacyNeverLoggedProfession"], (
+        "POSITIVE-ATTRIBUTION GATE VIOLATED: a prop absent from erased_survivor_props must be "
+        f"left byte-identical, got profession={props.get('profession')!r}"
+    )
+    engine.dispose()
+
+
+def test_prune_live_to_fold_positive_attribution_gate_applies_to_anchors_too() -> None:
+    """Fix design SS1 — the SAME positive-attribution gate applies to ``remove_anchor_keys``:
+    an anchor key absent from ``erased_survivor_props`` must be left untouched even if the
+    fold's ``get_anchors`` carries no value for it (legacy/unlogged anchor claim).
+
+    RED today: same interface-RED as the sibling test above (``LogScrubResult`` has no
+    ``erased_survivor_props`` field; ``prune_live_to_fold`` takes a bare iterable, not the
+    whole ``LogScrubResult``).
+    """
+    from worldmonitor.resolution.erasure_scrub import (
+        LogScrubResult,  # NEW field — does not exist yet
+        prune_live_to_fold,
+    )
+
+    engine, sessions = _sqlite_sessions()
+    survivor_id = "surv-gate-anchor-unit"
+    keep_src = "ksrc:gate-anchor-unit"
+    with sessions() as session:
+        session.add(_stmt(survivor_id, "m-keep", "name", "Gate Anchor Unit Name", keep_src))
+        session.commit()
+
+        # erased_survivor_props names NOTHING for this survivor at all (the erasure reached a
+        # DIFFERENT survivor's rows only) — "lei" must be left completely untouched.
+        scrub_result = LogScrubResult(
+            source_id="esrc:gate-anchor-unit",
+            erased_member_ids=frozenset({"m-erased-elsewhere"}),
+            touched_survivors=frozenset({survivor_id}),
+            statements_scrubbed=0,
+            context_claims_scrubbed=0,
+            decisions_redacted=0,
+            erased_survivor_props=frozenset(),
+        )
+
+        stub = _StubNeo4j(
+            {
+                "id": survivor_id,
+                "prov_source_id": keep_src,
+                "name": ["Gate Anchor Unit Name"],
+                "lei": "LEIUNITGATEUNTOUCHED",
+            }
+        )
+
+        prune_live_to_fold(session, stub, scrub_result)  # type: ignore[arg-type]
+
+    assert len(stub.write_calls) == 1
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("lei") == "LEIUNITGATEUNTOUCHED", (
+        "POSITIVE-ATTRIBUTION GATE VIOLATED: an anchor key absent from erased_survivor_props "
+        f"must be left untouched, got lei={props.get('lei')!r}"
+    )
+    engine.dispose()
+
+
+# ===========================================================================
+# prune_live_to_fold — caption recompute must not be gated on compared_props
+# (fix-round NEW-1, HIGH)
+# ===========================================================================
+
+
+def test_prune_live_to_fold_caption_recomputes_even_when_compared_props_is_empty() -> None:
+    """Fix-round NEW-1 (HIGH) at the unit level: the caption recompute must fire off
+    ``fold_entity`` ALONE — never gated on ``compared_props`` being non-empty.
+
+    Stubs the state AFTER ``erase_source_graph`` has ALREADY popped a sole-witnessed ``name``
+    prop from the live node (it is simply ABSENT from the stub's current props) and a
+    ``LogScrubResult`` whose ``erased_survivor_props`` names ONLY ``(survivor, "name")`` — the
+    survivor's OTHER prop (``alias``) is never touched by the erasure either, so
+    ``compared_props`` ends up completely EMPTY. A remaining ``alias`` ``StatementRecord`` row
+    still gives the fold a real ``caption`` pick.
+
+    RED today: ``prune_live_to_fold``'s caption gate is ``if compared_props and fold_entity is
+    not None:`` — with ``compared_props == {}`` this never fires, so ``new_caption`` is never
+    passed to ``set_node_values`` at all (the stub's stale caption is left byte-identical).
+    """
+    from worldmonitor.resolution.erasure_scrub import LogScrubResult, prune_live_to_fold
+
+    engine, sessions = _sqlite_sessions()
+    survivor_id = "surv-caption-gate-unit"
+    keep_src = "ksrc:caption-gate-unit"
+    with sessions() as session:
+        # The ONLY remaining statement row for this survivor after the (simulated) scrub —
+        # `name` was reached/deleted; `alias` was never touched.
+        session.add(_stmt(survivor_id, "m-keep", "alias", "Fold Picked Alias", keep_src))
+        session.commit()
+
+        scrub_result = LogScrubResult(
+            source_id="esrc:caption-gate-unit",
+            erased_member_ids=frozenset({"m-erased"}),
+            touched_survivors=frozenset({survivor_id}),
+            statements_scrubbed=1,
+            context_claims_scrubbed=0,
+            decisions_redacted=0,
+            erased_survivor_props=frozenset({(survivor_id, "name")}),
+        )
+
+        stub = _StubNeo4j(
+            {
+                "id": survivor_id,
+                "prov_source_id": keep_src,
+                "caption": "Stale Sole Witnessed Name",
+                # NOTE: no "name" key at all — simulates erase_source_graph already having
+                # popped it wholesale (its sole witness is gone) BEFORE this function ever runs.
+                "alias": ["Fold Picked Alias"],
+            }
+        )
+
+        prune_live_to_fold(session, stub, scrub_result)  # type: ignore[arg-type]
+
+    assert len(stub.write_calls) == 1, "exactly one Neo4j write for the one touched survivor"
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("caption") == "Fold Picked Alias", (
+        "NEW-1 VIOLATED: caption must be recomputed off the fold even when compared_props ends "
+        f"up empty, got caption={props.get('caption')!r}"
+    )
+    assert props.get("caption") != "Stale Sole Witnessed Name", (
+        "non-vacuity: the caption must actually change off the stale sole-witnessed value"
+    )
+    engine.dispose()
+
+
+# ===========================================================================
+# LogScrubResult.erased_survivor_values + the value-level positive-attribution filter
+# (fix-round NEW-2, MEDIUM)
+# ===========================================================================
+
+
+def test_scrub_log_lanes_erased_survivor_values_carries_the_literal_value() -> None:
+    """Fix-round NEW-2: ``scrub_log_lanes`` must additionally capture the literal
+    ``StatementRecord.value`` for every REACHED row, as ``(survivor, prop, value)`` triples —
+    from the SAME reach predicate/query, never a second query. A prop with TWO live values
+    (one from the erased source, one from a kept source) must have ONLY the erased one's
+    triple present.
+
+    RED today: ``LogScrubResult`` has no ``erased_survivor_values`` field —
+    ``AttributeError: 'LogScrubResult' object has no attribute 'erased_survivor_values'``.
+    """
+    engine, sessions = _sqlite_sessions()
+    erased_src = "esrc:values-1"
+    keep_src = "ksrc:values-1"
+    survivor_id = "surv-values-1"
+    m1, m2 = "m-values-1-erased", "m-values-1-kept"
+    erased_value = "ErasedValueOne"
+    kept_value = "KeptValueOne"
+
+    with sessions() as session:
+        session.add(_stmt(survivor_id, m1, "alias", erased_value, erased_src))
+        session.add(_stmt(survivor_id, m2, "alias", kept_value, keep_src))
+        session.commit()
+
+        result = scrub_log_lanes(session, erased_src)
+        session.commit()
+
+    erased_survivor_values = result.erased_survivor_values  # type: ignore[attr-defined]
+    assert (survivor_id, "alias", erased_value) in erased_survivor_values, (
+        "erased_survivor_values must carry the literal (survivor, prop, value) triple for "
+        f"every reached row, got {erased_survivor_values!r}"
+    )
+    assert (survivor_id, "alias", kept_value) not in erased_survivor_values, (
+        "a kept (non-reached) value must NEVER appear in erased_survivor_values, got "
+        f"{erased_survivor_values!r}"
+    )
+    engine.dispose()
+
+
+def test_prune_live_to_fold_value_level_filter_spares_legacy_value_sharing_a_prop() -> None:
+    """Fix-round NEW-2 at the unit level: the per-value positive-attribution filter must
+    compute ``compared_props[prop]`` as ``current_props[prop]`` MINUS exactly the values
+    ``erased_survivor_values`` positively attributes to THIS scrub — never the fold's
+    reconstructed value set (which silently wipes any never-logged/legacy value sharing the
+    same prop).
+
+    Stubs a live node holding THREE values for ``alias`` — erased (reached+logged), kept
+    (unreached, logged), legacy (never logged at all) — and a ``LogScrubResult`` whose
+    ``erased_survivor_values`` names ONLY the erased triple.
+
+    RED today: ``LogScrubResult`` has no ``erased_survivor_values`` field at all —
+    ``TypeError: __init__() got an unexpected keyword argument 'erased_survivor_values'`` (this
+    test constructs one directly) — and even once that field exists, ``prune_live_to_fold``
+    must actually USE it in place of the fold's reconstruction for this to go GREEN.
+    """
+    from worldmonitor.resolution.erasure_scrub import LogScrubResult, prune_live_to_fold
+
+    engine, sessions = _sqlite_sessions()
+    survivor_id = "surv-value-filter-unit"
+    keep_src = "ksrc:value-filter-unit"
+    erased_value = "ValueFilterErased"
+    kept_value = "ValueFilterKept"
+    legacy_value = "ValueFilterLegacy"
+    with sessions() as session:
+        # The ONLY remaining statement row for this survivor after the (simulated) scrub — the
+        # erased row was already deleted; this one (kept) remains.
+        session.add(_stmt(survivor_id, "m-keep", "alias", kept_value, keep_src))
+        session.commit()
+
+        scrub_result = LogScrubResult(
+            source_id="esrc:value-filter-unit",
+            erased_member_ids=frozenset({"m-erased"}),
+            touched_survivors=frozenset({survivor_id}),
+            statements_scrubbed=1,
+            context_claims_scrubbed=0,
+            decisions_redacted=0,
+            erased_survivor_props=frozenset({(survivor_id, "alias")}),
+            erased_survivor_values=frozenset({(survivor_id, "alias", erased_value)}),
+        )
+
+        stub = _StubNeo4j(
+            {
+                "id": survivor_id,
+                "prov_source_id": keep_src,
+                "alias": [erased_value, kept_value, legacy_value],
+            }
+        )
+
+        prune_live_to_fold(session, stub, scrub_result)  # type: ignore[arg-type]
+
+    assert len(stub.write_calls) == 1
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert sorted(props.get("alias") or []) == sorted([kept_value, legacy_value]), (
+        "NEW-2 VIOLATED: compared_props must be current_props MINUS exactly the positively-"
+        f"attributed erased value(s), got alias={props.get('alias')!r} (expected exactly "
+        f"[{kept_value!r}, {legacy_value!r}] — the legacy value sharing this prop must survive; "
+        "a fold-reconstruction-based replacement would wipe it alongside the genuinely erased "
+        "value)"
+    )
+    engine.dispose()
+
+
+# ===========================================================================
+# prune_live_to_fold — the COMBINED per-value filter (round-3 narrower bug, checker-confirmed
+# against round-2's fix): remove `v` iff erased-attributed AND NOT still fold-vouched
+# ===========================================================================
+
+
+def test_prune_live_to_fold_value_level_filter_keeps_a_value_still_vouched_by_the_fold() -> None:
+    """Round-3 narrower bug (checker-confirmed runtime reproduction against round-2's fix): the
+    per-value filter must combine BOTH signals — remove ``v`` iff it is (a) erased-attributed
+    (``(survivor, prop, v) in scrub_result.erased_survivor_values``) AND (b) NOT still present
+    in the post-scrub fold's reconstructed value-set for that prop. A value that IS
+    erased-attributed (this scrub's deleted rows carried it) but is ALSO still reconstructable
+    from a SURVIVING source's remaining row must be KEPT, never removed.
+
+    Stubs a live node with TWO ``alias`` values — ``shared_value`` (erased-attributed: the
+    erased source's now-deleted row carried it, but a SURVIVING source's row for the SAME
+    literal value is STILL present in the session) and ``erased_only_value`` (erased-attributed
+    with NO surviving row anywhere) — and a ``LogScrubResult.erased_survivor_values`` naming
+    BOTH as erased-attributed (mirroring what a real scrub over the erased member's two
+    now-deleted rows would produce). Only a kept ``StatementRecord`` row for ``shared_value``
+    remains in the session, giving the fold real reconstructable evidence for it.
+
+    RED today: round-2's filter removes a value whenever it is erased-attributed,
+    UNCONDITIONALLY — never consulting the fold for a second, independent "is it still
+    vouched-for" signal — so BOTH values are wiped, leaving ``compared_props["alias"] == []``
+    instead of the expected ``[shared_value]``.
+    """
+    from worldmonitor.resolution.erasure_scrub import LogScrubResult, prune_live_to_fold
+
+    engine, sessions = _sqlite_sessions()
+    survivor_id = "surv-combined-filter-unit"
+    keep_src = "ksrc:combined-filter-unit"
+    shared_value = "CombinedFilterShared"
+    erased_only_value = "CombinedFilterErasedOnly"
+    with sessions() as session:
+        # The ONLY remaining statement row for this survivor after the (simulated) scrub — a
+        # SURVIVING source's row for the SAME literal value the erased source also carried.
+        session.add(_stmt(survivor_id, "m-keep", "alias", shared_value, keep_src))
+        session.commit()
+
+        scrub_result = LogScrubResult(
+            source_id="esrc:combined-filter-unit",
+            erased_member_ids=frozenset({"m-erased"}),
+            touched_survivors=frozenset({survivor_id}),
+            statements_scrubbed=2,
+            context_claims_scrubbed=0,
+            decisions_redacted=0,
+            erased_survivor_props=frozenset({(survivor_id, "alias")}),
+            erased_survivor_values=frozenset(
+                {
+                    (survivor_id, "alias", shared_value),
+                    (survivor_id, "alias", erased_only_value),
+                }
+            ),
+        )
+
+        stub = _StubNeo4j(
+            {
+                "id": survivor_id,
+                "prov_source_id": keep_src,
+                "alias": [shared_value, erased_only_value],
+            }
+        )
+
+        prune_live_to_fold(session, stub, scrub_result)  # type: ignore[arg-type]
+
+    assert len(stub.write_calls) == 1, "exactly one Neo4j write for the one touched survivor"
+    props = _sole_dict_param(stub.write_calls[0]["params"])
+    assert props.get("alias") == [shared_value], (
+        "COMBINED FILTER VIOLATED: expected compared_props['alias'] == "
+        f"[{shared_value!r}] (the surviving source's fold-vouched value KEPT, the "
+        f"erased-only value REMOVED), got alias={props.get('alias')!r}"
+    )
+    engine.dispose()

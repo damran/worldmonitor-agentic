@@ -13,6 +13,15 @@ rows, or re-clustering / splitting / resurrecting a survivor (no-un-merge sub-in
 data — legitimate as the subject's GDPR right, catastrophic as an evasion vector — so each run names
 the human operator who authorized it, recorded in the audit row. The function is never wired into
 any autonomous / agent path (the Phase-2 API/MCP surface sits behind a Zitadel operator role).
+
+Gate P2 (ADR 0107) additionally reaches the Gate-2a/P1 SoR log spine: after the existing
+``erase_source_graph`` prune, :func:`~worldmonitor.resolution.erasure_scrub.scrub_log_lanes`
+DELETEs the erased source's ``statement``/``context_claim`` rows + redacts ``decision.member_ids``
+(staged on ``session``, caller commits — the same split as the queue/dead-letter redaction below),
+then :func:`~worldmonitor.resolution.erasure_scrub.prune_live_to_fold` completes the live-graph
+value/anchor removal on every touched survivor (Neo4j, immediate). See
+``worldmonitor.resolution.erasure_scrub``'s module docstring for the cross-store non-atomicity +
+idempotent-retry-recovers contract this ordering relies on.
 """
 
 from __future__ import annotations
@@ -31,6 +40,7 @@ from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.ops import erase_source_graph
 from worldmonitor.ontology.ftm import make_entity
 from worldmonitor.provenance.model import get_provenance
+from worldmonitor.resolution.erasure_scrub import prune_live_to_fold, scrub_log_lanes
 
 # The single source of truth for the landing-key path sanitizer — REUSED, never duplicated (spec
 # §4.1), so the derived erase prefix is provably a true prefix of the real ingest key.
@@ -45,7 +55,11 @@ class ErasureResult:
     """Per-store counts from one cross-store erase — the audit ``TaskRun.stats`` payload (§4.4).
 
     The field order is the locked audit-stats key order (``source_id``, ``authorized_by``, then the
-    seven per-store counts): :meth:`as_dict` is what lands in ``TaskRun.stats``.
+    seven per-store counts): :meth:`as_dict` is what lands in ``TaskRun.stats``. Gate P2 (ADR 0107)
+    extends this ADDITIVELY — the four SoR-log scrub counts are APPENDED after the original seven;
+    no existing field is renamed, reordered, or removed (``test_erasure.py``'s locked
+    ``_STATS_KEYS``/``_COUNT_KEYS`` stay satisfied, including the idempotent second-erase
+    zero-count run).
     """
 
     source_id: str
@@ -57,6 +71,11 @@ class ErasureResult:
     queue_rows_redacted: int
     landing_objects_deleted: int
     dead_letters_redacted: int
+    # Gate P2 (ADR 0107) — additive SoR-log scrub counts (§4.4 extension, spec _SCRUB_COUNT_KEYS).
+    statements_scrubbed: int = 0
+    context_claims_scrubbed: int = 0
+    decisions_redacted: int = 0
+    survivors_value_pruned: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to the non-PII audit-stats mapping (a dataset name, an operator id, counts)."""
@@ -174,6 +193,14 @@ def erase_source(
         dead_letters_redacted = _redact_dead_letters(session, landing.bucket, prefix)
         graph = erase_source_graph(neo4j, source_id)
 
+        # Gate P2 (ADR 0107): reach the Gate-2a/P1 SoR log spine AFTER the existing graph prune —
+        # scrub_log_lanes DELETEs/redacts, staged on `session` for the caller's commit (same split
+        # as queue/dead-letter above); prune_live_to_fold then completes the live value/anchor
+        # removal (Neo4j, immediate). See erasure_scrub's module docstring for the cross-store
+        # non-atomicity + idempotent-retry-recovers contract this ordering relies on.
+        scrub = scrub_log_lanes(session, source_id)
+        prune_live_to_fold(session, neo4j, scrub)
+
         result = ErasureResult(
             source_id=source_id,
             authorized_by=authorized_by,
@@ -184,6 +211,10 @@ def erase_source(
             queue_rows_redacted=queue_rows_redacted,
             landing_objects_deleted=landing_objects_deleted,
             dead_letters_redacted=dead_letters_redacted,
+            statements_scrubbed=scrub.statements_scrubbed,
+            context_claims_scrubbed=scrub.context_claims_scrubbed,
+            decisions_redacted=scrub.decisions_redacted,
+            survivors_value_pruned=len(scrub.touched_survivors),
         )
         run.status = "ok"
         run.finished_at = datetime.now(UTC)
