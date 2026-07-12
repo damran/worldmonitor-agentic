@@ -53,22 +53,25 @@ layer has tools; **Hermes** connects after that; self-improvement is unlocked la
 
 ---
 
-## Next — F1 storage inversion: the pre-cutover gate sequence ★ CURRENT (2026-07-05)
+## Next — F1 storage inversion: the pre-cutover gate sequence (2026-07-12)
 _The statement-log → derived-projection substrate is built and dormant (ADRs 0095/0099–0102; spine
 dual-write #162, fold engine #163, incremental correctness + rebuild-diff guard #164/#165; durable
 LLM-egress audit ADR 0105 #170). The log-capture consult (`docs/fable-review/80_LOG_CAPTURE_CONSULT.md`,
 #169) named the binding pre-cutover prerequisites; the sequenced plan is
 `docs/fable-review/81_PRECUTOVER_GATE_SEQUENCE.md`._
-- [ ] **Gate P1 — context-claim capture lane** (ADR 0106) **← CURRENT**: anchor/enricher evidence into the
+- [x] **Gate P1 — context-claim capture lane** (ADR 0106, #174) — anchor/enricher evidence into the
   SoR spine as provenance-stamped claims at both promote points; the fold reproduces anchors; the
   divergence guard's dead `wm_anchor_` exclusion fixed to the bare keys.
-- [ ] **Gate P3 — sign-off spine durability** (ADR 0108 draft; person-affecting → cosign):
+- [x] **Gate P3 — sign-off spine durability** (ADR 0108, person-affecting, cosigned, #176):
   `approve()`/`reject()` co-commit statement + decision (`decided_by=<operator>`) + ledger rows — a
   rebuild must not drop human-approved merges.
-- [ ] **Gate P2 — right-to-forget reaches the SoR** (ADR 0107 draft; person-affecting → cosign):
+- [x] **Gate P2 — right-to-forget reaches the SoR** (ADR 0107, person-affecting, cosigned, #178):
   three-lane log scrub (flow + accumulated stock), a defined live-removal mechanism, granularity
-  reconciliation, both-surfaces round-trip property.
-- [ ] **WPI slices** — zero-prop-entity disposition · alias⇔co-commit invariant · single-writer assert.
+  reconciliation, both-surfaces round-trip property. Three rounds of adversarial verification
+  closed a CRITICAL/HIGH/2 MEDIUM; one narrow, over-removal-only residual disclosed
+  (self-heals at Gate 2b — `resolution/erasure_scrub.py`'s `KNOWN RESIDUAL`).
+- [ ] **WPI slices ← CURRENT** — single-writer ingest assert · zero-prop-entity disposition ·
+  alias⇔co-commit invariant.
 - [ ] **Gate 2b — backfill** (+ the E4 `origin_datasets` rider + `statement.dataset` stamped-ness) →
   **3b-planning-proper** (exclusion audit, one-time reconciliation, driver LOWs, retirement carve-outs) →
   **Gate 3b cutover + retire the direct write** (human-gated, LAST).

@@ -106,6 +106,8 @@ def create_app(
     # Fail closed: a non-development boot with a placeholder secret halts loud here, before any
     # client is built (ADR 0061 / 0068). Development is unaffected (placeholders allowed locally).
     settings.validate_production_secrets()
+    # Warn loudly (never silently) if any safety guard is disabled (ADR 0109).
+    settings.log_enforcement_status()
     if verifier is None:
         verifier = _build_verifier(settings)
     if readiness is None:

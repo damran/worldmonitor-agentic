@@ -116,7 +116,12 @@ def resolve_pending(
     merges, only *how far* one pass drains. ``ResolveStats.stopped_reason`` reports the outcome.
     """
     settings = get_settings()
-    mode = guard_mode if guard_mode is not None else settings.merge_guard_mode
+    if not settings.is_enforced("merge_guard"):
+        # Enforcement switch OFF (ADR 0109): flagged clusters merge anyway (the "alert" path —
+        # never parked/blocked; the durable merge_alerts trail is still kept). Logged at boot.
+        mode = "alert"
+    else:
+        mode = guard_mode if guard_mode is not None else settings.merge_guard_mode
     size = batch_size if batch_size is not None else settings.resolve_batch_size
     if size <= 0:
         raise ValueError(f"batch_size must be a positive integer, got {size}")
