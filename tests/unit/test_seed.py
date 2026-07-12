@@ -26,7 +26,7 @@ def test_seed_ids_are_unique() -> None:
 
 
 def test_seed_ids_are_deterministic() -> None:
-    """The id derives only from (connector_id, natural_key) — an identical spec yields the same id."""
+    """The id derives only from (connector_id, natural_key); an identical spec yields it again."""
     for spec in SEED_CONNECTORS:
         twin = SeedSpec(
             connector_id=spec.connector_id,
