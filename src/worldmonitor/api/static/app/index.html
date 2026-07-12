@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WorldMonitor</title>
+    <link rel="stylesheet" href="app.css" />
+    <!-- Vendored, self-hosted (no CDN): globe.gl bundles three.js; force-graph is 2D canvas. -->
+    <script src="vendor/globe.gl.min.js" defer></script>
+    <script src="vendor/force-graph.min.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header id="topbar">
+      <div class="brand">WORLD<span>MONITOR</span></div>
+      <form id="search" autocomplete="off">
+        <input id="q" type="search" placeholder="Search entities…" aria-label="Search entities" />
+      </form>
+      <div id="stats" class="stats" aria-live="polite">
+        <span title="Resolved graph nodes"><b id="stat-nodes">–</b> nodes</span>
+        <span title="Relationships"><b id="stat-edges">–</b> edges</span>
+        <span title="Article nodes"><b id="stat-articles">–</b> articles</span>
+      </div>
+    </header>
+
+    <main>
+      <section id="globe" aria-label="Event globe"></section>
+
+      <aside id="rail">
+        <div class="rail-head">
+          <button class="tab active" data-tab="feed">Feed</button>
+          <button class="tab" data-tab="graph">Graph</button>
+        </div>
+
+        <div id="feed" class="pane active" aria-label="Live feed"></div>
+
+        <div id="graph" class="pane" aria-label="Entity relationships">
+          <div id="graph-empty" class="hint">Click a point on the globe or a search result to explore its relationships.</div>
+          <div id="graph-canvas"></div>
+          <div id="receipts" aria-label="Provenance receipts"></div>
+        </div>
+      </aside>
+    </main>
+
+    <footer id="brief" aria-live="polite">
+      <span class="brief-label">AI BRIEF</span>
+      <span id="brief-body">Synthesized situational brief arrives with Slice E.</span>
+    </footer>
+  </body>
+</html>

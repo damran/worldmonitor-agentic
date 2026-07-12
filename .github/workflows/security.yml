@@ -42,3 +42,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
+          # Vendored third-party minified bundles (globe.gl/three.js, force-graph) are not our
+          # source; scanning them for secrets/vuln/misconfig is pure false-positive noise (ADR 0115,
+          # Slice D). They are self-hosted static assets, loaded but never executed server-side.
+          skip-dirs: src/worldmonitor/api/static/app/vendor
