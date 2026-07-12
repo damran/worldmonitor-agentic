@@ -89,6 +89,7 @@ from worldmonitor.resolution.projector import (
     build_survivor_of,
 )
 from worldmonitor.resolution.spine_integrity import find_incomplete_aliased_survivors
+from worldmonitor.resolution.spine_lock import acquire_spine_writer_lock
 from worldmonitor.resolution.statements import (
     WM_EXISTS,
     fuse_context_claim_rows,
@@ -263,6 +264,17 @@ def backfill_spine(
     """
     result = BackfillResult()
     exclude_sources = load_erased_sources(session)
+
+    # INV-SINGLE-WRITER (WPI-3 / ADR 0110): the backfill is a NEW SoR-spine writer — take the
+    # transaction-scoped advisory lock BEFORE the dedup pre-filter read so the read-then-write
+    # window is atomic against a concurrent ingest/promote/sign-off writer. Without it, a
+    # concurrent writer committing between the ``existing_statement_ids`` snapshot and this run's
+    # commit would defeat the pre-filter (no ``UNIQUE(statement_id)`` backstops it) and interleave
+    # ``seq`` assignment (a projector watermark gap). Fail-closed: a second concurrent spine writer
+    # is refused (``ConcurrentSpineWriterError``), exactly as ``pipeline.py`` / ``signoff.py`` do.
+    # No-op on SQLite (single-connection unit lane); the lock auto-releases at the commit below.
+    if not dry_run:
+        acquire_spine_writer_lock(session)
 
     existing_statement_ids: set[str] = set(
         session.execute(select(StatementRecord.statement_id)).scalars()

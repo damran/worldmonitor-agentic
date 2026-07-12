@@ -47,7 +47,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from worldmonitor.db.engine import create_all, make_engine, session_factory
 from worldmonitor.db.models import ContextClaimRecord, ErQueueItem, StatementRecord
@@ -65,7 +65,9 @@ from worldmonitor.resolution.divergence import measure_divergence
 from worldmonitor.resolution.merge import _merge_entities  # pyright: ignore[reportPrivateUsage]
 from worldmonitor.resolution.projector import build_survivor_of, project
 from worldmonitor.resolution.spine_integrity import IncompleteAliasedSurvivorError
+from worldmonitor.resolution.spine_lock import ConcurrentSpineWriterError
 from worldmonitor.resolution.statements import WM_EXISTS
+from worldmonitor.settings import get_settings
 from worldmonitor.storage.landing import LandingStore
 
 pytestmark = pytest.mark.integration
@@ -398,6 +400,139 @@ def test_it_backfill_forget_safety_erase_then_backfill_then_rebuild_contains_not
     )
     assert "OnlyFromKept3" in fold_alias, (
         "non-vacuity: the kept source's contribution must survive the backfill + rebuild"
+    )
+
+    engine.dispose()
+
+
+# =========================================================================================
+# IT-BACKFILL-3: INV-SINGLE-WRITER — backfill_spine is a NEW SoR-spine writer and takes the
+# WPI-3 advisory lock (ADR 0110); a concurrent holder refuses it (fail-closed), then a retry
+# after release succeeds. RED before backfill_spine takes acquire_spine_writer_lock.
+# =========================================================================================
+
+
+def test_it_backfill_refused_by_concurrent_spine_writer(
+    postgres_dsn: str, clean_graph: Neo4jClient
+) -> None:
+    engine, sessions = _sessions(postgres_dsn)
+    src = "ksrc-it-backfill-lock:keep"
+    m1 = "it-bf-lock-m1"
+    e1 = _person(m1, src, {"name": ["Lock Corp"]})
+    with sessions() as session:
+        session.add(_queue_item(e1))
+        record_canonical(session, m1)  # singleton self-row → survivor_of(m1) == m1
+        session.commit()
+
+    lock_key = get_settings().spine_writer_lock_key
+    conn_a = engine.connect()
+    session_b = sessions()
+    try:
+        trans_a = conn_a.begin()
+        acquired = conn_a.execute(
+            text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": lock_key}
+        ).scalar()
+        assert acquired is True, (
+            "setup precondition: connection A must acquire the advisory lock first "
+            "(nothing else holds it)"
+        )
+
+        with pytest.raises(ConcurrentSpineWriterError):
+            backfill_spine(session_b, neo4j=clean_graph)
+
+        # Release A (pg_try_advisory_xact_lock is TRANSACTION-scoped — commit auto-releases).
+        trans_a.commit()
+
+        # B's refused attempt must not poison the session: fresh transaction before the retry.
+        session_b.rollback()
+        result = backfill_spine(session_b, neo4j=clean_graph)
+        assert result.statements_written >= 1, (
+            "after the lock releases, the backfill must proceed and write the single member's row"
+        )
+    finally:
+        session_b.close()
+        conn_a.close()
+        engine.dispose()
+
+
+# =========================================================================================
+# IT-BACKFILL-4: EDGE reconstruction — the completeness claim covers the WHOLE graph, not just
+# nodes. An edge-schema entity (Ownership) in er_queue is backfilled through the same frozen
+# fuse path, so a full_rebuild re-materialises the relationship and the whole-graph divergence
+# (INCLUDING unexplained_edges) is 0 — non-vacuously (the fold carries >= 1 relationship).
+# =========================================================================================
+
+
+def _stamped(entity_id: str, schema: str, source_id: str, props: dict[str, list[str]]) -> FtmEntity:
+    entity = make_entity(
+        {"id": entity_id, "schema": schema, "properties": props, "datasets": [source_id]}
+    )
+    return stamp(
+        entity,
+        Provenance(
+            source_id=source_id,
+            retrieved_at=_RETRIEVED_AT,
+            reliability="A",
+            source_record=f"s3://landing/{source_id}/{entity_id}.json",
+        ),
+    )
+
+
+def test_it_backfill_reconstructs_edges(
+    postgres_dsn: str,
+    clean_graph: Neo4jClient,
+    clean_diff_graph: Neo4jClient,
+) -> None:
+    engine, sessions = _sessions(postgres_dsn)
+    src = "ksrc-it-backfill-edge:keep"
+    a_id, b_id, own_id = "it-bf-edge-owner", "it-bf-edge-asset", "it-bf-edge-own1"
+
+    owner = _stamped(a_id, "Person", src, {"name": ["Edge Owner"]})
+    asset = _stamped(b_id, "Company", src, {"name": ["Edge Asset Co"]})
+    ownership = _stamped(own_id, "Ownership", src, {"owner": [a_id], "asset": [b_id]})
+    corpus = [owner, asset, ownership]
+
+    # pre-2a: live graph + ledger self-rows + er_queue members, but NO spine rows.
+    with sessions() as session:
+        for entity in corpus:
+            session.add(_queue_item(entity))
+            assert entity.id is not None
+            record_canonical(session, entity.id)  # singleton self-rows
+        session.commit()
+
+    ensure_constraints(clean_graph)
+    write_entities(clean_graph, corpus)
+
+    with sessions() as session:
+        result = backfill_spine(session, neo4j=clean_graph)
+    assert result.statements_written >= 3, (
+        "the edge's owner/asset entity-typed claims + both endpoints' name claims must be "
+        f"backfilled, got statements_written={result.statements_written}"
+    )
+
+    with sessions() as session:
+        project(session, clean_diff_graph, full_rebuild=True)
+
+    # Non-vacuity: the fold must actually carry a relationship, so unexplained_edges==0 is real.
+    rel_count = clean_diff_graph.execute_read("MATCH ()-[r]->() RETURN count(r) AS c")[0]["c"]
+    assert rel_count >= 1, (
+        "EDGE COMPLETENESS: the full_rebuild must re-materialise the Ownership relationship "
+        "from the backfilled owner/asset claims (0 relationships would make the divergence "
+        "check below vacuous)"
+    )
+
+    with sessions() as session:
+        survivor_of = build_survivor_of(session)
+    divergence = measure_divergence(
+        read_graph_snapshot(clean_graph),
+        read_graph_snapshot(clean_diff_graph),
+        survivor_of,
+        computed_at=_COMPUTED_AT,
+    )
+    assert divergence.total == 0 and divergence.unexplained_edges == 0, (
+        "INV-BACKFILL-COMPLETE (edges): the whole-graph divergence must be 0 after backfilling an "
+        f"edge corpus, got total={divergence.total} "
+        f"(unexplained_edges={divergence.unexplained_edges})"
     )
 
     engine.dispose()
