@@ -70,11 +70,22 @@ LLM-egress audit ADR 0105 #170). The log-capture consult (`docs/fable-review/80_
   reconciliation, both-surfaces round-trip property. Three rounds of adversarial verification
   closed a CRITICAL/HIGH/2 MEDIUM; one narrow, over-removal-only residual disclosed
   (self-heals at Gate 2b — `resolution/erasure_scrub.py`'s `KNOWN RESIDUAL`).
-- [ ] **WPI slices ← CURRENT** — single-writer ingest assert · zero-prop-entity disposition ·
-  alias⇔co-commit invariant.
-- [ ] **Gate 2b — backfill** (+ the E4 `origin_datasets` rider + `statement.dataset` stamped-ness) →
-  **3b-planning-proper** (exclusion audit, one-time reconciliation, driver LOWs, retirement carve-outs) →
-  **Gate 3b cutover + retire the direct write** (human-gated, LAST).
+- [x] **WPI write-path-integrity slices** — single-writer ingest assert (ADR 0110, #180) ·
+  alias⇔co-commit invariant + fold-side completeness check (ADR 0111, #181) · zero-prop-entity
+  disposition (ADR 0112, #182): spine-write hardening so a `full_rebuild` cannot silently corrupt.
+- [x] **Gate 2b — statement/context-claim log backfill** (ADR 0113, person-affecting, cosigned, #183):
+  the pre-2a window of the spine backfilled byte-faithfully from `er_queue.raw_entity`, so a
+  `full_rebuild` reconstructs the whole graph and the WPI-2 completeness obligation is discharged
+  (`find_incomplete_aliased_survivors == ∅`). Mechanism merged + tested; **running** it over a
+  real-seed corpus is operator-blocked (per-cohort fidelity spike, SF-4).
+- [ ] **3b-planning-proper ← CURRENT** — exclusion-surface audit · one-time (two-directional + count)
+  reconciliation · driver LOWs (single ledger read · handshake-refusal observability · snapshot
+  streaming) · write-path-retirement carve-outs. Planning/docs + dormant-guard hardening (the guard is
+  default-off, additive, reversible); see `docs/fable-review/81_PRECUTOVER_GATE_SEQUENCE.md` §7 and
+  `docs/fable-review/82_GATE_3B_CUTOVER_PLAN.md`.
+- [ ] **Gate 3b cutover + retire the direct write** — human-gated, irreversible, LAST; the first
+  sanctioned live `full_rebuild` consumes Gate 2b's output. Blocked on the operator preconditions
+  (run the 2b backfill, enable the guard, green over N cycles) + the human cutover sign-off.
 
 ---
 

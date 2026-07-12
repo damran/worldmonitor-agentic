@@ -130,4 +130,5 @@
 | [0111](0111-alias-cocommit-invariant.md) | Alias⇔co-commit invariant (WPI-2): every supersession alias has a reconstructable survivor | ACCEPTED | 2026-07-12 | false | false |
 | [0112](0112-zeroprop-entity-disposition.md) | Zero-prop-entity disposition (WPI-1): a promoted propertyless entity gets a reconstructable node | ACCEPTED | 2026-07-12 | false | false |
 | [0113](0113-statement-log-backfill.md) | Statement/context-claim log backfill (Gate 2b): complete the SoR spine from the retained ingest substrate | ACCEPTED | 2026-07-12 | false | true |
+| [0114](0114-gate-3b-cutover.md) | Gate 3b: the F1 projector cutover (retire the direct write; the log becomes the live SoR) | PROPOSED | 2026-07-12 | true | true |
 <!-- END GENERATED ADR INDEX -->
