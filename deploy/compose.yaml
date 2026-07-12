@@ -378,6 +378,21 @@ services:
       # REFUSES all ACTIVE connectors (ADR 0071); this wiring is only used by the operator-run path.
       SANDBOX_RUNNER_URL: http://sandbox-runner:9101
       SANDBOX_RUNNER_SECRET: ${SANDBOX_RUNNER_SECRET}
+      # News→event LLM extraction (ADR 0115, Slice B) — DEFAULT OFF. Flip EXTRACTION_ENABLED=true
+      # once Ollama is reachable (below) to derive Event/actor nodes from curated-feed articles.
+      EXTRACTION_ENABLED: ${EXTRACTION_ENABLED:-false}
+      EXTRACTION_CADENCE_SECONDS: ${EXTRACTION_CADENCE_SECONDS:-900}
+      EXTRACTION_MAX_ARTICLES_PER_CYCLE: ${EXTRACTION_MAX_ARTICLES_PER_CYCLE:-20}
+      # LLM gateway → Ollama on the WINDOWS host (LOCAL mode). `localhost` inside a container is the
+      # container itself, so target host.docker.internal. Requires OLLAMA_HOST=0.0.0.0:11434 on
+      # Windows + a firewall allow for TCP 11434, and the model pulled (`ollama pull llama3.2`).
+      LLM_MODE: ${LLM_MODE:-local}
+      LLM_OLLAMA_BASE_URL: ${LLM_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      LLM_OLLAMA_MODEL: ${LLM_OLLAMA_MODEL:-llama3.2}
+    # host.docker.internal → the Docker host (the Windows machine running Ollama). Declaring it is
+    # the portable form (Docker Desktop/WSL2 provides it, but this makes the dependency explicit).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # On BOTH networks: `default` for store reachability, `sandbox_net` to reach the sidecar.
     networks:
       - default
