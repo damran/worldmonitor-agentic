@@ -29,6 +29,12 @@ NEIGHBOR_RESULT_LIMIT: int = 500
 # lives in one place.
 PATH_RESULT_LIMIT: int = 50
 
+# Hard ceiling on the rows any dashboard read endpoint returns (ADR 0115): a bounded payload
+# and bounded Neo4j scan for the public, unauthenticated consumption surface. Endpoints accept a
+# caller ``limit`` but never exceed this (the API layer validates ``le=`` and the query helpers
+# floor it again defensively).
+DASHBOARD_RESULT_LIMIT: int = 500
+
 # Shape allowed for an entity id (canonical-id alphabets: Q-numbers, LEI, GeoNames,
 # ISO codes, prefixed ids like ``opensanctions:...``). Anchored to the whole string;
 # rejects injection-shaped input (whitespace, quotes, braces, ``$``, newlines, ``;``).

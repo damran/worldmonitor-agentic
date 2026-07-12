@@ -72,3 +72,85 @@ def find_paths(
     )
     rows = client.execute_read(query, from_id=from_id, to_id=to_id)
     return [{"nodes": row["nodes"], "relationships": row["relationships"]} for row in rows]
+
+
+# ================================================================================================
+# Dashboard read helpers (ADR 0115, Slice C) — bounded reads driving the consumption surface.
+#
+# FtM properties land in Neo4j as ARRAYS (``head(...)`` takes the first value); ``prov_*`` and
+# canonical anchors are scalars; the FtM schema is a node LABEL (``'Article' IN labels(n)``). Every
+# query floors its LIMIT at :data:`read_guards.DASHBOARD_RESULT_LIMIT` (the API also validates it),
+# and interpolates ONLY that integer — all caller values are bound parameters.
+# ================================================================================================
+def _dash_limit(limit: int) -> int:
+    return max(1, min(int(limit), read_guards.DASHBOARD_RESULT_LIMIT))
+
+
+def recent_articles(client: Neo4jClient, *, limit: int) -> list[dict[str, Any]]:
+    """Return the most recent Article nodes (newest first) for the feed rail."""
+    query = (
+        "MATCH (n:Entity) WHERE 'Article' IN labels(n) "
+        "RETURN n.id AS id, head(n.title) AS title, head(n.sourceUrl) AS url, "
+        "head(n.summary) AS summary, head(n.publisher) AS publisher, "
+        "coalesce(head(n.publishedAt), head(n.date)) AS published, "
+        "n.prov_source_id AS source, n.prov_retrieved_at AS retrieved_at "
+        "ORDER BY coalesce(head(n.publishedAt), head(n.date), n.prov_retrieved_at) DESC "
+        f"LIMIT {_dash_limit(limit)}"
+    )
+    return client.execute_read(query)
+
+
+def geo_candidates(client: Neo4jClient, *, limit: int) -> list[dict[str, Any]]:
+    """Return nodes that carry precise coordinates OR a country, for globe plotting.
+
+    Returns raw rows (coordinates as strings, country as a code); the caller resolves each into a
+    precise point (``latitude``/``longitude``) or a coarse country-centroid point.
+    """
+    query = (
+        "MATCH (n:Entity) WHERE n.latitude IS NOT NULL OR n.country IS NOT NULL "
+        "RETURN n.id AS id, labels(n) AS labels, "
+        "coalesce(head(n.name), head(n.title), n.id) AS label, "
+        "head(n.latitude) AS lat_raw, head(n.longitude) AS lon_raw, "
+        "head(n.country) AS country, head(n.summary) AS summary, head(n.sourceUrl) AS url, "
+        "coalesce(head(n.publishedAt), head(n.date), n.prov_retrieved_at) AS time "
+        f"LIMIT {_dash_limit(limit)}"
+    )
+    return client.execute_read(query)
+
+
+def neighborhood(client: Neo4jClient, *, entity_id: str, limit: int) -> list[dict[str, Any]]:
+    """Return the immediate neighbours of ``entity_id`` WITH the relationship type (graph panel)."""
+    query = (
+        "MATCH (n:Entity {id: $entity_id})-[r]-(m:Entity) "
+        "RETURN m.id AS id, coalesce(head(m.name), head(m.title), m.id) AS label, "
+        "labels(m) AS labels, type(r) AS rel "
+        f"LIMIT {_dash_limit(limit)}"
+    )
+    return client.execute_read(query, entity_id=entity_id)
+
+
+def search_entities(client: Neo4jClient, *, term: str, limit: int) -> list[dict[str, Any]]:
+    """Return entities whose name or title contains ``term`` (case-insensitive substring)."""
+    query = (
+        "MATCH (n:Entity) "
+        "WHERE any(v IN coalesce(n.name, []) WHERE toLower(v) CONTAINS toLower($term)) "
+        "OR any(v IN coalesce(n.title, []) WHERE toLower(v) CONTAINS toLower($term)) "
+        "RETURN n.id AS id, coalesce(head(n.name), head(n.title), n.id) AS label, "
+        "labels(n) AS labels "
+        f"LIMIT {_dash_limit(limit)}"
+    )
+    return client.execute_read(query, term=term)
+
+
+def graph_stats(client: Neo4jClient) -> dict[str, int]:
+    """Return coarse graph counts (nodes, edges, articles) for the dashboard status bar."""
+    nodes = client.execute_read("MATCH (n:Entity) RETURN count(n) AS c")
+    edges = client.execute_read("MATCH (:Entity)-[r]->(:Entity) RETURN count(r) AS c")
+    articles = client.execute_read(
+        "MATCH (n:Entity) WHERE 'Article' IN labels(n) RETURN count(n) AS c"
+    )
+    return {
+        "nodes": int(nodes[0]["c"]) if nodes else 0,
+        "edges": int(edges[0]["c"]) if edges else 0,
+        "articles": int(articles[0]["c"]) if articles else 0,
+    }

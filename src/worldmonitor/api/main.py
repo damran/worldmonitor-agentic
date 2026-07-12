@@ -24,6 +24,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from worldmonitor.api import auth_web
 from worldmonitor.api.auth_web import build_oauth
+from worldmonitor.api.dashboard import router as dashboard_router
 from worldmonitor.api.deps import get_principal
 from worldmonitor.api.graph import router as graph_router
 from worldmonitor.api.integrations import router as integrations_router
@@ -197,4 +198,5 @@ def create_app(
     app.include_router(integrations_router)
     app.include_router(llm_router)
     app.include_router(review_router)
+    app.include_router(dashboard_router)  # public read surface (ADR 0115); prefix /api/dashboard
     return app
