@@ -1,10 +1,9 @@
 # 0107 — Right-to-forget reaches the SoR (Gate P2): scrub all three log lanes, keep a defined live-removal mechanism, reconcile granularities
 
-- **Status:** PROPOSED (2026-07-05) — **DRAFT skeleton, DECIDED lines filled by the P2 planning gate
-  (2026-07-11); awaiting user cosign before build.** This is a planner-staged decision-space document
-  for Gate P2, committed by the P1-0 docs-only slice (see §ADR-index coupling); byte-unchanged through
-  Gate-P1 (#174) and Gate-P3 (#176). P2's own planning gate fills the DECIDED lines (below) and the P2
-  code PR (after the user cosign) obtains the cosign + owns the accept flip.
+- **Status:** ACCEPTED (2026-07-12; proposed 2026-07-05) — DECIDED lines filled by the P2 planning gate
+  (2026-07-11); cosigned + built via the P2 code PR (2026-07-12). This is a planner-staged decision-space
+  document for Gate P2, committed by the P1-0 docs-only slice (see §ADR-index coupling); byte-unchanged
+  through Gate-P1 (#174) and Gate-P3 (#176).
 - **Date:** 2026-07-05
 - **human_fork:** false — the sub-forks below are each a reversible default with a revisit trigger, not a
   genuine product/architecture fork. P2 planning (2026-07-11) **found no irreversible data-shape lock-in**;
@@ -14,7 +13,17 @@
 - **person_affecting:** true — P2 changes *what an erasure actually erases* (a person's claims across
   the live graph AND the SoR log). Person-affecting by construction (CLAUDE.md: erasure). **human_cosign
   REQUIRED before build** (not a `false`-waiver — a genuine `true` needing sign-off).
-- **human_cosign:** PENDING — Gate P2 user cosign REQUIRED before build (person_affecting:true).
+- **human_cosign:** Mithat 2026-07-12 — cosigned before the code build (person_affecting:true), the four
+  D-i..D-iv disclosures (§Decided) presented; the code build then surfaced, across three rounds of
+  adversarial verification (each round found by an independent, runtime-reproducing checker, not
+  self-reported by the builder), a CRITICAL data-loss defect + a HIGH GDPR-completeness gap + two MEDIUMs
+  in the original implementation, all fixed; the round-1/round-2 fixes each introduced a narrower
+  recurrence of the same class (a caption-recompute gating bug, a prop-vs-value-granularity gap, a
+  co-witnessed-identical-value gap), each found and fixed in turn. One residual survives, disclosed rather
+  than fixed: an over-removal-only (never a leak), narrow (requires an exact literal-string coincidence
+  between an erased value and an unlogged legacy value on the same prop), self-healing-at-Gate-2b gap —
+  see `resolution/erasure_scrub.py::prune_live_to_fold`'s KNOWN RESIDUAL docstring for the full mechanism
+  and revisit trigger. All findings disclosed to the user before the final cosign stamp.
 - **Realises:** the **forgetting** blocking-3b prerequisites of the Fable log-capture consult
   (`docs/fable-review/80_LOG_CAPTURE_CONSULT.md` §6, §7-4, §7-5) and pre-cutover gate **P2**
   (`docs/fable-review/81_PRECUTOVER_GATE_SEQUENCE.md`). **Builds on:** ADR 0095 (:63 — the target
