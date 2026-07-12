@@ -1,6 +1,6 @@
 # 0111 — Alias⇔co-commit invariant (WPI-2): every supersession alias has a reconstructable survivor
 
-- **Status:** PROPOSED (2026-07-12)
+- **Status:** ACCEPTED (2026-07-12)
 - **Date:** 2026-07-12
 - **human_fork:** false — a reversible, additive write-path-integrity guard (one new pure module + one
   call in `project()`); revert = drop the call. No data-shape lock-in, no schema/migration change, no
@@ -35,11 +35,12 @@ not fix a live break:
   it cannot produce an aliased-survivor-without-content and is not in scope.
 
 The gap the invariant guards is a **future regression** (a new producer, or a refactor that reorders the
-two writes across a transaction boundary) and one **extant extreme edge**: a zero-prop-zero-anchor **merge**
-survivor whose only non-`id` statement is skipped by `fuse_statement_rows` (`statements.py:74`) → zero
-foldable rows → an aliased survivor with an empty node. That edge is closed by **WPI-1** (ADR 0112,
-existence-claim disposition); this gate's fold-side check is exactly what makes that residual **fail loud**
-at rebuild instead of corrupting the graph silently.
+two writes across a transaction boundary) and one **extant extreme edge**: a **zero-prop merge** survivor
+(with or without anchors) whose only non-`id` statement is skipped by `fuse_statement_rows`
+(`statements.py:74`) → zero statement rows → the fold materialises no node → an aliased survivor with an
+empty/missing node. That edge is closed by **WPI-1** (ADR 0112, existence-claim disposition); this gate's
+fold-side check is exactly what makes that residual **fail loud** at rebuild instead of corrupting the
+graph silently.
 
 ## Decision
 
@@ -50,13 +51,12 @@ plus a producer-side **example test** as a regression lock. **No runtime guard i
 
 - **(a) Pure fold-side completeness function, called at rebuild. ← CHOSEN.** A new
   `resolution/spine_integrity.py` exposes `IncompleteAliasedSurvivorError(RuntimeError)` and a pure
-  `find_incomplete_aliased_survivors(alias_map, statement_rows, context_claim_rows, *, survivor_of=None)
-  -> set[str]` returning the set of **aliased final survivors** with **no** foldable statement- **or**
-  context-claim row folding into them. `project()` calls it **only on `full_rebuild=True`** (where the
-  loaded rows are the complete log) after the row loads and `build_survivor_of`, **before** `write_entities`,
-  and **raises** `IncompleteAliasedSurvivorError` on a non-empty set. It is **additive validation only** —
-  `reconstruct_entities`'s node/edge construction is byte-frozen, so every fold-vs-direct byte-equivalence
-  invariant (3a-i / 3a-ii, IT-PROJ-2/4) is preserved.
+  `find_incomplete_aliased_survivors(alias_map, statement_rows, *, survivor_of=None) -> set[str]` returning
+  the set of **aliased final survivors** with **no** foldable **statement** row folding into them. `project()`
+  calls it **only on `full_rebuild=True`** (where the loaded rows are the complete log) after the row loads
+  and `build_survivor_of`, **before** `write_entities`, and **raises** `IncompleteAliasedSurvivorError` on a
+  non-empty set. It is **additive validation only** — `reconstruct_entities`'s node/edge construction is
+  byte-frozen, so every fold-vs-direct byte-equivalence invariant (3a-i / 3a-ii, IT-PROJ-2/4) is preserved.
 - **(b) A call-time guard inside `record_durable_id`** asserting "statements already exist for this
   survivor." **Rejected — ordering trap.** In *both* producers the alias is written **before** the
   statements (`:483`→`:497`, `:323`→`:326`), so a call-time check would false-fire on every legitimate
@@ -76,17 +76,35 @@ Using `set(alias_map.values())` directly would be **wrong** for a chain `a → b
 `c` (`survivor_of(b) == c`), so requiring the intermediate `b` to carry its own foldable rows would
 false-fire. `survivor_of` is the projector's existing transitive resolver.
 
-**Context-claims count as content.** A zero-prop-**with-anchor** survivor has `context_claim` rows but no
-statements and **is** reconstructable-in-principle; it must not trip the check. `covered` therefore unions
-`survivor_of(row.canonical_id)` over **both** the statement lane and the context-claim lane.
+**Statement lane ONLY — context-claim rows are NOT counted as coverage (adversarial-checker fix).** An
+earlier draft unioned `covered` over **both** the statement and context-claim lanes on the reasoning that a
+zero-prop-**with-anchor** survivor is "reconstructable-in-principle." The gate's checker refuted this:
+`reconstruct_entities` materialises a node **solely from statement rows** — it groups by statement rows and
+applies anchors *inside* that per-group loop, so a survivor with only context-claim rows yields **no node**
+(the projector docstring states exactly this). Therefore a survivor is reconstructable-**as-a-node** *iff* it
+has ≥1 statement row; counting a context row as coverage is a **false-pass** — it certifies "safe" an aliased
+survivor that in fact materialises no node, in precisely the partial-write regression class this gate
+targets (a future producer that co-commits `alias + context-claim` but loses the statement write would slip
+through). Because the fold never materialises a node from context alone, the context lane can **never
+legitimately rescue** a survivor the statement lane misses under today's fold. So `covered =
+{survivor_of(row.canonical_id) for row in statement_rows}` — statement lane only — and the function does not
+take context rows at all.
 
-**`full_rebuild`-gated raise.** On `full_rebuild=True`, `project()` reads the entire statement and
-context-claim log (no watermark `WHERE`), so the loaded rows are complete and the check is exact. In
-**incremental** mode the loaded rows are only the delta, so a completeness check over them would false-fire
-on any aliased survivor not touched this delta — the raise is therefore **scoped to `full_rebuild`**.
-Incremental integrity is upheld in real time by the producer co-commit; a per-fold incremental check (two
-`DISTINCT` canonical-id queries) is the recorded upgrade path, deferred to avoid per-fold cost and
-false-fire risk.
+**Context-only aliased survivor = disclosed WPI-1 residual, not a silent hole.** A zero-prop merge survivor
+— whether or not it carries anchors — has zero statement rows (`fuse_statement_rows` skips its only non-`id`
+pseudo-prop) and so **correctly fails loud here today**, because it *does* materialise an empty/missing node
+today. Its disposition is **WPI-1 / ADR 0112**: the default existence-claim `StatementRecord` gives every
+zero-prop survivor a statement row (→ covered here, and materialised by the fold), so this statement-lane
+check stays correct after WPI-1 with no change; if WPI-1 instead chooses fold-materialisation-from-context,
+it re-touches this check atomically with that fold change. WPI-2 makes the residual fail loud; WPI-1 gives
+it a node — the two slices interlock exactly there.
+
+**`full_rebuild`-gated raise.** On `full_rebuild=True`, `project()` reads the entire statement log (no
+watermark `WHERE`), so the loaded statement rows are complete and the check is exact. In **incremental** mode
+the loaded rows are only the delta, so a completeness check over them would false-fire on any aliased survivor
+not touched this delta — the raise is therefore **scoped to `full_rebuild`**. Incremental integrity is upheld
+in real time by the producer co-commit; a per-fold incremental check (a `DISTINCT` statement-canonical-id
+query) is the recorded upgrade path, deferred to avoid per-fold cost and false-fire risk.
 
 ## Consequences
 
@@ -97,8 +115,9 @@ false-fire risk.
 - No schema change, no migration. `reconstruct_entities`, all producer write logic (`pipeline.py`,
   `signoff.py`, `statements.py`, `canonical.py`), and every merge/erasure path are **byte-frozen**. The
   only `project()` change is one import + one guarded call.
-- The check makes the WPI-1 residual (zero-prop-zero-anchor merge survivor) **fail loud** at rebuild until
-  ADR 0112 lands the existence-claim disposition — the two slices interlock as designed.
+- The check makes the WPI-1 residual (**any** zero-prop merge survivor — with or without anchors, since
+  neither yields a statement row) **fail loud** at rebuild until ADR 0112 lands the existence-claim
+  disposition — the two slices interlock as designed.
 
 ## Reversibility
 

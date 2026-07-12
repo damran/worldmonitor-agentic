@@ -18,10 +18,12 @@ into an **enforced, fail-loud invariant**.
 ## Invariant
 
 **`INV-ALIAS-COCOMMIT`** — for every supersession alias `prior → survivor` in `canonical_id_ledger`, the
-final survivor `survivor_of(prior)` has **≥1 foldable content row** (a `StatementRecord` **or** a
-`ContextClaimRecord`) folding into it at rebuild. Equivalently: a `full_rebuild` fold never produces an
-aliased survivor with an empty/incomplete node — it **fails loud** (`IncompleteAliasedSurvivorError`) before
-writing Neo4j if the log violates this.
+final survivor `survivor_of(prior)` has **≥1 `StatementRecord`** folding into it at rebuild (statement lane
+only — `reconstruct_entities` materialises a node solely from statement rows, so "has ≥1 statement row" is
+exactly "the fold materialises a node"; a context-only survivor materialises **no** node and is WPI-1 / ADR
+0112's concern, not coverage here). Equivalently: a `full_rebuild` fold never produces an aliased survivor
+with an empty/missing node — it **fails loud** (`IncompleteAliasedSurvivorError`) before writing Neo4j if the
+log violates this.
 
 ## Mechanism (ADR 0111 option (a))
 
@@ -33,18 +35,16 @@ class IncompleteAliasedSurvivorError(RuntimeError): ...
 def find_incomplete_aliased_survivors(
     alias_map: dict[str, str],                     # supersession-only map (alias -> canonical), as _load_alias_map returns
     statement_rows: Iterable[<has .canonical_id>],
-    context_claim_rows: Iterable[<has .canonical_id>],
     *,
     survivor_of: Callable[[str], str] | None = None,   # projector's transitive resolver; built from alias_map if None
 ) -> set[str]:
-    """Return the set of aliased FINAL survivors with NO foldable statement- or context-claim row.
+    """Return the set of aliased FINAL survivors with NO foldable statement row.
 
     Pure — no DB, no Neo4j. If ``survivor_of`` is None, build a transitive resolver from ``alias_map``
     (same fixed-point walk as projector.build_survivor_of, with a visited-guard against a cycle).
 
       targets = {survivor_of(a) for a in alias_map}          # aliased final survivors (NOT set(values()))
-      covered = {survivor_of(str(r.canonical_id)) for r in statement_rows}
-              | {survivor_of(str(r.canonical_id)) for r in context_claim_rows}
+      covered = {survivor_of(str(r.canonical_id)) for r in statement_rows}   # STATEMENT lane only
       return targets - covered
     """
 ```
@@ -53,8 +53,13 @@ def find_incomplete_aliased_survivors(
 - `targets` resolves alias keys **transitively** to the final survivor. `set(alias_map.values())` is WRONG:
   for a chain `a → b → c`, rows for `b` fold into `c`, so requiring intermediate `b` to be covered
   false-fires. (Metamorphic test pins this.)
-- `covered` unions **both lanes** — context-claims count as content (a zero-prop-with-anchor survivor is
-  reconstructable and must not trip).
+- `covered` is the **statement lane ONLY** — context-claim rows are NOT accepted or counted. The fold
+  (`reconstruct_entities`) materialises a node solely from statement rows (it groups by statement rows;
+  anchors are applied inside that per-group loop), so a survivor with only context-claim rows yields **no
+  node**. Counting a context row as coverage would be a false-pass (certifying "safe" an aliased survivor
+  that materialises no node), in exactly the partial-write regression class this gate targets. A zero-prop
+  merge survivor (with or without anchors) therefore correctly fails loud here; its materialisation is
+  WPI-1 / ADR 0112. (Adversarial-checker fix — an earlier draft unioned both lanes.)
 - Pure and self-contained: the `@given` test drives it with plain dicts/lists (no session).
 
 ### `projector.project()` — one import + one guarded call
@@ -67,36 +72,35 @@ if full_rebuild:
     incomplete = find_incomplete_aliased_survivors(
         _load_alias_map(session),
         statement_rows,
-        context_claim_delta_rows,          # == the complete context log under full_rebuild
         survivor_of=survivor_of,
     )
     if incomplete:
         raise IncompleteAliasedSurvivorError(
-            f"{len(incomplete)} aliased survivor(s) have no foldable content row at rebuild: "
+            f"{len(incomplete)} aliased survivor(s) have no foldable statement row at rebuild: "
             f"{sorted(incomplete)[:20]}"
         )
 ```
 
-**Why `full_rebuild`-gated:** under `full_rebuild` the projector reads the ENTIRE statement + context log
-(`last_*_seq = 0`, no `seq >` filter — `:330-355`), so `statement_rows` + `context_claim_delta_rows` are the
-complete log and the check is exact. In incremental mode those are only the delta, so a completeness check
-would false-fire on any aliased survivor not touched this delta. Incremental integrity is upheld in real
-time by the producer co-commit; the raise deliberately lives at the rebuild path (the Gate-3b-routine path).
+**Why `full_rebuild`-gated:** under `full_rebuild` the projector reads the ENTIRE statement log
+(`last_statement_seq = 0`, no `seq >` filter — `:330-343`), so `statement_rows` is the complete statement
+log and the check is exact. In incremental mode those are only the delta, so a completeness check would
+false-fire on any aliased survivor not touched this delta. Incremental integrity is upheld in real time by
+the producer co-commit; the raise deliberately lives at the rebuild path (the Gate-3b-routine path).
 
 `reconstruct_entities` and everything else in `projector.py` stay **byte-unchanged**.
 
 ## Acceptance criteria
 
 1. **Mandatory `@given` property test** (`tests/property/test_prop_alias_cocommit.py`) — non-negotiable
-   (CLAUDE.md build discipline). Over synthetic `(alias rows, statement rows, context_claim rows)`:
-   - **positive**: every alias target has ≥1 foldable row ⇒ `find_incomplete_aliased_survivors` returns ∅
-     **and** a real `project(full_rebuild=True)` over that log does **not** raise;
-   - **metamorphic negative**: inject an alias target with zero foldable rows ⇒ it is in the returned set
-     **and** `project(full_rebuild=True)` raises `IncompleteAliasedSurvivorError`;
-   - **transitive-chain**: `a → b → c` with content only under `c` ⇒ ∅ (intermediate `b` needs no row);
-   - **context-only**: an alias target with only context-claim rows (no statements) ⇒ NOT incomplete.
-   Test the pure function (unit-fast) AND drive real `project()` (integration marker for the DB-backed arm).
-   RED before the builder (the module/exception does not exist yet).
+   (CLAUDE.md build discipline). Over synthetic `(alias rows, statement rows)`:
+   - **positive**: every alias target has ≥1 statement row ⇒ `find_incomplete_aliased_survivors` returns ∅;
+   - **metamorphic negative**: inject an alias target with zero statement rows ⇒ it is in the returned set;
+   - **transitive-chain**: `a → b → c` with a statement only under `c` ⇒ ∅ (intermediate `b` needs no row);
+   - **statement-lane-only (closed false-pass)**: an aliased survivor with zero statement rows IS flagged —
+     context-claims do NOT count as coverage (the fold materialises no node from context rows alone).
+   The pure `@given` suite is unit-fast (no DB); the DB-backed arm (real `project(full_rebuild=True)`
+   raising / not raising) lives in the integration test below. RED before the builder (module/exception
+   do not exist yet).
 2. **Producer co-commit example test** (`tests/integration/test_alias_cocommit.py`) — behavioural, pins
    both alias producers. After a real 2-member merge promotes through `resolve_pending`, the survivor has
    **both** ledger alias rows **and** ≥1 statement row (co-committed); a `project(full_rebuild=True)` over
