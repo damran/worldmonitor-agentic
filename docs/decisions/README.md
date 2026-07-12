@@ -127,4 +127,5 @@
 | [0108](0108-signoff-spine-durability.md) | Human-decision lane durability (Gate P3): route sign-off through the SoR spine | ACCEPTED | 2026-07-11 | false | true |
 | [0109](0109-enforcement-switch.md) | Runtime enforcement switch: operator-toggleable safety guards | ACCEPTED | 2026-07-12 | false | true |
 | [0110](0110-single-writer-ingest-assert.md) | Single-writer ingest assert (WPI-3): fail-closed advisory lock on the SoR spine | ACCEPTED | 2026-07-12 | false | false |
+| [0111](0111-alias-cocommit-invariant.md) | Alias⇔co-commit invariant (WPI-2): every supersession alias has a reconstructable survivor | PROPOSED | 2026-07-12 | false | false |
 <!-- END GENERATED ADR INDEX -->
