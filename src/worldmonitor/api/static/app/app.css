@@ -130,6 +130,8 @@ main {
   border: 1px solid var(--accent-2);
   border-radius: 4px;
 }
+#brief-body { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cites a { color: var(--accent); text-decoration: none; margin-left: 0.15rem; }
 
 .badge {
   font-size: 0.62rem;
