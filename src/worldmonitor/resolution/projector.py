@@ -51,6 +51,10 @@ from worldmonitor.graph.writer import write_entities
 from worldmonitor.ontology.anchors import set_anchor_claims
 from worldmonitor.ontology.ftm import FtmEntity, get_model, make_entity
 from worldmonitor.provenance.model import Provenance, stamp, stamp_witness_map
+from worldmonitor.resolution.spine_integrity import (
+    IncompleteAliasedSurvivorError,
+    find_incomplete_aliased_survivors,
+)
 
 
 @dataclass
@@ -363,6 +367,27 @@ def project(
 
     # --- Build survivor_of (ADR 0100 D2 global-fold-is-truth; extracted, ADR 0102 D9) ---
     survivor_of = build_survivor_of(session)
+
+    # --- INV-ALIAS-COCOMMIT fold-side completeness check (Gate WPI-2 / ADR 0111) ---
+    # full_rebuild-gated ONLY: under full_rebuild the statement rows just read above are the
+    # COMPLETE statement log (no watermark filter, see the reads above), so the check is exact.
+    # In incremental mode the loaded rows are only the delta, so the same check would false-fire
+    # on any aliased survivor untouched by this delta; incremental integrity is upheld in real
+    # time by the producer co-commit (pipeline.py / signoff.py) instead. Statement lane only:
+    # reconstruct_entities materialises a node solely from statement rows, so "has >= 1 statement
+    # row" is exactly "the fold materialises a node" — counting context rows would be a false-pass
+    # (a context-only survivor materialises no node; that residual is WPI-1 / ADR 0112).
+    if full_rebuild:
+        incomplete = find_incomplete_aliased_survivors(
+            _load_alias_map(session),
+            statement_rows,
+            survivor_of=survivor_of,
+        )
+        if incomplete:
+            raise IncompleteAliasedSurvivorError(
+                f"{len(incomplete)} aliased survivor(s) have no foldable statement row at "
+                f"rebuild: {sorted(incomplete)[:20]}"
+            )
 
     # --- Determine the rows to fold ---
     # full_rebuild folds every row (both lanes). Incremental (F3 fix, ADR 0101 A1, extended to
