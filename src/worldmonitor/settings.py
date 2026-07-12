@@ -176,6 +176,15 @@ class Settings(BaseSettings):
     # BETWEEN batches; each batch is committed first (ADR 0026), so a timed-out pass loses no work
     # and the remaining backlog resumes on the next cadence tick.
     resolve_timeout_seconds: float = Field(default=600.0, ge=0)
+    # --- News→event LLM extraction pass (ADR 0115, Slice B) ---
+    # A default-OFF driver pass: reads recent curated-feed Article nodes and, via the LLM gateway
+    # (LOCAL/Ollama by default), derives FtM Event + actor candidates back into the ER queue (the
+    # normal resolver then applies the merge guard + provenance-on-write). OFF until the operator
+    # points LLM_OLLAMA_BASE_URL at a reachable Ollama and opts in — the LLM-cost switch. Bounded by
+    # a per-cycle article cap; the firehose (bluesky) is never selected (curated feeds only).
+    extraction_enabled: bool = False
+    extraction_cadence_seconds: int = Field(default=900, gt=0)
+    extraction_max_articles_per_cycle: int = Field(default=20, gt=0)
     # After this many CONSECUTIVE non-blocking ``_resolve_lock`` skips (a prior pass still holds the
     # lock) the driver escalates the skip log from info to WARNING (ADR 0075 D3), so a wedged
     # resolve pass surfaces instead of silently starving resolution. A successful acquire resets it.

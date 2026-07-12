@@ -44,6 +44,7 @@ from worldmonitor.db.engine import engine_from_settings, session_factory
 from worldmonitor.db.models import ConnectorInstance, ErQueueItem, IngestDeadLetter, TaskRun
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.snapshot import read_graph_snapshot
+from worldmonitor.llm.gateway import LLMGateway
 from worldmonitor.metrics.collector import DriverMetricsCollector
 from worldmonitor.metrics.exporter import start_metrics_exporter
 from worldmonitor.plugins.base import Capability, Mode
@@ -51,6 +52,7 @@ from worldmonitor.plugins.registry import Registry
 from worldmonitor.resolution.divergence import ProjectionDivergence, measure_divergence
 from worldmonitor.resolution.pipeline import resolve_pending
 from worldmonitor.resolution.projector import build_survivor_of, project
+from worldmonitor.runner.extraction import extract_cycle
 from worldmonitor.runner.gc import GcStats, gc_landing_orphans
 from worldmonitor.runner.heartbeat import Heartbeat
 from worldmonitor.runner.ingest import run_ingest
@@ -166,6 +168,7 @@ class IngestDriver:
         cipher: ConfigCipher | None = None,
         settings: Settings | None = None,
         heartbeat: Heartbeat | None = None,
+        llm_gateway: LLMGateway | None = None,
     ) -> None:
         self._sessions = sessions
         self._landing = landing
@@ -173,6 +176,11 @@ class IngestDriver:
         self._registry = registry
         self._settings = settings or get_settings()
         self._cipher = cipher or ConfigCipher.from_settings(self._settings)
+        # LLM gateway for the default-OFF news→event extraction pass (ADR 0115, Slice B). Optional
+        # so existing driver construction (and the extraction-disabled path) needs no gateway.
+        self._llm_gateway = llm_gateway
+        # Serializes extraction so a slow LLM pass never overlaps its next cadence tick.
+        self._extract_lock = threading.Lock()
         # Last-tick heartbeat FILE (Gate B-4c / ADR 0051): touched once per loop iteration so a
         # stalled pipeline is detectable via --healthcheck even while /health still echoes ok.
         self._heartbeat = heartbeat or Heartbeat(
@@ -584,6 +592,52 @@ class IngestDriver:
             task_id, None, status=status, error=error, stats=stats, now=now, kind="resolve"
         )
 
+    # -- news→event extraction pass (ADR 0115, Slice B) ---------------------- #
+    def run_extraction(self, *, now: datetime) -> list[str]:
+        """Derive Event/actor candidates from recent curated-feed Articles (default-OFF pass).
+
+        A no-op unless ``extraction_enabled`` is set AND a gateway is wired (the LLM-cost switch).
+        Serialized like resolution: a slow LLM pass is skipped rather than overlapped. Returns
+        ``[self._EXTRACTED_MARKER]`` if a pass ran this tick, else ``[]``.
+        """
+        if not self._settings.extraction_enabled or self._llm_gateway is None:
+            return []
+        if not self._extract_lock.acquire(blocking=False):
+            logger.info("extraction already in progress; skipping this tick")
+            return []
+        try:
+            self._extract(now=now)
+            return [self._EXTRACTED_MARKER]
+        finally:
+            self._extract_lock.release()
+
+    _EXTRACTED_MARKER = "__extracted__"
+
+    def _extract(self, *, now: datetime) -> None:
+        with self._sessions() as session:
+            task_id = str(uuid.uuid4())
+            session.add(TaskRun(id=task_id, kind="extract", status="running"))
+            session.commit()
+
+        status, error, stats = "ok", "", None
+        try:
+            assert self._llm_gateway is not None  # guarded by run_extraction
+            result = extract_cycle(
+                neo4j=self._neo4j,
+                sessions=self._sessions,
+                gateway=self._llm_gateway,
+                max_articles=self._settings.extraction_max_articles_per_cycle,
+                retrieved_at=now.isoformat(),
+            )
+            stats = result.as_dict()
+        except Exception as exc:
+            status, error = "error", f"{type(exc).__name__}: {exc}"[:_ERROR_SUMMARY_MAX]
+            logger.warning("extraction task failed: %s", exc)
+
+        self._finalize(
+            task_id, None, status=status, error=error, stats=stats, now=now, kind="extract"
+        )
+
     def _resolve_wait_timeout(self) -> float | None:
         """The loop-liveness backstop bound for the resolve ``to_thread`` await (ADR 0075 D3).
 
@@ -723,6 +777,7 @@ class IngestDriver:
         )
         last_resolve: datetime | None = None
         last_maintenance: datetime | None = None
+        last_extraction: datetime | None = None
         while True:
             now = datetime.now(UTC)
             try:
@@ -757,6 +812,16 @@ class IngestDriver:
                             self._resolve_wait_timeout(),
                         )
                     last_resolve = now
+                # News→event LLM extraction (ADR 0115, Slice B) — default-OFF, own cadence, run in
+                # a thread so a slow local-model call never blocks the heartbeat. run_extraction is
+                # itself a no-op unless enabled + a gateway is wired.
+                if (
+                    last_extraction is None
+                    or (now - last_extraction).total_seconds()
+                    >= self._settings.extraction_cadence_seconds
+                ):
+                    await asyncio.to_thread(self.run_extraction, now=now)
+                    last_extraction = now
             except Exception:
                 # A tick failure (transient DB error, etc.) must never kill the loop.
                 logger.exception("driver tick failed; continuing")
@@ -788,12 +853,16 @@ def build_driver(settings: Settings | None = None) -> IngestDriver:
     # store client is built (ADR 0061). Development is unaffected (placeholders allowed locally).
     # The cheap --healthcheck path in main() never reaches here, so it stays connection-free.
     settings.validate_production_secrets()
+    sessions = session_factory(engine_from_settings(settings))
     return IngestDriver(
         registry=discover_connectors(),
-        sessions=session_factory(engine_from_settings(settings)),
+        sessions=sessions,
         landing=LandingStore.from_settings(settings),
         neo4j=Neo4jClient.from_settings(settings),
         settings=settings,
+        # The extraction pass's LLM gateway (LOCAL/Ollama by default). Sharing ``sessions`` wires
+        # the durable-egress sink so an EXTERNAL mode with durable audit on cannot silently egress.
+        llm_gateway=LLMGateway(settings, session_factory=sessions),
     )
 
 
