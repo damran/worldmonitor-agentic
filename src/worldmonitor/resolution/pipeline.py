@@ -52,6 +52,7 @@ from worldmonitor.resolution.merge import (
 )
 from worldmonitor.resolution.referents import build_referent_map, rewrite_referents
 from worldmonitor.resolution.review import needs_review
+from worldmonitor.resolution.spine_lock import acquire_spine_writer_lock
 from worldmonitor.resolution.splink_model import score_pairs
 from worldmonitor.resolution.statements import (
     record_context_claims,
@@ -146,6 +147,10 @@ def resolve_pending(
         )
         if not items:
             break
+        # ADR 0110 / INV-SINGLE-WRITER: make ADR 0100 D1's single-writer assumption a fail-loud
+        # invariant. Xact-scoped advisory lock; auto-releases at this batch's session.commit()
+        # below.
+        acquire_spine_writer_lock(session)
         stats = _resolve_batch(
             session,
             neo4j,

@@ -180,6 +180,12 @@ class Settings(BaseSettings):
     # lock) the driver escalates the skip log from info to WARNING (ADR 0075 D3), so a wedged
     # resolve pass surfaces instead of silently starving resolution. A successful acquire resets it.
     resolve_lock_skip_alert_threshold: int = Field(default=3, gt=0)
+    # The Postgres advisory-lock key the single-writer spine guard (``resolution/spine_lock.py``)
+    # takes per promote transaction (ADR 0110, INV-SINGLE-WRITER). Operator-relocatable only if it
+    # ever collides with another advisory-lock user; the guard itself is always enforced on
+    # Postgres — a data-integrity property, NOT toggleable via ``enforcement_profile`` (cf. ADR
+    # 0109: provenance stamping is likewise not toggleable).
+    spine_writer_lock_key: int = Field(default=771_100_110)
 
     # --- Driver supervision & containerization (Gate B-4c / ADR 0051) ---
     # The driver writes a last-tick heartbeat FILE (per-container; not a table) once per loop
