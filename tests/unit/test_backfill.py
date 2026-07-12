@@ -324,3 +324,60 @@ def test_backfill_spine_dedup_prefilter_skips_a_preexisting_statement_id() -> No
         f"got {len(rows)} row(s)"
     )
     engine.dispose()
+
+
+# ===========================================================================
+# INV-BACKFILL-IDEMPOTENT under a MULTI-SNAPSHOT corpus (judge MEDIUM, ADR 0113): a member.id
+# with >1 ErQueueItem row (re-crawled under a new landing record; uq_er_queue_dedup is
+# (source_record, entity_id)) must not break idempotence — the deterministic ORDER BY makes the
+# latest snapshot win stably, so a 2nd run writes 0. The single-snapshot property tests don't
+# reach this case.
+# ===========================================================================
+
+
+def test_backfill_multi_snapshot_is_idempotent() -> None:
+    engine, sessions = _sqlite_sessions()
+    src = "ksrc:evolve-unit"
+    mid = "evolve-unit-m1"
+    stub = _StubNeo4j()
+
+    def _snapshot(alias: str, rec: str) -> ErQueueItem:
+        entity = make_entity(
+            {
+                "id": mid,
+                "schema": "Person",
+                "properties": {"name": ["Evolve Corp"], "alias": [alias]},
+            }
+        )
+        entity = stamp(
+            entity,
+            Provenance(
+                source_id=src, retrieved_at=_RETRIEVED_AT, reliability="A", source_record=rec
+            ),
+        )
+        return ErQueueItem(
+            id=str(uuid.uuid4()),
+            connector_id="opensanctions",
+            entity_id=mid,
+            raw_entity=entity.to_dict(),
+            source_record=rec,
+            status="resolved",
+        )
+
+    with sessions() as session:
+        session.add(_snapshot("OLD_ALIAS", "s3://landing/evolve/rec1.json"))
+        session.add(_snapshot("NEW_ALIAS", "s3://landing/evolve/rec2.json"))
+        record_canonical(session, mid)
+        session.commit()
+
+        first = backfill_spine(session, neo4j=stub)  # type: ignore[arg-type]
+        assert first.statements_written >= 1, "the first run must write the winning snapshot's rows"
+
+        second = backfill_spine(session, neo4j=stub)  # type: ignore[arg-type]
+    assert second.statements_written == 0 and second.context_claims_written == 0, (
+        "INV-BACKFILL-IDEMPOTENT VIOLATED under a multi-snapshot corpus: a 2nd run wrote "
+        f"statements_written={second.statements_written} / "
+        f"context_claims_written={second.context_claims_written} (deterministic ORDER BY should "
+        "make the winning snapshot stable across runs)"
+    )
+    engine.dispose()

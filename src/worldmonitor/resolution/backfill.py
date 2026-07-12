@@ -170,7 +170,15 @@ def _iter_all_queue_items(
     ``survivor_of`` ONCE over the full ledger, not per row.
     """
     survivor_of = build_survivor_of(session)
-    for item in session.execute(select(ErQueueItem)).scalars():
+    # Deterministic order (INV-BACKFILL-IDEMPOTENT): when >1 ErQueueItem shares a member.id — an
+    # entity re-crawled under a new landing record, uq_er_queue_dedup is (source_record, entity_id)
+    # — the last-written snapshot wins the ``by_id`` dict below. Without an ORDER BY, WHICH snapshot
+    # wins is not SQL-stable across runs, so a re-run could pick a different winner and write a row
+    # the first run did not (a latent idempotence break). Ordering by ``(created_at, id)`` makes the
+    # winner the LATEST observation deterministically — which is also what the live graph's additive
+    # ``SET n += props`` last-write-wins already reflects, so the backfill matches the live state.
+    ordered = select(ErQueueItem).order_by(ErQueueItem.created_at, ErQueueItem.id)
+    for item in session.execute(ordered).scalars():
         raw = item.raw_entity
         if raw.get("erased"):
             # Already redacted to a shell — never parseable, never a backfill contribution

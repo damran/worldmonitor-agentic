@@ -242,6 +242,40 @@ effectively-*more* (the over-removal residual self-heals — correct direction, 
 per-cohort fidelity spike is not runnable now (blocked-on-real-seed). No genuine human fork — no data-shape
 lock-in; the irreversible consumer is the later, separately human-gated Gate 3b cutover.
 
+## Verification record (2026-07-12)
+
+Built via the person-affecting cosign fleet: test-author (RED-first P-BACKFILL-1..4 + integration +
+unit) → builder → a multi-lens adversarial verify → an Opus judge (fresh-context runtime
+reproduction). The verify surfaced two real gaps, **both fixed + tested before the judge**:
+
+- **INV-SINGLE-WRITER** — `backfill_spine` is a NEW SoR-spine writer that skipped the WPI-3
+  `acquire_spine_writer_lock` (ADR 0110). Without it a concurrent writer defeats the `statement_id`
+  dedup pre-filter (no `UNIQUE`) and interleaves `seq`. Now taken fail-closed, like
+  `pipeline.py`/`signoff.py` (`IT-BACKFILL-3`).
+- **Edge completeness** — the corpus had no edge, so the divergence spike was vacuous for
+  `unexplained_edges`. `IT-BACKFILL-4` backfills an `Ownership` edge and proves `full_rebuild`
+  re-materialises the relationship non-vacuously.
+
+**Judge verdict: APPROVE** (all invariants reproduced at runtime; forget-safety and byte-faithfulness
+non-vacuous; the corrected test precondition honest, not hiding a leak; scope clean; governance
+correct). Backlog (non-blocking, recorded here + carried to Gate 3b):
+
+- **MEDIUM — evolving-snapshot under-capture.** When >1 `ErQueueItem` shares one `member.id` (an
+  entity re-crawled under a new landing record; `uq_er_queue_dedup` is `(source_record, entity_id)`),
+  the backfill captures only the **latest** snapshot, whereas the dual-write logged the union across
+  observations. It drops data, **never resurrects** (not a forget-safety issue), does not make
+  `full_rebuild` raise, and is caught by the 3b divergence gate — this is the concrete instance of
+  **SF-1's own revisit trigger** ("unexplained live-⊋-fold survivors ⇒ `er_queue` gap → landing
+  re-map"). Mitigated: a **deterministic `ORDER BY (created_at, id)`** on the `er_queue` reads makes
+  the winner the latest observation stably across runs (closing a latent idempotence fragility;
+  `test_backfill_multi_snapshot_is_idempotent`), and the latest-wins winner matches the live graph's
+  own additive last-write-wins state. The union-capture itself is the landing-re-map revisit target
+  before 3b.
+- **LOW — `assert_backfill_complete` checks only aliased survivors** (not singletons); the whole-graph
+  divergence spike (SF-4 second half) catches a dropped singleton and is the operator's 3b check.
+- **LOW — `backfill_spine` does not self-assert completeness** (returns counts); completeness is the
+  3b gate. A future optional `assert_complete` guard would harden operator use.
+
 ## Reversibility (overall)
 
 Reversible at the log level: the spine is append-only and Neo4j is a rebuildable projection, so a wrong
