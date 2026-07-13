@@ -31,7 +31,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from worldmonitor.db.models import ErQueueItem
-from worldmonitor.graph.geo import COUNTRY_CENTROIDS
+from worldmonitor.graph.geo import COUNTRY_CENTROIDS, city_coords
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.ontology.ftm import FtmEntity
 from worldmonitor.ontology.validation import validate_or_raise
@@ -171,6 +171,11 @@ def _actor_id(schema: str, name: str, article_id: str) -> str:
     return f"{prefix}-{digest}"
 
 
+def _address_id(article_id: str, place: str) -> str:
+    """A derived Address candidate id, scoped to the article (same rationale as ``_actor_id``)."""
+    return f"addr-{hashlib.sha1(f'{article_id}:{place.lower()}'.encode()).hexdigest()}"
+
+
 def _valid_country(value: Any) -> str | None:
     """Return a plottable ISO alpha-2 code (lowercase) or ``None``.
 
@@ -192,9 +197,11 @@ def derive_entities(
     """Build the stamped FtM entities for one article's extraction: ``[Event, *actors]``.
 
     Returns ``[]`` when there is nothing worth an Event (no usable summary AND no event_type). The
-    Event carries the actor links (``involved``), the source-article receipt (``proof``), and the
-    ISO country literal (so ``/points`` plots it at the country centroid). Every entity is
-    provenance-stamped (reliability ``C`` — a derived lead) so the fail-closed writer accepts it.
+    Event carries the actor links (``involved``) + the source-article receipt (``proof``), and its
+    geo is EITHER a precise pin (a linked FtM ``Address`` for a known city, Slice F) OR — as a
+    fallback — the coarse ISO country literal (so ``/points`` plots it at the country centroid).
+    Every entity is provenance-stamped (reliability ``C`` — a derived lead) so the fail-closed
+    writer accepts it.
     """
     summary_raw = extraction.get("summary")
     summary = summary_raw.strip()[:_SUMMARY_MAX] if isinstance(summary_raw, str) else ""
@@ -240,6 +247,36 @@ def derive_entities(
         )
         actor_ids.append(actor_id)
 
+    # Precise geo (Slice F): if the extracted place is a known major city, emit an FtM Address (it
+    # carries real latitude/longitude that ftmg keeps + /points plots) and link the Event to it via
+    # ``addressEntity``. The Address gives the Event a precise pin; the Event then does NOT carry a
+    # ``country`` (so /points does not ALSO plot it at the centroid — no double dot). A place not in
+    # the gazetteer falls back to the coarse country centroid on the Event itself.
+    coords = city_coords(place)
+    address_id: str | None = None
+    if coords is not None:
+        address_id = _address_id(article_id, place)
+        addr_props: dict[str, list[str]] = {
+            "full": [place],
+            "latitude": [str(coords[0])],
+            "longitude": [str(coords[1])],
+        }
+        if country:
+            addr_props["country"] = [country]
+        entities.append(
+            stamp(
+                validate_or_raise(
+                    {
+                        "id": address_id,
+                        "schema": "Address",
+                        "properties": addr_props,
+                        "datasets": ["events"],
+                    }
+                ),
+                prov,
+            )
+        )
+
     # NB: the model's ``event_type`` is deliberately NOT written to FtM ``topics`` — ``topics`` is a
     # typed RISK vocabulary (``sanction``/``crime``/…), and routing unvalidated model output there
     # would let a crafted headline stamp a risk label on the Event, flipping adjacent (INVOLVED)
@@ -248,10 +285,14 @@ def derive_entities(
     event_props: dict[str, list[str]] = {"name": [name], "date": [retrieved_at]}
     if summary:
         event_props["summary"] = [summary]
-    if country:
-        event_props["country"] = [country]
     if place:
         event_props["location"] = [place]
+    if address_id is not None:
+        event_props["addressEntity"] = [
+            address_id
+        ]  # precise pin (:Event)-[:ADDRESS_ENTITY]->(:Address)
+    elif country:
+        event_props["country"] = [country]  # coarse fallback: /points plots at the country centroid
     if actor_ids:
         event_props["involved"] = actor_ids
     # The receipt: (:Event)-[:PROOF]->(:Article). The Article node already exists (feeds ingest);
@@ -358,7 +399,11 @@ def extract_cycle(
                     _enqueue(session, entities, source_record=str(article["source_record"]))
                 stats.extracted += 1
                 stats.events += 1
-                stats.actors += len(entities) - 1
+                # Count only actor entities — the derived set also holds the Event + (maybe) an
+                # Address, which are not actors.
+                stats.actors += sum(
+                    1 for e in entities if e.schema.name in ("Person", "Organization")
+                )
             else:
                 stats.skipped += 1
             # Watermark AFTER a successful LLM call + enqueue (event or not) so it is never

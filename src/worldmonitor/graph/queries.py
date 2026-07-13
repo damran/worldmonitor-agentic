@@ -105,14 +105,22 @@ def geo_candidates(client: Neo4jClient, *, limit: int) -> list[dict[str, Any]]:
 
     Returns raw rows (coordinates as strings, country as a code); the caller resolves each into a
     precise point (``latitude``/``longitude``) or a coarse country-centroid point.
+
+    When the geo node is an ``Address`` that an ``Event`` pins via ``ADDRESS_ENTITY`` (Slice F
+    precise geo), the row is re-attributed to that **Event** — its id/label/schema — plotted at the
+    Address's coords, so a precise dot represents the event (clickable straight to it), not a bare
+    place. A plain Address (e.g. a GeoNames place) or a country-fallback Event represents itself.
     """
     query = (
         "MATCH (n:Entity) WHERE n.latitude IS NOT NULL OR n.country IS NOT NULL "
-        "RETURN n.id AS id, labels(n) AS labels, "
-        "coalesce(head(n.name), head(n.title), n.id) AS label, "
+        "OPTIONAL MATCH (evt:Event)-[:ADDRESS_ENTITY]->(n) "
+        "WITH n, evt "
+        "RETURN coalesce(evt.id, n.id) AS id, coalesce(labels(evt), labels(n)) AS labels, "
+        "coalesce(head(evt.name), head(n.name), head(n.title), head(n.full), n.id) AS label, "
         "head(n.latitude) AS lat_raw, head(n.longitude) AS lon_raw, "
-        "head(n.country) AS country, head(n.summary) AS summary, head(n.sourceUrl) AS url, "
-        "coalesce(head(n.publishedAt), head(n.date), n.prov_retrieved_at) AS time "
+        "coalesce(head(evt.country), head(n.country)) AS country, "
+        "coalesce(head(evt.summary), head(n.summary)) AS summary, head(n.sourceUrl) AS url, "
+        "coalesce(head(evt.date), head(n.publishedAt), head(n.date), n.prov_retrieved_at) AS time "
         f"LIMIT {_dash_limit(limit)}"
     )
     return client.execute_read(query)

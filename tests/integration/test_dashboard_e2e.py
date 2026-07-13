@@ -145,12 +145,20 @@ def test_dashboard_product_end_to_end(clean_graph: Neo4jClient, postgres_dsn: st
     titles = {a["title"] for a in client.get("/api/dashboard/feed").json()["articles"]}
     assert {"Explosion reported in Kyiv", "Sanctions package expanded"} <= titles
 
-    # 3. points — the globe has geo: sanctioned entities at RU + the derived Event at UA.
+    # 3. points — the globe has geo: sanctioned entities at RU (country centroid) + the derived
+    #    Event PRECISELY at Kyiv (place matched the city gazetteer, Slice F).
     points = client.get("/api/dashboard/points").json()["points"]
     countries = {p["country"] for p in points}
     assert "ru" in countries, f"sanctioned entities must plot at their country; got {countries}"
-    assert "ua" in countries, f"the derived Event must plot at its country; got {countries}"
-    assert any(p["schema"] == "Event" for p in points), "an Event should be on the globe"
+    event_points = [p for p in points if p["schema"] == "Event"]
+    assert event_points, "the derived Event should be on the globe"
+    kyiv = event_points[0]
+    assert kyiv["geo_precision"] == "point", (
+        "a city-matched event must be a PRECISE pin, not centroid"
+    )
+    assert abs(kyiv["lat"] - 50.45) < 0.1 and abs(kyiv["lon"] - 30.52) < 0.1  # Kyiv
+    # A country-centroid point (the sanctioned entities) is also present.
+    assert any(p["geo_precision"] == "country" for p in points)
     assert all(-90 <= p["lat"] <= 90 and -180 <= p["lon"] <= 180 for p in points)
 
     # 4. search — find the sanctioned person.
