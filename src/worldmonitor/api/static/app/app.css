@@ -55,7 +55,16 @@ main {
   grid-template-columns: 1fr 380px;
   height: calc(100vh - 52px - 40px);
 }
-#globe { position: relative; background: radial-gradient(circle at 50% 40%, #0a1524, #05070d 70%); }
+/* min-width: 0 + overflow: hidden are LOAD-BEARING: globe.gl creates its canvas at window width,
+ * and a grid item's default min-width:auto lets that canvas GROW the 1fr track — pushing the whole
+ * right rail off-screen (feed/search/graph panel invisible). Clamp the track; the JS then reads the
+ * correct clientWidth and resizes the canvas to fit. */
+#globe {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 40%, #0a1524, #05070d 70%);
+}
 
 #rail {
   border-left: 1px solid var(--line);
@@ -63,6 +72,8 @@ main {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 .rail-head { display: flex; border-bottom: 1px solid var(--line); }
 .tab {
@@ -94,7 +105,8 @@ main {
 .card .pub { color: var(--accent); }
 
 /* ---- graph panel ---- */
-#graph-canvas { flex: 1; min-height: 220px; }
+/* Same blowout guard: force-graph also creates a window-width canvas before being resized. */
+#graph-canvas { flex: 1; min-height: 220px; min-width: 0; overflow: hidden; }
 .hint { padding: 1.2rem; color: var(--muted); font-size: 0.82rem; line-height: 1.5; }
 #receipts {
   border-top: 1px solid var(--line);
