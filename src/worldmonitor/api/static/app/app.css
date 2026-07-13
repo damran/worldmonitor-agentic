@@ -3,11 +3,18 @@
   --panel: #0d131f;
   --panel-2: #121a29;
   --line: #1e2a3d;
+  --line-soft: #182234;
   --text: #dfe7f2;
   --muted: #8595ad;
+  --ink-2: #c3c2b7;
   --accent: #4fd1c5;
   --accent-2: #f6ad55;
   --danger: #fc8181;
+  /* Data-mark colors (validated for dark surface #121a29 — dataviz skill, ΔE/contrast pass).
+   * The per-schema categorical map lives in app.js (SCHEMA_COLORS) — single source of truth. */
+  --bar: #3987e5;
+  --status-good: #0ca30c;
+  --status-crit: #d03b3b;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -23,19 +30,19 @@ html, body {
   overflow: hidden;
 }
 
-/* ---- top bar ---- */
+/* ---------------------------------- top bar ---------------------------------- */
 #topbar {
   display: flex;
   align-items: center;
-  gap: 1.5rem;
-  height: 52px;
+  gap: 1.1rem;
+  height: 56px;
   padding: 0 1rem;
   background: linear-gradient(180deg, #0b1220, #070b13);
   border-bottom: 1px solid var(--line);
 }
-.brand { font-weight: 800; letter-spacing: 2px; font-size: 0.95rem; }
+.brand { font-weight: 800; letter-spacing: 2.5px; font-size: 0.95rem; white-space: nowrap; }
 .brand span { color: var(--accent); }
-#search { flex: 0 1 320px; }
+#search { flex: 0 1 300px; }
 #q {
   width: 100%;
   padding: 0.45rem 0.7rem;
@@ -44,28 +51,148 @@ html, body {
   border-radius: 6px;
   color: var(--text);
   font-size: 0.85rem;
+  transition: border-color 0.15s ease;
 }
-#q:focus { outline: none; border-color: var(--accent); }
-.stats { margin-left: auto; display: flex; gap: 1.25rem; font-size: 0.8rem; color: var(--muted); }
-.stats b { color: var(--text); font-variant-numeric: tabular-nums; }
+#q:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79, 209, 197, 0.12); }
 
-/* ---- layout ---- */
+.stats { margin-left: auto; display: flex; gap: 0.5rem; }
+.stats .tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  min-width: 76px;
+  padding: 0.25rem 0.65rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  line-height: 1.15;
+}
+.stats .tile b { font-size: 0.95rem; font-variant-numeric: tabular-nums; }
+.stats .tile span {
+  font-size: 0.58rem;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.sys { display: flex; align-items: center; gap: 0.9rem; padding-left: 0.4rem; }
+.status { display: inline-flex; align-items: center; gap: 0.4rem; }
+.status em {
+  font-style: normal;
+  font-size: 0.62rem;
+  letter-spacing: 1.4px;
+  color: var(--muted);
+}
+#status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.status.ok #status-dot { background: var(--status-good); animation: pulse 2s ease-in-out infinite; }
+.status.ok em { color: var(--status-good); }
+.status.err #status-dot { background: var(--status-crit); }
+.status.err em { color: var(--status-crit); }
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(12, 163, 12, 0.45); }
+  50% { box-shadow: 0 0 0 5px rgba(12, 163, 12, 0); }
+}
+#clock { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-2); letter-spacing: 0.5px; }
+
+/* ---------------------------------- layout ---------------------------------- */
+/* min-width: 0 + overflow: hidden on the grid/flex items are LOAD-BEARING: globe.gl and
+ * force-graph create canvases at window width; without the clamp the canvas GROWS its track and
+ * pushes the rail off-screen (the first-deploy bug). */
 main {
   display: grid;
-  grid-template-columns: 1fr 380px;
-  height: calc(100vh - 52px - 40px);
+  grid-template-columns: 250px 1fr 380px;
+  height: calc(100vh - 56px - 66px);
 }
-/* min-width: 0 + overflow: hidden are LOAD-BEARING: globe.gl creates its canvas at window width,
- * and a grid item's default min-width:auto lets that canvas GROW the 1fr track — pushing the whole
- * right rail off-screen (feed/search/graph panel invisible). Clamp the track; the JS then reads the
- * correct clientWidth and resizes the canvas to fit. */
-#globe {
+
+/* ---- left intel panels ---- */
+#side {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+}
+.panel { padding: 0.75rem 0.9rem 0.55rem; border-bottom: 1px solid var(--line-soft); }
+.kicker {
+  margin: 0 0 0.55rem;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.panel-body { display: flex; flex-direction: column; gap: 0.32rem; }
+.hint-sm { font-size: 0.7rem; color: var(--muted); }
+
+.brow { display: grid; grid-template-columns: 86px 1fr 30px; align-items: center; gap: 0.5rem; }
+.brow .lbl {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  font-size: 0.7rem;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.brow .lbl i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.brow .track { display: block; height: 8px; background: var(--line-soft); border-radius: 4px; overflow: hidden; }
+/* display:block is LOAD-BEARING: an inline span ignores width, rendering every bar at 0px
+ * (adversarial-review catch — the panels looked like empty tracks). */
+.brow .fill { display: block; height: 100%; border-radius: 4px 3px 3px 4px; background: var(--bar); min-width: 2px; }
+.brow .val {
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.freshness {
+  margin-top: auto;
+  padding: 0.6rem 0.9rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--muted);
+}
+
+/* ---- globe ---- */
+#globe-wrap {
   position: relative;
   min-width: 0;
   overflow: hidden;
   background: radial-gradient(circle at 50% 40%, #0a1524, #05070d 70%);
 }
+#globe { position: absolute; inset: 0; min-width: 0; overflow: hidden; }
+.legend {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.5rem 0.65rem;
+  background: rgba(13, 19, 31, 0.82);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 0.66rem;
+  color: var(--ink-2);
+  pointer-events: none; /* never intercept globe drag/click */
+}
+.legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.45rem; }
+.dot-precise { background: var(--accent); }
+.dot-country { background: var(--accent-2); }
 
+/* ---- right rail ---- */
 #rail {
   border-left: 1px solid var(--line);
   background: var(--panel);
@@ -84,59 +211,129 @@ main {
   border-bottom: 2px solid transparent;
   color: var(--muted);
   font-weight: 600;
-  font-size: 0.8rem;
-  letter-spacing: 0.5px;
+  font-size: 0.72rem;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
   cursor: pointer;
+  transition: color 0.15s ease;
 }
+.tab:hover { color: var(--ink-2); }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 
 .pane { display: none; flex: 1; min-height: 0; overflow-y: auto; }
 .pane.active { display: flex; flex-direction: column; }
 
-/* ---- feed ---- */
+/* ---- feed cards ---- */
 .card {
-  padding: 0.7rem 0.9rem;
-  border-bottom: 1px solid var(--line);
+  padding: 0.62rem 0.9rem;
+  border-bottom: 1px solid var(--line-soft);
+  border-left: 2px solid transparent;
   cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
 }
-.card:hover { background: var(--panel-2); }
-.card .title { font-size: 0.85rem; line-height: 1.35; margin-bottom: 0.25rem; }
-.card .meta { font-size: 0.7rem; color: var(--muted); display: flex; gap: 0.5rem; flex-wrap: wrap; }
-.card .pub { color: var(--accent); }
+.card:hover { background: var(--panel-2); border-left-color: var(--accent); }
+.card .title { font-size: 0.83rem; line-height: 1.35; margin-bottom: 0.3rem; }
+.card .meta {
+  font-size: 0.65rem;
+  color: var(--muted);
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.card .pub {
+  color: var(--accent);
+  border: 1px solid rgba(79, 209, 197, 0.28);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+  font-size: 0.6rem;
+  letter-spacing: 0.4px;
+}
+.badge {
+  font-size: 0.6rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  letter-spacing: 0.4px;
+}
 
 /* ---- graph panel ---- */
-/* Same blowout guard: force-graph also creates a window-width canvas before being resized. */
-#graph-canvas { flex: 1; min-height: 220px; min-width: 0; overflow: hidden; }
-.hint { padding: 1.2rem; color: var(--muted); font-size: 0.82rem; line-height: 1.5; }
+#graph-canvas { flex: 1; min-height: 200px; min-width: 0; overflow: hidden; }
+.hint { padding: 1.2rem; color: var(--muted); font-size: 0.8rem; line-height: 1.5; }
+.graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.8rem;
+  padding: 0.4rem 0.9rem;
+  border-top: 1px solid var(--line-soft);
+  font-size: 0.62rem;
+  color: var(--ink-2);
+}
+.graph-legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 0.32rem; }
 #receipts {
   border-top: 1px solid var(--line);
   padding: 0.6rem 0.9rem;
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-family: var(--mono);
   color: var(--muted);
-  max-height: 34%;
+  max-height: 32%;
   overflow-y: auto;
 }
-#receipts h4 { margin: 0 0 0.4rem; color: var(--text); font-family: var(--font); font-size: 0.72rem; letter-spacing: 0.5px; }
+#receipts h4 {
+  margin: 0 0 0.4rem;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 0.62rem;
+  letter-spacing: 1.4px;
+}
 #receipts .row { display: flex; gap: 0.5rem; padding: 0.1rem 0; }
-#receipts .k { color: var(--accent); min-width: 110px; }
+#receipts .k { color: var(--accent); min-width: 108px; }
 
-/* ---- brief bar ---- */
+/* ---------------------------------- bottom bar ---------------------------------- */
+#bottombar {
+  height: 66px;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, #0b1220, #070b13);
+  border-top: 1px solid var(--line);
+}
+#ticker {
+  height: 24px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
+}
+.ticker-inner {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  animation: tick 70s linear infinite;
+  will-change: transform;
+}
+#ticker:hover .ticker-inner { animation-play-state: paused; }
+.ticker-inner .t-item { font-size: 0.68rem; color: var(--ink-2); padding: 0 1.4rem 0 0; }
+.ticker-inner .t-item b { color: var(--accent-2); font-weight: 600; margin-right: 0.45rem; }
+@keyframes tick {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
 #brief {
-  height: 40px;
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 0.8rem;
   padding: 0 1rem;
-  background: linear-gradient(180deg, #0b1220, #070b13);
-  border-top: 1px solid var(--line);
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   color: var(--muted);
+  min-width: 0;
 }
 .brief-label {
+  flex: none;
   font-weight: 700;
   letter-spacing: 1px;
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   color: var(--accent-2);
   padding: 0.15rem 0.45rem;
   border: 1px solid var(--accent-2);
@@ -145,10 +342,18 @@ main {
 #brief-body { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cites a { color: var(--accent); text-decoration: none; margin-left: 0.15rem; }
 
-.badge {
-  font-size: 0.62rem;
-  padding: 0.05rem 0.35rem;
-  border-radius: 3px;
-  border: 1px solid var(--line);
-  color: var(--muted);
+/* ---- scrollbars (rail + panels) ---- */
+#side::-webkit-scrollbar, .pane::-webkit-scrollbar, #receipts::-webkit-scrollbar { width: 8px; }
+#side::-webkit-scrollbar-thumb, .pane::-webkit-scrollbar-thumb, #receipts::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 4px;
+}
+#side::-webkit-scrollbar-track, .pane::-webkit-scrollbar-track, #receipts::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---- narrow screens: drop the intel column, keep globe + rail ---- */
+@media (max-width: 1180px) {
+  main { grid-template-columns: 1fr 360px; }
+  #side { display: none; }
 }

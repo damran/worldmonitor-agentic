@@ -17,14 +17,41 @@
         <input id="q" type="search" placeholder="Search entities…" aria-label="Search entities" />
       </form>
       <div id="stats" class="stats" aria-live="polite">
-        <span title="Resolved graph nodes"><b id="stat-nodes">–</b> nodes</span>
-        <span title="Relationships"><b id="stat-edges">–</b> edges</span>
-        <span title="Article nodes"><b id="stat-articles">–</b> articles</span>
+        <div class="tile" title="Resolved graph nodes"><b id="stat-nodes">–</b><span>nodes</span></div>
+        <div class="tile" title="Relationships"><b id="stat-edges">–</b><span>edges</span></div>
+        <div class="tile" title="Article nodes"><b id="stat-articles">–</b><span>articles</span></div>
+      </div>
+      <div class="sys">
+        <span id="status" class="status"><i id="status-dot"></i><em id="status-text">SYNC</em></span>
+        <time id="clock">--:--:-- UTC</time>
       </div>
     </header>
 
     <main>
-      <section id="globe" aria-label="Event globe"></section>
+      <aside id="side" aria-label="Overview panels">
+        <section class="panel" id="panel-types">
+          <h3 class="kicker">Entity types</h3>
+          <div class="panel-body" id="types-body"><div class="hint-sm">Awaiting data…</div></div>
+        </section>
+        <section class="panel" id="panel-countries">
+          <h3 class="kicker">Activity by country</h3>
+          <div class="panel-body" id="countries-body"><div class="hint-sm">Awaiting data…</div></div>
+        </section>
+        <section class="panel" id="panel-sources">
+          <h3 class="kicker">Feed sources</h3>
+          <div class="panel-body" id="sources-body"><div class="hint-sm">Awaiting data…</div></div>
+        </section>
+        <div id="freshness" class="freshness"></div>
+      </aside>
+
+      <!-- globe.gl clears its container on init, so the legend lives in a SIBLING overlay. -->
+      <section id="globe-wrap" aria-label="Event globe">
+        <div id="globe"></div>
+        <div id="legend" class="legend" aria-hidden="true">
+          <span><i class="dot dot-precise"></i>event · precise</span>
+          <span><i class="dot dot-country"></i>entity · country-level</span>
+        </div>
+      </section>
 
       <aside id="rail">
         <div class="rail-head">
@@ -37,14 +64,18 @@
         <div id="graph" class="pane" aria-label="Entity relationships">
           <div id="graph-empty" class="hint">Click a point on the globe or a search result to explore its relationships.</div>
           <div id="graph-canvas"></div>
+          <div id="graph-legend" class="graph-legend" aria-hidden="true"></div>
           <div id="receipts" aria-label="Provenance receipts"></div>
         </div>
       </aside>
     </main>
 
-    <footer id="brief" aria-live="polite">
-      <span class="brief-label">AI BRIEF</span>
-      <span id="brief-body">Synthesized situational brief arrives with Slice E.</span>
+    <footer id="bottombar">
+      <div id="ticker" aria-hidden="true"><div id="ticker-inner" class="ticker-inner"></div></div>
+      <div id="brief" aria-live="polite">
+        <span class="brief-label">AI BRIEF</span>
+        <span id="brief-body">Synthesized situational brief pending…</span>
+      </div>
     </footer>
   </body>
 </html>
