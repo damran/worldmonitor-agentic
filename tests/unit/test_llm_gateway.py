@@ -665,3 +665,22 @@ def test_claude_shim_only_invoked_for_claude_headless_mode() -> None:
         f"got {mock_run_or.call_count} call(s).  "
         "The claude shim is ONLY for CLAUDE_HEADLESS mode."
     )
+
+
+# ================================================================================================
+# Per-call request timeout (ADR 0115 hardening) — a wedged provider fails fast.
+# ================================================================================================
+def test_gateway_passes_request_timeout_to_litellm() -> None:
+    """The configured ``llm_request_timeout_seconds`` is forwarded to ``litellm.completion``."""
+    with patch("litellm.completion", return_value=_make_fake_response()) as mock_litellm:
+        gateway = LLMGateway(_local_settings(llm_request_timeout_seconds=45.0))
+        gateway.chat(messages=[{"role": "user", "content": "hi"}])
+    assert mock_litellm.call_args.kwargs.get("timeout") == 45.0
+
+
+def test_gateway_omits_timeout_when_zero() -> None:
+    """``0`` opts out — no ``timeout`` kwarg, so litellm's own default applies."""
+    with patch("litellm.completion", return_value=_make_fake_response()) as mock_litellm:
+        gateway = LLMGateway(_local_settings(llm_request_timeout_seconds=0))
+        gateway.chat(messages=[{"role": "user", "content": "hi"}])
+    assert "timeout" not in mock_litellm.call_args.kwargs
