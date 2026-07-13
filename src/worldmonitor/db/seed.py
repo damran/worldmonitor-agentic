@@ -112,6 +112,16 @@ SEED_CONNECTORS: tuple[SeedSpec, ...] = (
         enabled=True,
         category="sanctions",
     ),
+    # Relationship-RICH dataset (>=130 Company-OWNS-Company edges, per the smoke runbook): OFAC SDN
+    # alone yields an almost edge-less graph, which makes the dashboard's relationship panel look
+    # empty. This gives first-boot users real ownership networks to click through.
+    SeedSpec(
+        "opensanctions",
+        "us_dod_chinese_milcorps",
+        {"dataset": "us_dod_chinese_milcorps"},
+        enabled=True,
+        category="sanctions",
+    ),
     SeedSpec("bluesky", "firehose", {}, enabled=False, category="social"),
 )
 
