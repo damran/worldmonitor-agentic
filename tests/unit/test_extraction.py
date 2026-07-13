@@ -119,6 +119,34 @@ def test_derive_returns_empty_without_summary_or_type() -> None:
     assert _derive({"is_event": True, "summary": "", "event_type": ""}) == []
 
 
+def test_derive_precise_geo_emits_address_for_known_city() -> None:
+    """A known city (Slice F) yields a precise FtM Address linked to the Event; the Event then
+    carries NO country (so /points plots the precise pin, not a duplicate country-centroid dot)."""
+    entities = _derive(
+        {"is_event": True, "summary": "Blast in Kyiv", "country": "ua", "place": "Kyiv"}
+    )
+    event = next(e for e in entities if e.schema.name == "Event")
+    address = next((e for e in entities if e.schema.name == "Address"), None)
+    assert address is not None, "a known city must yield a precise Address"
+    assert float(list(address.get("latitude"))[0]) == 50.45
+    assert float(list(address.get("longitude"))[0]) == 30.52
+    assert list(address.get("full")) == ["Kyiv"]
+    assert list(event.get("addressEntity")) == [
+        address.id
+    ]  # -> (:Event)-[:ADDRESS_ENTITY]->Address
+    assert not event.get("country"), "no country on the Event when it has a precise Address"
+
+
+def test_derive_unknown_place_falls_back_to_country_centroid() -> None:
+    entities = _derive(
+        {"is_event": True, "summary": "Clash reported", "country": "ua", "place": "Nowhereville"}
+    )
+    assert not any(e.schema.name == "Address" for e in entities), "unknown city -> no Address"
+    event = next(e for e in entities if e.schema.name == "Event")
+    assert list(event.get("country")) == ["ua"]  # coarse country fallback
+    assert not event.get("addressEntity")
+
+
 def _org_id(article_id: str, extraction: dict[str, Any]) -> str:
     entities = derive_entities(
         {"id": article_id, "source_record": "s"}, extraction, retrieved_at="t"

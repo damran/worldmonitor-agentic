@@ -27,8 +27,8 @@ pytestmark = pytest.mark.integration
 
 _EXTRACTION_JSON = (
     '{"is_event": true, "event_type": "protest", '
-    '"summary": "Workers strike at Company X in Kharkiv", '
-    '"country": "ua", "place": "Kharkiv", '
+    '"summary": "Workers strike at Company X in Kyiv", '
+    '"country": "ua", "place": "Kyiv", '
     '"actors": [{"name": "Company X", "kind": "organization"}]}'
 )
 
@@ -82,26 +82,36 @@ def test_extraction_pass_writes_event_with_links(
     )
     assert stats.extracted == 1 and stats.events == 1 and stats.actors == 1
 
-    # Candidates are queued as pending (Event + the actor), source_record = the parent article's.
+    # Candidates: the Event + the actor + a precise Address (place "Kyiv" matched the gazetteer).
     with sessions() as session:
         pending = session.execute(
             select(func.count()).select_from(ErQueueItem).where(ErQueueItem.status == "pending")
         ).scalar_one()
-        assert pending == 2
+        assert pending == 3
 
     # 2. The REAL resolver drains them into the graph (merge guard + provenance-on-write apply).
     with sessions() as session:
         resolve_pending(session=session, neo4j=clean_graph, guard_mode="block")
 
-    # 3. The derived Event node exists with its country + INVOLVED/PROOF edges. (Its descriptive
-    #    text lands in `name` — ftmg excludes long text-type props like `summary` from node
-    #    properties by config, so the dashboard displays the Event via name/label, never `summary`.)
+    # 3. The derived Event node exists (descriptive text in `name` — ftmg drops long text-type
+    #    props like `summary`). Its geo is a PRECISE pin: a linked Address at Kyiv, so the Event
+    #    itself carries no country (no country-centroid duplicate).
     events = clean_graph.execute_read(
         "MATCH (e:Event) RETURN e.id AS id, head(e.country) AS country, head(e.name) AS name"
     )
     assert len(events) == 1
-    assert events[0]["country"] == "ua"  # -> plots on the globe at the UA centroid
-    assert "Kharkiv" in events[0]["name"]
+    assert events[0]["country"] is None, (
+        "a city-matched Event carries a precise Address, not country"
+    )
+    assert "Kyiv" in events[0]["name"]
+
+    address = clean_graph.execute_read(
+        "MATCH (:Event)-[:ADDRESS_ENTITY]->(a:Address) "
+        "RETURN head(a.full) AS place, toFloat(head(a.latitude)) AS lat, "
+        "toFloat(head(a.longitude)) AS lon"
+    )
+    assert len(address) == 1 and address[0]["place"] == "Kyiv"
+    assert abs(address[0]["lat"] - 50.45) < 0.01 and abs(address[0]["lon"] - 30.52) < 0.01
 
     involved = clean_graph.execute_read(
         "MATCH (:Event)-[:INVOLVED]->(a) RETURN head(a.name) AS name"
