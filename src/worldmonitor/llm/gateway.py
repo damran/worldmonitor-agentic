@@ -228,6 +228,11 @@ class LLMGateway:
             call_kwargs["api_base"] = api_base
         if api_key is not None:
             call_kwargs["api_key"] = api_key
+        # Bound a hung provider (ADR 0115): a wedged local Ollama fails fast instead of blocking on
+        # litellm's ~10-min default. ``0`` opts out (litellm default). A timeout surfaces as the
+        # same typed ``LLMGatewayError`` as any other provider failure (caught below).
+        if self._settings.llm_request_timeout_seconds > 0:
+            call_kwargs["timeout"] = self._settings.llm_request_timeout_seconds
 
         try:
             response = litellm.completion(model, messages, **call_kwargs)  # type: ignore[no-untyped-call]

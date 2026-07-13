@@ -349,6 +349,11 @@ class Settings(BaseSettings):
     # Ollama (LOCAL mode) — loopback address + local model name. No key, no egress.
     llm_ollama_base_url: str = "http://localhost:11434"
     llm_ollama_model: str = "llama3.2"
+    # Per-call wall-clock timeout for a gateway completion (passed to litellm; ADR 0115 hardening).
+    # Bounds a hung provider — notably a wedged local Ollama — so the caller (e.g. the extraction
+    # pass holding its serialize lock) fails fast instead of blocking on litellm's ~10-min default.
+    # ``0`` opts out (litellm's own default applies).
+    llm_request_timeout_seconds: float = Field(default=120.0, ge=0)
     # OpenRouter (OPENROUTER mode) — key as SecretStr so it never echoes in repr/log.
     llm_openrouter_api_key: SecretStr = SecretStr("")
     llm_openrouter_model: str = "openai/gpt-4o"
