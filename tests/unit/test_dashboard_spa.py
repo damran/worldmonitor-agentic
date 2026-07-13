@@ -50,6 +50,7 @@ def test_spa_assets_are_public() -> None:
         "/app/app.css",
         "/app/vendor/globe.gl.min.js",
         "/app/vendor/force-graph.min.js",
+        "/app/vendor/countries.geojson",  # Natural Earth 110m outlines (public domain, vendored)
     ):
         assert client.get(path).status_code == 200, f"{path} must be served publicly"
 

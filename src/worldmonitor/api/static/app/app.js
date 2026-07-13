@@ -32,7 +32,7 @@ function initGlobe() {
     .pointLng("lon")
     .pointColor((d) => (d.geo_precision === "point" ? "#4fd1c5" : "#f6ad55"))
     .pointAltitude((d) => (d.geo_precision === "point" ? 0.07 : 0.02))
-    .pointRadius(0.26)
+    .pointRadius((d) => (d.geo_precision === "point" ? 0.4 : 0.55))
     .pointLabel(
       (d) =>
         `<div style="font:12px sans-serif;color:#dfe7f2">${esc(d.label || d.id)}` +
@@ -49,10 +49,62 @@ function initGlobe() {
   world.controls().autoRotate = true;
   world.controls().autoRotateSpeed = 0.3;
   world.pointOfView({ lat: 20, lng: 10, altitude: 2.4 });
+  // Clicking a small dot on a MOVING globe is nearly impossible — stop the idle rotation the
+  // moment the user first interacts (they can orbit manually from then on).
+  el.addEventListener("pointerdown", () => {
+    world.controls().autoRotate = false;
+  }, { once: true });
+
+  // Country outlines (vendored Natural Earth 110m, public domain — no CDN): the "world map"
+  // layer so dots have continents to sit on. Sits below the point altitudes so dots stay
+  // clickable above it.
+  fetch("vendor/countries.geojson")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((geo) => {
+      if (!geo || !geo.features) return;
+      world
+        .polygonsTransitionDuration(0)
+        .polygonsData(geo.features)
+        .polygonCapColor(() => "rgba(37,66,98,0.55)")
+        .polygonSideColor(() => "rgba(0,0,0,0)")
+        .polygonStrokeColor(() => "#3b5f88")
+        .polygonAltitude(0.004);
+    })
+    .catch((e) => console.warn("country outlines unavailable", e));
+
+  // Debug/testability handle (read-only usage): lets a headless harness (and an operator
+  // console) inspect pointsData()/polygonsData() and drive handlers directly.
+  window.__wmGlobe = world;
 
   const size = () => world.width(el.clientWidth).height(el.clientHeight);
   size();
   window.addEventListener("resize", size);
+}
+
+/* Deterministic display-only scatter for country-precision dots: entities sharing one country
+ * centroid would render as a single unclickable dot, so each is offset ~±1.5° around it. The dot
+ * still overlaps neighbours in dense countries, but every dot gets its own raycast target.
+ * geo_precision "country" already declares the location approximate; the true country stays on
+ * the point. Seeded FNV-1a (xor+imul) => the lat/lon axes are INDEPENDENT — a suffix on a
+ * polynomial hash is NOT (both offsets would differ by a constant, collapsing the scatter onto
+ * one diagonal line and re-stacking dots; found by adversarial review, verified numerically). */
+function jitterCountryPoints(points) {
+  const hash01 = (s, seed) => {
+    let h = seed >>> 0;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return (h % 100000) / 100000;
+  };
+  points.forEach((p) => {
+    if (p.geo_precision !== "country") return;
+    p.lat += (hash01(p.id, 0x811c9dc5) - 0.5) * 3;
+    p.lon += (hash01(p.id, 0x01000193) - 0.5) * 3;
+    if (p.lat > 89) p.lat = 89;
+    if (p.lat < -89) p.lat = -89;
+  });
+  return points;
 }
 
 async function loadStats() {
@@ -69,7 +121,7 @@ async function loadStats() {
 async function loadPoints() {
   try {
     const { points } = await api("/points?limit=400");
-    world.pointsData(points);
+    world.pointsData(jitterCountryPoints(points));
   } catch (e) {
     console.warn(e);
   }
