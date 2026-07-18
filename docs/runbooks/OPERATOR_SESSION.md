@@ -115,11 +115,25 @@ Re-run to convergence; a subsequent rebuild must contain no erased source
 
 ## 6. Rebuild-and-diff guard: enabled, isolated, green over N cycles
 
-In `.env`: `PROJECTION_DIFF_ENABLED=true` and `PROJECTION_DIFF_NEO4J_URI=<ISOLATED Neo4j>` — a
-**separate** Neo4j instance (e.g. a second container), never the live one. Restart the driver and
-let it run **N cycles green** (record your N; it is part of the §9 cosign evidence). Watch the
+The guard needs a **separate** Neo4j instance, never the live one. The bundled option:
+
+```bash
+docker compose -f deploy/compose.yaml --profile diffguard up -d neo4j-diff
+```
+
+Then in `.env` (and restart the driver):
+
+```dotenv
+PROJECTION_DIFF_ENABLED=true
+PROJECTION_DIFF_NEO4J_URI=bolt://neo4j-diff:7687
+PROJECTION_DIFF_NEO4J_USER=neo4j
+PROJECTION_DIFF_NEO4J_PASSWORD=<same value as NEO4J_PASSWORD>
+```
+
+Let it run **N cycles green** (record your N; it is part of the §9 cosign evidence). Watch the
 `worldmonitor_projection_*` metrics (`/metrics`, port 9108, or the Prometheus `monitoring` profile)
-and the driver log for divergence or `ProjectionDiffMisconfiguredError` refusals.
+and the driver log; `worldmonitor_projection_diff_refusals` staying 0 means the fence/handshake
+never had to refuse (a rising counter = misconfigured target — fix before counting cycles).
 
 ## 7. One-time reconciliation instruments (PR #185; §4 of the cutover plan)
 
