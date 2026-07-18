@@ -58,6 +58,7 @@ class DriverMetricsCollector:
         skip_counter: Callable[[], int],
         gc_stats: Callable[[], GcStats | None] | None = None,
         projection_divergence: Callable[[], ProjectionDivergence | None] | None = None,
+        projection_diff_refusals: Callable[[], int] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._neo4j = neo4j
@@ -72,6 +73,10 @@ class DriverMetricsCollector:
         # the collector is created without this accessor (e.g. the existing collector tests) —
         # the gauge reports the ``-1`` sentinel in that case so the alert's ``> 0`` never fires.
         self._projection_divergence = projection_divergence
+        # Zero-arg accessor onto the driver's cumulative ProjectionDiffMisconfiguredError
+        # refusal counter (Gate 3b LOW-2, ADR 0114 D-7) — same pattern as ``skip_counter``.
+        # ``None`` (the existing construction shape) reports 0.
+        self._projection_diff_refusals = projection_diff_refusals
 
     def collect(self) -> Iterator[GaugeMetricFamily]:
         """Yield every ``worldmonitor_`` gauge family, computed fresh from the stores."""
@@ -223,6 +228,14 @@ class DriverMetricsCollector:
             "Unix timestamp of the latest projection-diff guard run (ADR 0102); "
             "0 = never run. A liveness signal so a stuck divergence value is detectable.",
             div.computed_at.timestamp() if div is not None else 0,
+        )
+        yield _gauge(
+            "worldmonitor_projection_diff_refusals",
+            "Cumulative ProjectionDiffMisconfiguredError refusals since driver start "
+            "(Gate 3b LOW-2 / ADR 0114 D-7): the guard declined to wipe a target it could not "
+            "prove distinct from the live graph — distinct from a generic diff failure. "
+            "0 when the accessor is absent.",
+            self._projection_diff_refusals() if self._projection_diff_refusals is not None else 0,
         )
 
     def _latest_stopped_reason(self, session: Session) -> str:

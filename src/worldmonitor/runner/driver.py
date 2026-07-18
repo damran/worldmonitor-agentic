@@ -51,7 +51,7 @@ from worldmonitor.plugins.base import Capability, Mode
 from worldmonitor.plugins.registry import Registry
 from worldmonitor.resolution.divergence import ProjectionDivergence, measure_divergence
 from worldmonitor.resolution.pipeline import resolve_pending
-from worldmonitor.resolution.projector import build_survivor_of, project
+from worldmonitor.resolution.projector import load_alias_map_and_survivor_of, project
 from worldmonitor.runner.extraction import extract_cycle
 from worldmonitor.runner.fulltext import fulltext_cycle
 from worldmonitor.runner.gc import GcStats, gc_landing_orphans
@@ -208,6 +208,11 @@ class IngestDriver:
         # regardless of success, so a broken diff target does not hammer the fold every
         # maintenance tick, ADR 0102 D8).
         self._last_projection_diff: datetime | None = None
+        # Cumulative ProjectionDiffMisconfiguredError refusals since driver start (Gate 3b
+        # LOW-2, ADR 0114 D-7): "refuses to wipe a mis-aliased target" is a DISTINCT, must-stay-
+        # visible failure mode from "diff target unreachable" — only the former increments this.
+        # Scraped via the worldmonitor_projection_diff_refusals gauge.
+        self._projection_diff_refusals: int = 0
 
     # -- startup recovery ---------------------------------------------------- #
     def recover_stale(self) -> int:
@@ -337,6 +342,14 @@ class IngestDriver:
             self._last_projection_diff = now
             try:
                 self._latest_projection_divergence = self._run_projection_diff(now=now)
+            except ProjectionDiffMisconfiguredError:
+                # LOW-2: a fence/handshake REFUSAL (misconfiguration — the guard declined to
+                # wipe) is counted, distinctly from a generic diff failure below. D10 unchanged:
+                # never propagates to the tick loop.
+                self._projection_diff_refusals += 1
+                logger.exception(
+                    "projection diff guard REFUSED (misconfigured target); continuing (ADR 0102)"
+                )
             except Exception:
                 logger.exception("projection diff guard failed; continuing (ADR 0102)")
 
@@ -426,13 +439,23 @@ class IngestDriver:
                 )
 
             diff.execute_write("MATCH (n) DETACH DELETE n")
+            # LOW-1 (ADR 0114 D-7): ONE ledger read shared by the fold, the WPI-2 completeness
+            # check inside project(), AND the divergence measure below — previously three
+            # separate reads a concurrent promote could interleave, letting the measure resolve
+            # referents against a different ledger instant than the fold it is judging.
             with self._sessions() as session:
-                project(session, diff, full_rebuild=True, checkpoint_id="projection-diff")
+                alias_map, survivor_of = load_alias_map_and_survivor_of(session)
+                project(
+                    session,
+                    diff,
+                    full_rebuild=True,
+                    checkpoint_id="projection-diff",
+                    survivor_of=survivor_of,
+                    alias_map=alias_map,
+                )
 
             live_snapshot = read_graph_snapshot(self._neo4j)
             fold_snapshot = read_graph_snapshot(diff)
-            with self._sessions() as session:
-                survivor_of = build_survivor_of(session)
 
             return measure_divergence(live_snapshot, fold_snapshot, survivor_of, computed_at=now)
         finally:
@@ -825,6 +848,8 @@ class IngestDriver:
                 # accessor so the scrape surfaces the projection-integrity gauge WITHOUT
                 # running the fold on every scrape (ADR 0102 / Gate 3a-ii-B).
                 projection_divergence=lambda: self._latest_projection_divergence,
+                # Cumulative misconfiguration refusals (Gate 3b LOW-2, ADR 0114 D-7).
+                projection_diff_refusals=lambda: self._projection_diff_refusals,
             ),
         )
         last_resolve: datetime | None = None
