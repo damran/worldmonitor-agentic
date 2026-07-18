@@ -263,15 +263,20 @@ async def create_instance(
 
     settings = request.app.state.settings
     blob = ConfigCipher.from_settings(settings).encrypt(json.dumps(config))
-    db.add(
-        ConnectorInstance(
-            id=str(uuid4()),
-            connector_id=plugin_id,
-            config_encrypted=blob,
-            status="enabled",
+
+    def _persist() -> None:
+        db.add(
+            ConnectorInstance(
+                id=str(uuid4()),
+                connector_id=plugin_id,
+                config_encrypted=blob,
+                status="enabled",
+            )
         )
-    )
-    db.commit()
+        db.commit()
+
+    # Sync SQLAlchemy I/O off the event loop (rereview 2026-07-11 #11), same idiom as run_instance.
+    await asyncio.to_thread(_persist)
     return RedirectResponse("/integrations", status_code=303)
 
 
@@ -301,11 +306,18 @@ async def _set_status(request: Request, instance_id: str, status: str, db: Sessi
     """Shared enable/disable: validate CSRF, load the instance (404), flip status, 303."""
     form = await request.form()
     _check_csrf(request, _as_str(form.get("csrf_token")))
-    instance = db.get(ConnectorInstance, instance_id)
-    if instance is None:
+
+    def _flip() -> bool:
+        instance = db.get(ConnectorInstance, instance_id)
+        if instance is None:
+            return False
+        instance.status = status
+        db.commit()
+        return True
+
+    # Sync SQLAlchemy I/O off the event loop (rereview 2026-07-11 #11), same idiom as run_instance.
+    if not await asyncio.to_thread(_flip):
         raise HTTPException(status_code=404, detail="Instance not found")
-    instance.status = status
-    db.commit()
     return RedirectResponse("/integrations", status_code=303)
 
 
@@ -328,7 +340,7 @@ async def run_instance(
     form = await request.form()
     _check_csrf(request, _as_str(form.get("csrf_token")))
 
-    instance = db.get(ConnectorInstance, instance_id)
+    instance = await asyncio.to_thread(db.get, ConnectorInstance, instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="Instance not found")
 

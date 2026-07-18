@@ -62,7 +62,9 @@ services:
       NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL:-1g}
       NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-2g}
     ports:
-      - "7474:7474" # HTTP / Browser
+      # Loopback-only (rereview 2026-07-11 #6): the Browser is an operator/internal console —
+      # never public-facing (the dashboard deploy exposes 8000 deliberately; consoles are not it).
+      - "127.0.0.1:7474:7474" # HTTP / Browser
       - "127.0.0.1:7687:7687" # Bolt
     volumes:
       - neo4j-data:/data
@@ -87,7 +89,8 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
     ports:
       - "127.0.0.1:9000:9000" # S3 API
-      - "9001:9001" # Console
+      # Loopback-only (rereview 2026-07-11 #6): operator console, same posture as the S3 API.
+      - "127.0.0.1:9001:9001" # Console
     volumes:
       - minio-data:/data
     healthcheck:
@@ -382,6 +385,15 @@ services:
       # in-network only by default (no host publish below) — a scraper on the compose network hits
       # driver:9108. 0 disables it. The Prometheus server + alert rules stay external/ops (ADR 0054).
       DRIVER_METRICS_PORT: ${DRIVER_METRICS_PORT:-9108}
+      # Projection rebuild-and-diff guard (ADR 0102; runbook OPERATOR_SESSION.md §6). Dormant by
+      # default; the guard runs only with the flag on AND a non-empty ISOLATED target URI. The env
+      # block is an explicit allowlist, so these must be passed through for the host .env to reach
+      # the driver at all.
+      PROJECTION_DIFF_ENABLED: ${PROJECTION_DIFF_ENABLED:-false}
+      PROJECTION_DIFF_NEO4J_URI: ${PROJECTION_DIFF_NEO4J_URI:-}
+      PROJECTION_DIFF_NEO4J_USER: ${PROJECTION_DIFF_NEO4J_USER:-}
+      PROJECTION_DIFF_NEO4J_PASSWORD: ${PROJECTION_DIFF_NEO4J_PASSWORD:-}
+      PROJECTION_DIFF_CADENCE_SECONDS: ${PROJECTION_DIFF_CADENCE_SECONDS:-86400}
       # Sandbox-runner sidecar wiring (ADR 0077) — symmetric with the api. The cadence driver still
       # REFUSES all ACTIVE connectors (ADR 0071); this wiring is only used by the operator-run path.
       SANDBOX_RUNNER_URL: http://sandbox-runner:9101

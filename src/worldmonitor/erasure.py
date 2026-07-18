@@ -115,9 +115,20 @@ def _redact_queue(session: Session, source_id: str) -> int:
     ``schema`` (and no parseable provenance) so it is skipped — idempotent; a different source's row
     has a different ``source_id`` so it is left byte-identical — source-scoped. Returns the count of
     rows actually redacted.
+
+    The SQL pre-filter on ``connector_id`` is a strict superset of the parse-based match: the single
+    enqueue path (``runner/ingest.py::run_ingest``) stamps the row's ``connector_id`` column and the
+    provenance ``source_id = "<connector_id>:<dataset>"`` from the same connector run, so every row
+    whose parsed provenance can match lives under that connector — the same trust base as
+    ``_redact_dead_letters``'s landing-URI prefix match. The parse below remains the authoritative
+    per-row check (dataset scoping); the pre-filter only stops a whole-table scan + FtM parse.
     """
+    connector_id = source_id.partition(":")[0]
     redacted = 0
-    for row in session.execute(select(ErQueueItem)).scalars().all():
+    rows = session.execute(
+        select(ErQueueItem).where(ErQueueItem.connector_id == connector_id)
+    ).scalars()
+    for row in rows.all():
         raw = row.raw_entity
         if "schema" not in raw:
             continue  # already a non-PII shell (idempotent no-op)
