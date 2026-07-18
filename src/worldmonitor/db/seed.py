@@ -185,6 +185,17 @@ SEED_CONNECTORS: tuple[SeedSpec, ...] = (
         enabled=True,
         category="cti",
     ),
+    # IOC substrate for the CTI persona (ADR 0094 D4) — the abuse.ch Feodo Tracker C2 IP
+    # blocklist, mapped to the first `wm:` L2 extension (`wm:Indicator`, Gate S-2, ADR 0118).
+    # Free, unauthenticated, pull-only; `url` is spelled out explicitly (matching the connector's
+    # own pinned default) so an operator sees + can override it from the Integrations UI.
+    SeedSpec(
+        "feodo",
+        "ipblocklist",
+        {"url": "https://feodotracker.abuse.ch/downloads/ipblocklist.json"},
+        enabled=True,
+        category="cti",
+    ),
 )
 
 

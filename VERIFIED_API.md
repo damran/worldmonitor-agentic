@@ -330,3 +330,55 @@ registry.topic.names   # -> dict[code, label], the full topic vocabulary (member
   id not yet a node → `count == 0` → clean no-flag (NOT an error). Stage-2 reason must be DISTINCT from the
   topic reason and treated as a non-legacy-visible sensitivity (so it is NOT stale-exemptible). Chow band reads
   `ResolvedCluster.score` (`merge.py:77`); defaults `low==high==0.92` (band OFF); k-hop depth default 1, `0`=off.
+
+---
+
+# Gate S-2 — `followthemoney.schema` injection (the `wm:Indicator` L2 extension, ADR 0118)
+
+Verified 2026-07-18 against installed **followthemoney 4.9.2** (`.venv`), independently re-probed
+from a bare `uv run python` REPL (not borrowed from `ontology/ftm.py`'s own implementation).
+
+```python
+from followthemoney import model
+from followthemoney.schema import Schema, SchemaSpec
+from followthemoney.exc import InvalidData
+
+spec: SchemaSpec = {...}                        # the YAML-shaped dict (label/plural/extends/properties/matchable/...)
+model.schemata["Indicator"] = Schema(model, "Indicator", spec)   # Schema.__init__(model, name, data)
+model.generate()                                 # resolves inheritance/properties/reverse links for EVERY schema
+```
+- **Injection works on the GLOBAL singleton.** `model` is the process-wide `Model.instance()` every
+  `followthemoney`/`followthemoney-graph`/`nomenklatura` import shares; assigning into
+  `model.schemata[name]` then calling `model.generate()` makes the new schema visible everywhere
+  with no further plumbing — entities `construct`/`to_dict()`/`get_proxy()` round-trip through it
+  exactly like a core FtM schema.
+- **`Schema.matchable` default is `True`, NOT `False` — this CORRECTS the gate spec's "Verified
+  facts" claim.** `Schema.__init__` sets `self.matchable = as_bool(data.get("matchable"), True)`
+  (`followthemoney/schema.py`): omitting `matchable` from the spec dict yields `matchable is True`
+  (independently re-probed: a bare `{"label": ..., "extends": ["Thing"], "properties": {...}}` with
+  NO `matchable` key gives `schema.matchable == True`). The non-matchable behaviour the ADR wants is
+  real but requires an **explicit `matchable: false`** in the schema spec — the builder's
+  `ontology/schema/wm/Indicator.yaml` sets it explicitly for exactly this reason. (`Property.matchable`
+  — the per-property flag — separately defaults to `self.type.matchable`, unrelated to the schema-level
+  flag above; not what P-IND-2b pins.)
+- **`Model.common_schema(left, right)` raises `InvalidData`** whenever neither schema `is_a` the
+  other (no shared position in the multi-rooted `extends` DAG) — `@cache`d, accepts `str` or
+  `Schema`. Re-probed for `Indicator` (extends ONLY `Thing`, `matchable: false`) against
+  `Organization, Company, Person, LegalEntity, Vehicle, Address, Event, Asset`: **raises for every
+  one** (`Indicator`'s only ancestor is `Thing`; none of those 8 schemata extend `Indicator` nor does
+  `Indicator` extend them). `Thing` itself is excluded from this set deliberately —
+  `common_schema(Indicator, Thing)` returns `Indicator` (the narrower schema), not a raise.
+- **Idempotent re-injection is a caller responsibility, not automatic.** Reassigning
+  `model.schemata[name] = Schema(model, name, spec)` a second time replaces the schema object
+  (a NEW identity) and a second `model.generate()` re-walks every schema's `extends`/properties
+  merge (each step is itself idempotent — `if name not in self.properties` / `_add_reverse`'s
+  `prop = self.get(name)` reuse guards), so it does not corrupt the model, but it DOES churn
+  object identity. `register_wm_schemata()` (`ontology/ftm.py`) guards this explicitly: a name
+  already present in `model.schemata` is skipped outright (no re-`Schema(...)`, no redundant
+  `model.generate()` call), which is what keeps a held schema reference identity-stable across
+  repeated calls (P-IND-3).
+- **The ftm-schema CI gate is unaffected by design** (`scripts/check_ftm_schema.py` diffs the
+  *installed* `followthemoney/schema/*.yaml` against the *vendored* `ontology/vendor/ftm/` copies
+  only); a `wm:` schema lives in `ontology/schema/wm/`, outside both trees, and is loaded at
+  runtime via `register_wm_schemata()`, not vendored — confirmed green after the injection lands
+  (`OK: followthemoney==4.9.2 installed; 69 schema YAMLs byte-identical to ontology/vendor/ftm/.`).
