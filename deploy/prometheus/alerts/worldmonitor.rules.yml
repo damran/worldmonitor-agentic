@@ -1,7 +1,8 @@
 # WorldMonitor alert rules (ADR 0078 D2 + ADR 0102).
 #
-# One group, 8 alerts: 2 critical (page immediately) + 6 warning (operator ticket). The 8th
-# (ProjectionDivergenceHigh, ADR 0102 / Gate 3a-ii-B) is additive — the original 7 are unchanged.
+# One group, 9 alerts: 2 critical (page immediately) + 7 warning (operator ticket). The 8th
+# (ProjectionDivergenceHigh, ADR 0102 / Gate 3a-ii-B) and 9th (ConnectorSuccessStale, re-review
+# 2026-07-11 #9) are additive — the original 7 are unchanged.
 # Every alert carries:
 #   labels.severity in {critical, warning}
 #   annotations.summary  — one-line human label
@@ -73,6 +74,26 @@ groups:
             ingest failures. The instance is in status='error' and will not run again until an
             operator explicitly re-enables it from the Integrations UI. Check the connector logs
             for the root cause before re-enabling. ADR 0074.
+
+      - alert: ConnectorSuccessStale
+        # Freshness (re-review 2026-07-11 #9 / OG-harvest F-1 slice 1): a connector instance has
+        # not completed a SUCCESSFUL ingest for > 4h (4x the default hourly cadence — room for
+        # one transient failure + backoff). The `> 0` guard keeps never-succeeded series (fresh
+        # deploys, retention-pruned history) from alerting; the terminal failure-streak case is
+        # ConnectorInstanceHardDisabled's job (ADR 0074).
+        expr: >
+          (time() - worldmonitor_connector_last_success_timestamp > 14400)
+          and (worldmonitor_connector_last_success_timestamp > 0)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Connector {{ $labels.connector_id }} stale — no successful ingest in > 4h"
+          description: >
+            Connector instance {{ $labels.instance }} ({{ $labels.connector_id }}) last completed
+            a successful ingest more than 4 hours ago (the default cadence is hourly, with
+            exponential backoff on failure, ADR 0054). Check the driver logs and the Integrations
+            page; a sustained failure streak eventually hard-disables the instance (ADR 0074).
 
       - alert: ResolvePassTimingOut
         # The stopped_reason gauge emits a single active label (reason = the latest reason);

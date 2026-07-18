@@ -83,6 +83,21 @@ class DriverMetricsCollector:
                 .where(ConnectorInstance.status == "error")
             ).scalar_one()
             stopped_reason = self._latest_stopped_reason(session)
+            last_success_rows = session.execute(
+                select(
+                    ConnectorInstance.id,
+                    ConnectorInstance.connector_id,
+                    func.max(TaskRun.finished_at),
+                )
+                .join(
+                    TaskRun,
+                    (TaskRun.connector_instance_id == ConnectorInstance.id)
+                    & (TaskRun.kind == "ingest")
+                    & (TaskRun.status == "ok"),
+                    isouter=True,
+                )
+                .group_by(ConnectorInstance.id, ConnectorInstance.connector_id)
+            ).all()
         # Read the live in-memory driver counter via the injected accessor (no driver mutation).
         skips = self._skip_counter()
 
@@ -140,6 +155,26 @@ class DriverMetricsCollector:
             "Consecutive non-blocking resolve-lock skips on the live driver (ADR 0075 D3).",
             skips,
         )
+
+        # Per-instance freshness (re-review 2026-07-11 #9 / OG-harvest F-1 slice 1): the Unix
+        # timestamp of each connector instance's latest SUCCESSFUL ingest, from task_run
+        # (kind='ingest', status='ok') — NOT ConnectorInstance.last_run, which stamps every
+        # attempt and would make a forever-failing feed look fresh. 0 = no success within the
+        # task_run retention window (task_run_retention_days). Labels are opaque ids only
+        # (connector_id + the server-minted instance uuid) — never a URL/name/person field
+        # (INV-7); cardinality is bounded by the instance count.
+        last_success = GaugeMetricFamily(
+            "worldmonitor_connector_last_success_timestamp",
+            "Unix timestamp of the latest successful ingest per connector instance; "
+            "0 = never succeeded within the task_run retention window.",
+            labels=["connector_id", "instance"],
+        )
+        for instance_id, connector_id, finished_at in last_success_rows:
+            last_success.add_metric(
+                [connector_id, instance_id],
+                finished_at.timestamp() if finished_at is not None else 0,
+            )
+        yield last_success
 
         last_reason = GaugeMetricFamily(
             "worldmonitor_resolve_last_stopped_reason",

@@ -64,6 +64,7 @@ _EXPECTED_NAMES = {
     "worldmonitor_instances_in_error",
     "worldmonitor_resolve_consecutive_lock_skips",
     "worldmonitor_resolve_last_stopped_reason",
+    "worldmonitor_connector_last_success_timestamp",
 }
 
 
@@ -283,3 +284,69 @@ def test_collector_performs_no_writes() -> None:
 
     assert after == before, "the collector must not write to Postgres (read-only contract)"
     assert neo4j.closed is False, "the collector must not close the injected Neo4j client"
+
+
+def test_connector_last_success_timestamp_per_instance() -> None:
+    """Freshness gauge (re-review 2026-07-11 #9): the LATEST successful ingest per instance,
+    from task_run — an error-only history reports 0 (ConnectorInstance.last_run stamps every
+    attempt and would make a forever-failing feed look fresh)."""
+    sessions = _sqlite_sessions()
+    with sessions() as session:
+        session.add_all(
+            [
+                ConnectorInstance(
+                    id="ci-a", connector_id="feeds", config_encrypted="x", status="enabled"
+                ),
+                ConnectorInstance(
+                    id="ci-b", connector_id="feeds", config_encrypted="x", status="enabled"
+                ),
+                TaskRun(
+                    id="t-old",
+                    kind="ingest",
+                    status="ok",
+                    connector_instance_id="ci-a",
+                    started_at=_T - timedelta(hours=2),
+                    finished_at=_T - timedelta(hours=2),
+                ),
+                TaskRun(
+                    id="t-new",
+                    kind="ingest",
+                    status="ok",
+                    connector_instance_id="ci-a",
+                    started_at=_T,
+                    finished_at=_T,
+                ),
+                TaskRun(
+                    id="t-fail",
+                    kind="ingest",
+                    status="error",
+                    connector_instance_id="ci-b",
+                    started_at=_T,
+                    finished_at=_T,
+                ),
+            ]
+        )
+        session.commit()
+
+    collector = DriverMetricsCollector(
+        session_factory=sessions, neo4j=_StubNeo4j(nodes=0, edges=0), skip_counter=lambda: 0
+    )
+    _names, values = _collect(collector)
+
+    def g(**labels: str) -> float:
+        key = ("worldmonitor_connector_last_success_timestamp", frozenset(labels.items()))
+        return values[key]
+
+    # Compare against the SAME read path (SQLite hands back naive datetimes; Postgres aware —
+    # the integration suite covers the aware path).
+    with sessions() as session:
+        newer = session.execute(
+            select(TaskRun.finished_at).where(TaskRun.id == "t-new")
+        ).scalar_one()
+        older = session.execute(
+            select(TaskRun.finished_at).where(TaskRun.id == "t-old")
+        ).scalar_one()
+    assert newer is not None and older is not None
+    assert g(connector_id="feeds", instance="ci-a") == newer.timestamp()
+    assert newer.timestamp() > older.timestamp(), "MAX must have picked the newer run"
+    assert g(connector_id="feeds", instance="ci-b") == 0, "error-only history reports 0"
