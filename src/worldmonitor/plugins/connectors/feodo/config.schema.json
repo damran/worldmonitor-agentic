@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Feodo Tracker connector configuration",
+  "description": "Imports the abuse.ch Feodo Tracker C2 IP blocklist as wm:Indicator entities.",
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "title": "Feed URL",
+      "description": "URL of the Feodo Tracker IP blocklist JSON feed (over the SSRF guard). Falls back to the pinned default feed when omitted.",
+      "minLength": 1
+    },
+    "limit": {
+      "type": "integer",
+      "title": "Record limit",
+      "description": "Optional cap on the number of indicators collected (testing / incremental runs).",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false
+}

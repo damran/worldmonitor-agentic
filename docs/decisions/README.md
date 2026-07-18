@@ -134,4 +134,5 @@
 | [0115](0115-consumption-dashboard-read-model.md) | Consumption dashboard as a read-model; pause the storage-inversion lane | ACCEPTED | 2026-07-12 | false | false |
 | [0116](0116-fulltext-article-enricher.md) | Full-text article bodies for extraction (Phase-4 pull-forward) | ACCEPTED | 2026-07-18 | false | false |
 | [0117](0117-attack-catalog-gid-anchor.md) | MITRE ATT&CK intrusion-set catalog + `gid` canonical-anchor namespace | ACCEPTED | 2026-07-18 | false | false |
+| [0118](0118-wm-indicator-feodo.md) | `wm:Indicator`: the first L2 extension + the Feodo Tracker connector | ACCEPTED | 2026-07-18 | false | false |
 <!-- END GENERATED ADR INDEX -->

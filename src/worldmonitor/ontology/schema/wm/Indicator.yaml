@@ -1,0 +1,53 @@
+Indicator:
+  # wm: extension (ADR 0118) — the FIRST L2 extension. FtM 4.x has no IOC-shaped schema, and
+  # the locked ontology decision (CLAUDE.md) reserves `wm:` for exactly this case: "extensions
+  # only where FtM can't reach". A cyber threat indicator of compromise (IOC) — e.g. a C2 IP
+  # address/port, domain, URL, or file hash — sourced from a CTI feed (Feodo Tracker, S-2).
+  #
+  # `matchable: false` is EXPLICIT and load-bearing (not left to a default): it keeps every
+  # Indicator out of FtM's own matchable-gated fuzzy-resolution path (`Model.matchable_schemata`)
+  # so an Indicator can never fuzzy-pair with a Person/Organization. `extends: [Thing]` ONLY
+  # (never `LegalEntity`) so `Model.common_schema(Indicator, <any Person/Org-family schema>)`
+  # has no shared ancestor and raises `InvalidData` — the second, independent never-merge gate.
+  # Convergence is by deterministic id ONLY (the connector's `feodo-<sha1(ip:port)>` rule).
+  label: Indicator
+  plural: Indicators
+  description: >
+    A cyber threat indicator of compromise (IOC) sourced from a CTI feed — an IP:port, domain,
+    URL, or file hash implicated in malicious infrastructure. Converges by deterministic id
+    only; never enters fuzzy entity resolution.
+  extends:
+    - Thing
+  matchable: false
+  properties:
+    indicatorValue:
+      label: Indicator value
+      description: >
+        The raw IOC value (e.g. an "ip:port" pair, a domain, a URL, or a file hash).
+      type: string
+    indicatorType:
+      label: Indicator type
+      description: The kind of IOC this value represents (e.g. ipv4, domain, url, sha256).
+      type: string
+    malwareFamily:
+      label: Malware family
+      description: The malware family this indicator is attributed to, when the source knows it.
+      type: string
+    firstSeenAt:
+      label: First seen
+      description: When the source feed first observed this indicator.
+      type: date
+    lastSeenAt:
+      label: Last seen
+      description: When the source feed last observed this indicator active.
+      type: date
+    indicates:
+      label: Indicates
+      description: >
+        The threat actor (Organization) this indicator is attributed to — a dormant edge for
+        the future actor-attribution lane (ADR 0118 consequences); unused by the Feodo slice.
+        No reverse is defined deliberately (mirrors `Thing.riskSource`): the inverse is an
+        unbounded one-to-many fan-out (one actor referenced by many indicators) that should
+        not be materialised on every Organization.
+      type: entity
+      range: Organization
