@@ -36,8 +36,8 @@ the lock.
 
 ```bash
 # 1. Stop the driver gracefully (lets the current ingest/resolve pass finish).
-#    On a systemd host:
-sudo systemctl stop worldmonitor-driver
+#    With the bundled compose stack (the deployed shape — there is no systemd unit):
+docker compose -f deploy/compose.yaml stop driver
 #    Or, if you started it directly:
 pkill -SIGTERM -f "worldmonitor.runner.driver"
 

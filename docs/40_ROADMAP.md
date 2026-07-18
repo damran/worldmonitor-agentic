@@ -78,11 +78,12 @@ LLM-egress audit ADR 0105 #170). The log-capture consult (`docs/fable-review/80_
   `full_rebuild` reconstructs the whole graph and the WPI-2 completeness obligation is discharged
   (`find_incomplete_aliased_survivors == ∅`). Mechanism merged + tested; **running** it over a
   real-seed corpus is operator-blocked (per-cohort fidelity spike, SF-4).
-- [ ] **3b-planning-proper — PAUSED (ADR 0115, 2026-07-12)** — exclusion-surface audit · one-time
-  (two-directional + count) reconciliation · driver LOWs (single ledger read · handshake-refusal
-  observability · snapshot streaming) · write-path-retirement carve-outs. Planning/docs +
-  dormant-guard hardening. **Paused** to fund the consumption-dashboard MVP (see below); code is
-  committed and its branch intact — revisit trigger in ADR 0115. See
+- [x] **3b-planning-proper ✅ (paused 2026-07-12 per ADR 0115; engineering finished 2026-07-18)** —
+  exclusion-surface audit + one-time reconciliation instruments (#184/#185) · driver LOWs: single
+  ledger read + handshake-refusal observability **DONE** (#204, including the operator reconcile
+  CLI `python -m worldmonitor.resolution.reconcile_cli`); snapshot streaming stays spec+defer
+  (doc 82 §6). Everything still open before the cutover is **operator-blocked** — run
+  `docs/runbooks/OPERATOR_SESSION.md` §§4–7 — plus the ADR 0114 cosign. See
   `docs/fable-review/81_PRECUTOVER_GATE_SEQUENCE.md` §7 and `82_GATE_3B_CUTOVER_PLAN.md`.
 - [x] **Consumption dashboard MVP ✅ COMPLETE (ADR 0115, 2026-07-13)** — an interactive, graph-native
   product at `/app`: a 3D globe of geo-located events + a live feed rail + a click-through entity

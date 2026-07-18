@@ -79,6 +79,35 @@ services:
       retries: 15
       start_period: 40s
 
+  # --- Isolated diff-target Neo4j (profile: diffguard) — ADR 0102 / Gate 3b ---
+  # OPT-IN (`--profile diffguard`): the SEPARATE Neo4j instance the rebuild-and-diff guard and the
+  # reconcile CLI fold into (OPERATOR_SESSION.md §6-§7). Neo4j Community is single-database, so a
+  # distinct diff target MUST be a distinct instance — this service is the bundled one, saving the
+  # operator a hand-built second deployment. In-network ONLY (no host ports), its own volume, no
+  # GDS (the fold needs plain Cypher). The guard's textual fence sees a distinct host
+  # (neo4j-diff vs neo4j) and the db.info identity handshake proves distinctness at runtime; both
+  # still refuse before any wipe if misconfigured (ADR 0102 D3). Same pinned image as `neo4j` so
+  # fold behaviour never drifts across server versions.
+  neo4j-diff:
+    image: neo4j:2026.05.0-community
+    restart: unless-stopped
+    profiles: ["diffguard"]
+    mem_limit: ${NEO4J_DIFF_MEM_LIMIT:-2g}
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_DIFF_PAGECACHE:-256m}
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_DIFF_HEAP:-512m}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_DIFF_HEAP:-512m}
+    volumes:
+      - neo4j-diff-data:/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "cypher-shell -u neo4j -p \"${NEO4J_PASSWORD}\" 'RETURN 1' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 15
+      start_period: 40s
+
   # --- MinIO (S3-compatible landing zone) ---
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
@@ -599,6 +628,7 @@ volumes:
   postgres-data:
   neo4j-data:
   neo4j-logs:
+  neo4j-diff-data:
   minio-data:
   redis-data:
   zitadel-machinekey:
