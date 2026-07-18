@@ -91,6 +91,52 @@ _CURATED_FEEDS: tuple[tuple[str, str, int], ...] = (
     # Disaster / geo (native GeoRSS coordinates)
     ("disaster", "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.atom", 100),
     ("disaster", "https://www.gdacs.org/xml/rss.xml", 60),
+    # ---- WP-2a expansion (2026-07-18): curated from the OG-harvest S-1 list
+    # (docs/fable-review/91_OG_HARVEST_BACKLOG.md) + the operator's master source inventory
+    # (sheet "72. News Feeds", tier/propaganda-risk metadata). Direct feeds only (no Google-News
+    # wrappers), English-first for extraction quality, every URL liveness-checked 2026-07-18.
+    # NOTE: CISA serves 200 to httpx's default User-Agent but 403 to spoofed browser UAs — do not
+    # "fix" the fetch path by faking a browser.
+    # Cyber / CTI
+    ("cyber", "https://www.cisa.gov/cybersecurity-advisories/all.xml", 40),
+    ("cyber", "https://www.ransomware.live/rss.xml", 40),
+    # Government / ministries
+    ("gov", "https://www.gov.uk/government/organisations/ministry-of-defence.atom", 30),
+    # Crisis / health / nuclear watchdogs
+    ("crisis", "https://www.iaea.org/feeds/topnews", 30),
+    ("crisis", "https://www.who.int/rss-feeds/news-english.xml", 40),
+    ("crisis", "https://www.crisisgroup.org/rss", 30),
+    # Investigative / OSINT
+    ("osint", "https://www.bellingcat.com/feed/", 30),
+    ("osint", "https://www.occrp.org/en/feed", 30),
+    ("osint", "https://dfrlab.org/feed/", 30),
+    ("osint", "https://www.oryxspioenkop.com/feeds/posts/default?alt=rss", 30),
+    ("osint", "https://www.lighthousereports.com/feed/", 20),
+    ("osint", "https://vsquare.org/feed/", 20),
+    # Defense / military
+    ("defense", "https://warontherocks.com/feed", 30),
+    ("defense", "https://www.defenseone.com/rss/all/", 40),
+    ("defense", "https://www.twz.com/feed", 40),
+    ("defense", "https://news.usni.org/feed", 40),
+    ("defense", "https://www.militarytimes.com/arc/outboundfeeds/rss/?outputType=xml", 40),
+    # Think tanks / analysis
+    ("thinktank", "https://foreignpolicy.com/feed/", 30),
+    ("thinktank", "https://www.atlanticcouncil.org/feed/", 30),
+    ("thinktank", "https://jamestown.org/feed/", 20),
+    # Regional breadth
+    ("asia", "https://thediplomat.com/feed/", 40),
+    ("asia", "https://www.abc.net.au/news/feed/2942460/rss.xml", 40),
+    ("europe", "https://meduza.io/rss/all", 40),
+    ("europe", "https://novayagazeta.eu/feed/rss", 30),
+    ("europe", "https://balkaninsight.com/feed/", 30),
+    ("middleeast", "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml", 50),
+    ("africa", "https://www.premiumtimesng.com/feed", 40),
+    ("us", "https://rss.politico.com/politics-news.xml", 40),
+    ("us", "https://api.axios.com/feed/", 40),
+    # Finance / markets
+    ("finance", "https://www.ft.com/rss/home", 40),
+    # Maritime / trade
+    ("maritime", "https://gcaptain.com/feed/", 30),
 )
 
 
