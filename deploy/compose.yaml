@@ -403,6 +403,16 @@ services:
       EXTRACTION_ENABLED: ${EXTRACTION_ENABLED:-false}
       EXTRACTION_CADENCE_SECONDS: ${EXTRACTION_CADENCE_SECONDS:-900}
       EXTRACTION_MAX_ARTICLES_PER_CYCLE: ${EXTRACTION_MAX_ARTICLES_PER_CYCLE:-20}
+      EXTRACTION_BODY_MAX_CHARS: ${EXTRACTION_BODY_MAX_CHARS:-4000}
+      # Full-text article bodies (ADR 0116) — DEFAULT OFF. Flip FULLTEXT_ENABLED=true (usually
+      # together with EXTRACTION_ENABLED) to fetch the pages behind fresh feed articles and feed
+      # their text into the extraction prompts. Pull-only, SSRF-guarded, bounded per cycle/host.
+      FULLTEXT_ENABLED: ${FULLTEXT_ENABLED:-false}
+      FULLTEXT_CADENCE_SECONDS: ${FULLTEXT_CADENCE_SECONDS:-900}
+      FULLTEXT_MAX_ARTICLES_PER_CYCLE: ${FULLTEXT_MAX_ARTICLES_PER_CYCLE:-30}
+      FULLTEXT_MAX_PER_HOST_PER_CYCLE: ${FULLTEXT_MAX_PER_HOST_PER_CYCLE:-5}
+      FULLTEXT_MAX_FETCH_BYTES: ${FULLTEXT_MAX_FETCH_BYTES:-2097152}
+      FULLTEXT_MAX_ATTEMPTS: ${FULLTEXT_MAX_ATTEMPTS:-3}
       # LLM gateway → Ollama on the WINDOWS host (LOCAL mode). `localhost` inside a container is the
       # container itself, so target host.docker.internal. Requires OLLAMA_HOST=0.0.0.0:11434 on
       # Windows + a firewall allow for TCP 11434, and the model pulled (`ollama pull llama3.2`).

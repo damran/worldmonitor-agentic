@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import func, select
 
 from worldmonitor.db.engine import create_all, make_engine, session_factory
-from worldmonitor.db.models import ErQueueItem
+from worldmonitor.db.models import ArticleText, ErQueueItem
 from worldmonitor.graph.constraints import ensure_constraints
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
@@ -120,6 +120,41 @@ def test_extraction_pass_writes_event_with_links(
 
     proof = clean_graph.execute_read("MATCH (:Event)-[:PROOF]->(d) RETURN d.id AS id")
     assert any(row["id"] == "feed-int1" for row in proof), f"missing PROOF receipt edge: {proof}"
+
+    engine.dispose()
+
+
+def test_extraction_prompt_carries_cached_fulltext_body(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """ADR 0116 over real stores: a cached ``article_text`` body rides into the LLM prompt,
+    truncated to ``body_max_chars``; nothing else about the pass changes."""
+    _seed_article(clean_graph)
+    engine = make_engine(postgres_dsn)
+    create_all(engine)
+    sessions = session_factory(engine)
+    with sessions() as session:
+        session.add(
+            ArticleText(
+                entity_id="feed-int1",
+                url="https://news.example.com/int1",
+                text="Full article body: workers occupied the plant overnight.",
+            )
+        )
+        session.commit()
+
+    gw = _stub_gateway(_EXTRACTION_JSON)
+    extract_cycle(
+        neo4j=clean_graph,
+        sessions=sessions,
+        gateway=gw,
+        max_articles=10,
+        retrieved_at="t",
+        body_max_chars=30,
+    )
+    sent = gw.chat.call_args[0][0]
+    assert "Article text: Full article body: workers occ" in sent[1]["content"]
+    assert "plant" not in sent[1]["content"], "body must be truncated to body_max_chars"
 
     engine.dispose()
 

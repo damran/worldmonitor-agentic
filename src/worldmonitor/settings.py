@@ -185,6 +185,20 @@ class Settings(BaseSettings):
     extraction_enabled: bool = False
     extraction_cadence_seconds: int = Field(default=900, gt=0)
     extraction_max_articles_per_cycle: int = Field(default=20, gt=0)
+    # Max characters of a cached article body included in the extraction prompt (ADR 0116).
+    extraction_body_max_chars: int = Field(default=4000, gt=0)
+    # --- Full-text article bodies (ADR 0116) — DEFAULT OFF ---
+    # A pull-only, SSRF-guarded driver pass that fetches the pages behind recent not-yet-extracted
+    # curated-feed Articles, lands the raw HTML in the landing zone, and derives a plain-text body
+    # into the rebuildable ``article_text`` cache the extraction pass reads. Egress opt-in like
+    # extraction; bounded per cycle, per host, and per response (bytes). ``fulltext_max_attempts``
+    # stops a dead URL from being refetched forever.
+    fulltext_enabled: bool = False
+    fulltext_cadence_seconds: int = Field(default=900, gt=0)
+    fulltext_max_articles_per_cycle: int = Field(default=30, gt=0)
+    fulltext_max_per_host_per_cycle: int = Field(default=5, gt=0)
+    fulltext_max_fetch_bytes: int = Field(default=2_097_152, gt=0)
+    fulltext_max_attempts: int = Field(default=3, ge=1)
     # After this many CONSECUTIVE non-blocking ``_resolve_lock`` skips (a prior pass still holds the
     # lock) the driver escalates the skip log from info to WARNING (ADR 0075 D3), so a wedged
     # resolve pass surfaces instead of silently starving resolution. A successful acquire resets it.

@@ -43,7 +43,9 @@ ollama pull llama3.2                # the compose default; or any model you pref
 On a Windows host also set `OLLAMA_HOST=0.0.0.0:11434` and allow TCP 11434 through the firewall
 (containers reach the host via `host.docker.internal`).
 
-In `.env`: set `EXTRACTION_ENABLED=true` (and `LLM_OLLAMA_MODEL=<model>` if not `llama3.2`), then:
+In `.env`: set `EXTRACTION_ENABLED=true` **and `FULLTEXT_ENABLED=true`** (ADR 0116 — extraction
+then sees article bodies, not just headlines; and `LLM_OLLAMA_MODEL=<model>` if not `llama3.2`),
+then:
 
 ```bash
 docker compose -f deploy/compose.yaml --env-file .env up -d api driver   # pick up env

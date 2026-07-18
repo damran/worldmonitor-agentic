@@ -132,4 +132,5 @@
 | [0113](0113-statement-log-backfill.md) | Statement/context-claim log backfill (Gate 2b): complete the SoR spine from the retained ingest substrate | ACCEPTED | 2026-07-12 | false | true |
 | [0114](0114-gate-3b-cutover.md) | Gate 3b: the F1 projector cutover (retire the direct write; the log becomes the live SoR) | PROPOSED | 2026-07-12 | true | true |
 | [0115](0115-consumption-dashboard-read-model.md) | Consumption dashboard as a read-model; pause the storage-inversion lane | ACCEPTED | 2026-07-12 | false | false |
+| [0116](0116-fulltext-article-enricher.md) | Full-text article bodies for extraction (Phase-4 pull-forward) | ACCEPTED | 2026-07-18 | false | false |
 <!-- END GENERATED ADR INDEX -->
