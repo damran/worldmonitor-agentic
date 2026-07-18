@@ -134,12 +134,13 @@ of "labels derived from the model's own score," a **non-circular label on-ramp**
 positives; conflicting same-type anchors are negatives) and an **external-benchmark floor**
 (ADR 0080 — OpenSanctions OS-Pairs + Febrl, with a contamination guard).
 
-> **Two things the reviewer should know:** (a) the merge guard currently defaults to **"alert" mode**
-> (ADR 0024) — it flags and audits sensitive merges but *still writes them*; flipping to "block" is
-> required before production and has not happened. (b) The 0.92 merge threshold and the 10:1 FP:FN
-> cost prior are **expert-set and have never been calibrated against a real corpus** — the harness is
-> a ruler with no measurement yet taken. Threshold promotion (G7) stays human-sign-off-gated because
-> it is person-affecting.
+> **Two things the reviewer should know:** (a) the merge guard defaults to **"block" mode**
+> (`settings.py` `merge_guard_mode="block"`, ADR 0031; an earlier draft of this digest said "alert" —
+> that was stale). Runtime guards are operator-toggleable via the `enforcement_profile` switch
+> (ADR 0109), whose code default is the strict production posture. (b) The 0.92 merge threshold and
+> the 10:1 FP:FN cost prior are **expert-set and have never been calibrated against a real corpus** —
+> the harness is a ruler with no measurement yet taken. Threshold promotion (G7) stays
+> human-sign-off-gated because it is person-affecting.
 
 ---
 

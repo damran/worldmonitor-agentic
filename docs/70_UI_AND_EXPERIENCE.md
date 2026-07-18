@@ -6,8 +6,12 @@
 > answers in ADR 0094 (persona = CTI / L3 SOC; OSS-only; no paid products; ~5 h/week review budget)
 > and ADR 0095 (Postgres statement-log = system of record; Neo4j = projection).
 >
-> **Status:** design spec — nothing here is built yet. The existing UI is the Integrations page
-> (ADR 0069). This document defines the target and the build order; it is a plan, not a claim.
+> **Status:** design spec — the target architecture, not a claim of what exists. Built so far
+> (2026-07): the **Integrations page** (ADR 0069), the **read-only review-queue UI** (ADR 0103,
+> slice 1a), and the **`/app` consumption dashboard MVP** (ADR 0115 — 3D globe + feed rail +
+> entity panel with provenance receipts + AI briefs; a pragmatic vanilla-JS read-model shipped
+> ahead of, and to be folded into, this spec's HTMX-shell/Overlay architecture). The rest of this
+> document defines the target and the build order.
 
 ---
 
