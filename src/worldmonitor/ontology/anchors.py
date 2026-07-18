@@ -27,8 +27,13 @@ from worldmonitor.ontology.ftm import FtmEntity
 
 logger = logging.getLogger(__name__)
 
-# Canonical identifier fields (the node properties PR1's constraints enforce).
-CANONICAL_ID_FIELDS = ("wikidata_id", "geonames_id", "lei", "opencorporates_id")
+# Canonical identifier fields (the node properties PR1's constraints enforce). `mitre_gid`
+# (Gate S-3, ADR 0117) is the MITRE ATT&CK intrusion-set G-id (`G0032`) — a globally-administered
+# unique identifier for a named threat actor, propagating through this ONE tuple to the
+# catastrophic-merge guard's negative evidence, the graph uniqueness constraint, and the
+# divergence guard's anchor-key exclusion (all import it, none hardcode the field list — verified
+# by grep, ADR 0117 D1).
+CANONICAL_ID_FIELDS = ("wikidata_id", "geonames_id", "lei", "opencorporates_id", "mitre_gid")
 
 _CONTEXT_PREFIX = "wm_anchor_"
 

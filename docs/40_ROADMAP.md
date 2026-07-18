@@ -94,6 +94,10 @@ LLM-egress audit ADR 0105 #170). The log-capture consult (`docs/fable-review/80_
   news→event LLM extraction, default-OFF (#189, adversarially reviewed) · **E** AI briefs (#190). Run:
   `docker compose up` → open `/app`. News→event extraction + briefs need Ollama on the host +
   `EXTRACTION_ENABLED=true`.
+- [ ] **CTI on-ramp (OG-harvest 91)** — a named-threat-actor substrate for the CTI persona. **S-3
+  landed** (ADR 0117): the `mitre_gid` canonical-anchor namespace + the seeded `mitre_attack`
+  connector (ATT&CK Enterprise intrusion-set catalog). **S-2** (IOC feeds → intrusion-set edges)
+  and **F-2** are queued, F-2 scheduled post-S4.
 - [ ] **Gate 3b cutover + retire the direct write** — human-gated, irreversible, LAST; the first
   sanctioned live `full_rebuild` consumes Gate 2b's output. Blocked on the operator preconditions
   (run the 2b backfill, enable the guard, green over N cycles) + the human cutover sign-off.
