@@ -53,6 +53,7 @@ from worldmonitor.resolution.divergence import ProjectionDivergence, measure_div
 from worldmonitor.resolution.pipeline import resolve_pending
 from worldmonitor.resolution.projector import build_survivor_of, project
 from worldmonitor.runner.extraction import extract_cycle
+from worldmonitor.runner.fulltext import fulltext_cycle
 from worldmonitor.runner.gc import GcStats, gc_landing_orphans
 from worldmonitor.runner.heartbeat import Heartbeat
 from worldmonitor.runner.ingest import run_ingest
@@ -181,6 +182,8 @@ class IngestDriver:
         self._llm_gateway = llm_gateway
         # Serializes extraction so a slow LLM pass never overlaps its next cadence tick.
         self._extract_lock = threading.Lock()
+        # Serializes the full-text fetch pass (ADR 0116) the same way.
+        self._fulltext_lock = threading.Lock()
         # Last-tick heartbeat FILE (Gate B-4c / ADR 0051): touched once per loop iteration so a
         # stalled pipeline is detectable via --healthcheck even while /health still echoes ok.
         self._heartbeat = heartbeat or Heartbeat(
@@ -592,6 +595,54 @@ class IngestDriver:
             task_id, None, status=status, error=error, stats=stats, now=now, kind="resolve"
         )
 
+    # -- full-text article-body pass (ADR 0116) ------------------------------ #
+    def run_fulltext(self, *, now: datetime) -> list[str]:
+        """Fetch page bodies for recent unextracted feed Articles (default-OFF pass).
+
+        A no-op unless ``fulltext_enabled`` — the egress opt-in. Serialized like extraction: a
+        slow fetch pass is skipped rather than overlapped. Returns ``[self._FULLTEXT_MARKER]``
+        if a pass ran this tick, else ``[]``.
+        """
+        if not self._settings.fulltext_enabled:
+            return []
+        if not self._fulltext_lock.acquire(blocking=False):
+            logger.info("fulltext already in progress; skipping this tick")
+            return []
+        try:
+            self._fulltext(now=now)
+            return [self._FULLTEXT_MARKER]
+        finally:
+            self._fulltext_lock.release()
+
+    _FULLTEXT_MARKER = "__fulltext__"
+
+    def _fulltext(self, *, now: datetime) -> None:
+        with self._sessions() as session:
+            task_id = str(uuid.uuid4())
+            session.add(TaskRun(id=task_id, kind="fulltext", status="running"))
+            session.commit()
+
+        status, error, stats = "ok", "", None
+        try:
+            result = fulltext_cycle(
+                neo4j=self._neo4j,
+                sessions=self._sessions,
+                landing=self._landing,
+                max_articles=self._settings.fulltext_max_articles_per_cycle,
+                max_per_host=self._settings.fulltext_max_per_host_per_cycle,
+                max_attempts=self._settings.fulltext_max_attempts,
+                max_fetch_bytes=self._settings.fulltext_max_fetch_bytes,
+                retrieved_at=now.isoformat(),
+            )
+            stats = result.as_dict()
+        except Exception as exc:
+            status, error = "error", f"{type(exc).__name__}: {exc}"[:_ERROR_SUMMARY_MAX]
+            logger.warning("fulltext task failed: %s", exc)
+
+        self._finalize(
+            task_id, None, status=status, error=error, stats=stats, now=now, kind="fulltext"
+        )
+
     # -- news→event extraction pass (ADR 0115, Slice B) ---------------------- #
     def run_extraction(self, *, now: datetime) -> list[str]:
         """Derive Event/actor candidates from recent curated-feed Articles (default-OFF pass).
@@ -628,6 +679,7 @@ class IngestDriver:
                 gateway=self._llm_gateway,
                 max_articles=self._settings.extraction_max_articles_per_cycle,
                 retrieved_at=now.isoformat(),
+                body_max_chars=self._settings.extraction_body_max_chars,
             )
             stats = result.as_dict()
         except Exception as exc:
@@ -778,6 +830,7 @@ class IngestDriver:
         last_resolve: datetime | None = None
         last_maintenance: datetime | None = None
         last_extraction: datetime | None = None
+        last_fulltext: datetime | None = None
         while True:
             now = datetime.now(UTC)
             try:
@@ -812,6 +865,16 @@ class IngestDriver:
                             self._resolve_wait_timeout(),
                         )
                     last_resolve = now
+                # Full-text article bodies (ADR 0116) — default-OFF, own cadence, BEFORE
+                # extraction so a body fetched this tick can feed the same tick's prompts.
+                # run_fulltext is itself a no-op unless enabled.
+                if (
+                    last_fulltext is None
+                    or (now - last_fulltext).total_seconds()
+                    >= self._settings.fulltext_cadence_seconds
+                ):
+                    await asyncio.to_thread(self.run_fulltext, now=now)
+                    last_fulltext = now
                 # News→event LLM extraction (ADR 0115, Slice B) — default-OFF, own cadence, run in
                 # a thread so a slow local-model call never blocks the heartbeat. run_extraction is
                 # itself a no-op unless enabled + a gateway is wired.

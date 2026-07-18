@@ -75,6 +75,29 @@ class ErQueueItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ArticleText(Base):
+    """Derived full-text cache for curated-feed Articles (ADR 0116) — NOT a system of record.
+
+    One row per Article entity id: the plain-text body the full-text pass extracted from the
+    landed page HTML (``raw_pointer`` → the immutable landing object it re-derives from), plus the
+    provenance columns and a bounded retry ledger (``attempts``/``last_error``) so a dead URL is
+    not refetched forever. The graph never carries the body (ftmg drops long props); the extraction
+    pass joins this table by entity id. Rebuildable: drop + re-derive from the landing zone.
+    """
+
+    __tablename__ = "article_text"
+
+    entity_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    url: Mapped[str] = mapped_column(Text)
+    text: Mapped[str] = mapped_column(Text, default="")
+    raw_pointer: Mapped[str] = mapped_column(Text, default="")
+    source_id: Mapped[str] = mapped_column(String(255), default="")
+    retrieved_at: Mapped[str] = mapped_column(String(64), default="")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class MergeAudit(Base):
     """Audit trail of every resolution decision — which sources collapsed and why.
 

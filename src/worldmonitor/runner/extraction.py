@@ -36,6 +36,7 @@ from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.ontology.ftm import FtmEntity
 from worldmonitor.ontology.validation import validate_or_raise
 from worldmonitor.provenance.model import Provenance, stamp
+from worldmonitor.runner.fulltext import load_body
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,8 @@ _ISO_DATE_PREFIX = re.compile(r"^\d{4}(-\d{2}(-\d{2})?)?([T ].*)?$")
 # The extraction contract. Kept deliberately small + strict so a weak local model can satisfy it;
 # the parser is defensive regardless (a wrong shape is dropped, never trusted).
 _SYSTEM_PROMPT = (
-    "You are an OSINT analyst. From a news headline (and optional summary), extract the single "
+    "You are an OSINT analyst. From a news headline (and optional summary and article text), "
+    "extract the single "
     "primary real-world EVENT it reports. Reply with ONLY a JSON object, no markdown, no prose. "
     "Keys: "
     '"is_event" (true only if it reports a discrete real-world event: attack, protest, disaster, '
@@ -92,11 +94,20 @@ class ExtractStats:
         }
 
 
-def build_messages(title: str, summary: str | None) -> list[dict[str, str]]:
-    """The chat messages for one article (system contract + the article text)."""
+def build_messages(
+    title: str, summary: str | None, body: str | None = None
+) -> list[dict[str, str]]:
+    """The chat messages for one article (system contract + headline/summary/cached body).
+
+    ``body`` is the full-text cache's already-truncated article text (ADR 0116) — hostile input
+    like everything else here; it rides inside the user message and the reply goes through the
+    same defensive :func:`parse_extraction` trust boundary.
+    """
     user = f"Headline: {title}"
     if summary:
         user += f"\nSummary: {summary}"
+    if body:
+        user += f"\nArticle text: {body}"
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": user},
@@ -390,9 +401,14 @@ def extract_cycle(
     gateway: Any,
     max_articles: int,
     retrieved_at: str,
+    body_max_chars: int = 4000,
 ) -> ExtractStats:
     """Run one bounded extraction cycle. Per-article failures are isolated (one bad article never
-    aborts the cycle). Returns what happened for the driver's task_run record."""
+    aborts the cycle). Returns what happened for the driver's task_run record.
+
+    When the full-text pass (ADR 0116) has cached a body for an article, the prompt carries it
+    (truncated to ``body_max_chars``); otherwise the headline/summary alone — best-effort, never a
+    dependency."""
     stats = ExtractStats()
     # The selection already excludes watermarked articles, so the freshest `max_articles`
     # UNPROCESSED feed articles come back — no wider scan / in-loop skip needed.
@@ -401,7 +417,8 @@ def extract_cycle(
         stats.scanned += 1
         article_id = str(article["id"])
         try:
-            messages = build_messages(str(article["title"]), article.get("summary"))
+            body = load_body(sessions, article_id, max_chars=body_max_chars)
+            messages = build_messages(str(article["title"]), article.get("summary"), body)
             response = gateway.chat(messages, caller_tag="extraction")
             extraction = parse_extraction(response_text(response))
             entities = (
