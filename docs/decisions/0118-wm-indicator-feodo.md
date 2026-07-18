@@ -53,9 +53,12 @@ to True — corrected during the build and recorded in VERIFIED_API.md).
   same-value ⟹ same-id; a sibling Indicator connector with a divergent id scheme would let
   Splink fuzzy-fuse same-IOC records. Not reachable in this feodo-only slice; not
   person-affecting.
-- **Revisit triggers:** (a) S-2 phase 2 (ThreatFox/URLhaus/SSLBL siblings + actor edges) MUST
-  FIRST make Indicator identity connector-independent — a shared IOC-value id scheme across all
-  Indicator connectors, or `score_pairs` consulting `schema.matchable` — per the finding above;
+- **Revisit triggers:** (a) **EXECUTED EARLY (S-2b, 2026-07-19, pre-first-deployment):** the
+  shared connector-independent id scheme now lives in `ontology/ioc.py::indicator_id`
+  (`ioc-<sha1(strip+casefold(value))>`); feodo adopted it before any deployment minted ids, so
+  the move was a rename, not a migration. S-2 phase 2 connectors MUST derive ids there; the
+  alternative systemic fix (`score_pairs` consulting `schema.matchable`) remains open as
+  defense-in-depth;
   (b) any need for `matchable: true` on Indicators (would require its own ADR + guard
   analysis — do NOT flip it casually); (c) volume growth → per-dataset retention policy;
   (d) the ftm-schema vendoring gate learning to cover wm schemas too (today it guards the
