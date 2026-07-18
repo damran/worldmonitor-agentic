@@ -4,8 +4,9 @@ abuse.ch's Feodo Tracker publishes a free, unauthenticated JSON feed of C2 (comm
 IP:port pairs used by well-known banking-trojan/malware families (Emotet, QakBot, ...). Each entry
 becomes exactly one FtM ``Indicator`` (the first ``wm:`` L2 extension, ``ontology/schema/wm/
 Indicator.yaml``): a non-matchable, deterministic-id-only node that converges on re-ingest by
-``feodo-<sha1(ip:port)>`` rather than fuzzy resolution — CTI infrastructure indicators must never
-enter the person/org merge path (CLAUDE.md catastrophic-merge guard).
+the shared ``ioc-<sha1(value)>`` scheme
+(``ontology.ioc.indicator_id``, S-2b) rather than fuzzy resolution — CTI infrastructure
+indicators must never enter the person/org merge path (CLAUDE.md catastrophic-merge guard).
 
 ``collect()`` streams the feed over the SSRF guard and yields ONE ``RawRecord`` per feed entry,
 unfiltered (the feed carries no revoked/deprecated eligibility concept, unlike ``mitre_attack``);
@@ -18,7 +19,6 @@ it never writes to the graph.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from collections.abc import Iterable, Iterator, Mapping
@@ -30,6 +30,7 @@ import httpx
 
 from worldmonitor.net.ssrf import guarded_stream
 from worldmonitor.ontology.ftm import FtmEntity
+from worldmonitor.ontology.ioc import indicator_id
 from worldmonitor.ontology.validation import validate_or_raise
 from worldmonitor.plugins.base import (
     Capability,
@@ -149,8 +150,10 @@ class FeodoConnector(Connector):
 
         An entry with a blank/missing `ip_address` (the identity field an Indicator cannot be
         built without) is dropped (`[]`, fail-soft) rather than raising and failing the batch.
-        The entity id is `feodo-<sha1(ip:port)>`, so a re-ingest of the same IOC converges on the
-        same node. `firstSeenAt`/`lastSeenAt` are added via `entity.add()` (not the initial
+        The entity id comes from the SHARED connector-independent scheme
+        (`worldmonitor.ontology.ioc.indicator_id` — ADR 0118's executed precondition), so a
+        re-ingest of the same IOC — from THIS or any sibling connector — converges on the same
+        node by identity. `firstSeenAt`/`lastSeenAt` are added via `entity.add()` (not the initial
         `properties` payload) so FtM's own date-type cleaning normalizes the feed's
         space-separated `first_seen` timestamp to ISO-T and silently drops any junk value,
         without ever raising. No `topics`, no `country` — ASN geo is not an event location.
@@ -166,7 +169,7 @@ class FeodoConnector(Connector):
             return []
 
         value = f"{ip_address}:{entry.get('port')}"
-        entity_id = f"feodo-{hashlib.sha1(value.encode('utf-8')).hexdigest()}"
+        entity_id = indicator_id(value)
 
         properties: dict[str, list[str]] = {
             "name": [value],

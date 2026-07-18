@@ -13,7 +13,8 @@ mirroring the ``mitre_attack`` package shape):
   yields ONE ``RawRecord`` PER ENTRY — Feodo's feed has no revoked/deprecated eligibility concept
   (unlike ``mitre_attack``), so ``collect()`` does NOT filter; malformed-entry rejection is entirely
   ``map()``'s job (pinned separately below). ``limit`` is honored (hard cap, feed order).
-* ``map()``: one entry -> ONE FtM ``Indicator``: deterministic ``id=f"feodo-{sha1(value)}"`` where
+* ``map()``: one entry -> ONE FtM ``Indicator``: deterministic ``id=indicator_id(value)`` (the
+  shared ``ioc-<sha1>`` scheme, S-2b) where
   ``value=f"{ip_address}:{port}"`` (the sha1 rule is computed INDEPENDENTLY here via stdlib
   ``hashlib`` — the connector's own oracle, not borrowed from its implementation),
   ``name``/``indicatorValue`` = the same ``value``, ``indicatorType=["ipv4"]``,
@@ -148,9 +149,13 @@ _FEED: list[dict[str, Any]] = [
 
 
 def _sha1_id(value: str) -> str:
-    """The connector's deterministic id rule, computed INDEPENDENTLY (stdlib hashlib) — the
-    oracle for `map()`'s output, never borrowed from the connector's own implementation."""
-    return f"feodo-{hashlib.sha1(value.encode('utf-8')).hexdigest()}"
+    """The SHARED id rule (ADR 0118's executed precondition — connector-independent
+    ``ioc-<sha1(strip+casefold(value))>``), computed INDEPENDENTLY (stdlib hashlib) — the
+    oracle for `map()`'s output, never borrowed from the implementation. PIN MOVED
+    (S-2b, pre-first-deployment): the original gate pinned ``feodo-<sha1>``; the checker
+    finding carried in ADR 0118 requires all Indicator connectors to share one scheme, and
+    executing it before any deployment mints ids made the move a rename, not a migration."""
+    return f"ioc-{hashlib.sha1(value.strip().casefold().encode('utf-8')).hexdigest()}"
 
 
 # --------------------------------------------------------------------------------------------------
