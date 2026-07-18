@@ -40,7 +40,12 @@ def _noop_load_dotenv(*_args: object, **_kwargs: object) -> bool:
 dotenv.load_dotenv = _noop_load_dotenv  # type: ignore[assignment]
 dotenv.main.load_dotenv = _noop_load_dotenv  # type: ignore[assignment]
 
-NEO4J_IMAGE = "neo4j:2026.05.0-community"
+# Same digest as deploy/compose.yaml (re-review #8): the integration suite proves EXACTLY
+# the bytes production runs, not whatever the tag points at today.
+NEO4J_IMAGE = (
+    "neo4j:2026.05.0-community"
+    "@sha256:6c162e2432f861f2c4e3da77a6ba478e7f10e2160b870541f85294532bc6ff5f"
+)
 NEO4J_TEST_PASSWORD = "testpassword"  # pragma: allowlist secret
 # MinIO isn't a Docker Hub `library/` image, so it can't use the ECR mirror
 # prefix; override locally with a fully-qualified mirror (e.g. quay.io/minio/minio).
