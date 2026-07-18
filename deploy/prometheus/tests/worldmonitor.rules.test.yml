@@ -3,8 +3,9 @@
 # Runs in CI via the `alert-rules` job (promtool check+test, ADR 0088); locally:
 #   promtool test rules deploy/prometheus/tests/worldmonitor.rules.test.yml
 #
-# Covers all 8 alerts (DriverDown, ResolutionWedged, ConnectorInstanceHardDisabled,
-# ResolvePassTimingOut, ErQueueBacklogHigh, IngestDeadLettersPresent, MergesParkedForReview,
+# Covers all 9 alerts (DriverDown, ResolutionWedged, ConnectorInstanceHardDisabled,
+# ConnectorSuccessStale (re-review #9), ResolvePassTimingOut, ErQueueBacklogHigh,
+# IngestDeadLettersPresent, MergesParkedForReview,
 # ProjectionDivergenceHigh (ADR 0102)) with fire + no-fire cases. exp_alerts assert the FULL alert
 # (labels AND annotations) — promtool compares both, so the rendered summary/description here
 # must match the rule verbatim. The folded
@@ -89,6 +90,54 @@ tests:
     alert_rule_test:
       - eval_time: 10m
         alertname: ResolutionWedged
+        exp_alerts: []
+
+  # -----------------------------------------------------------------------
+  # ConnectorSuccessStale — fires when the last successful ingest is > 4h old
+  # (and the instance HAS succeeded at least once: the `> 0` guard)
+  # -----------------------------------------------------------------------
+  - name: "ConnectorSuccessStale fires when the last success timestamp is > 4h old"
+    interval: 1m
+    input_series:
+      - series: 'worldmonitor_connector_last_success_timestamp{connector_id="feeds", instance="ci-1"}'
+        # Last success at t=100s (test clock); by eval the age is far past 14400s. Held flat so
+        # the 30m `for:` window is satisfied.
+        values: "100+0x400"
+    alert_rule_test:
+      - eval_time: 300m
+        alertname: ConnectorSuccessStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              connector_id: feeds
+              instance: ci-1
+            exp_annotations:
+              summary: "Connector feeds stale — no successful ingest in > 4h"
+              description: >
+                Connector instance ci-1 (feeds) last completed
+                a successful ingest more than 4 hours ago (the default cadence is hourly, with
+                exponential backoff on failure, ADR 0054). Check the driver logs and the Integrations
+                page; a sustained failure streak eventually hard-disables the instance (ADR 0074).
+
+  - name: "ConnectorSuccessStale does NOT fire for a never-succeeded (0) instance"
+    interval: 1m
+    input_series:
+      - series: 'worldmonitor_connector_last_success_timestamp{connector_id="feeds", instance="ci-2"}'
+        values: "0+0x400"
+    alert_rule_test:
+      - eval_time: 300m
+        alertname: ConnectorSuccessStale
+        exp_alerts: []
+
+  - name: "ConnectorSuccessStale does NOT fire for a recent success"
+    interval: 1m
+    input_series:
+      - series: 'worldmonitor_connector_last_success_timestamp{connector_id="feeds", instance="ci-3"}'
+        # Success at t=170m (10200s); at eval t=300m the age is 7800s < 14400s.
+        values: "10200+0x400"
+    alert_rule_test:
+      - eval_time: 300m
+        alertname: ConnectorSuccessStale
         exp_alerts: []
 
   # -----------------------------------------------------------------------
