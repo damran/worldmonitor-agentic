@@ -71,7 +71,7 @@ def build_oauth(settings: Settings) -> OAuth:
     oauth.register(
         name="zitadel",
         client_id=settings.zitadel_client_id,
-        client_secret=settings.zitadel_client_secret,
+        client_secret=settings.zitadel_client_secret.get_secret_value(),
         server_metadata_url=settings.oidc_discovery_url,
         client_kwargs={"scope": "openid profile email", "code_challenge_method": "S256"},
     )

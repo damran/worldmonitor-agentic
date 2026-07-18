@@ -163,7 +163,7 @@ def create_app(
     # cannot cross-validate against another (ADR 0068 security fix).
     app.add_middleware(
         SessionMiddleware,
-        secret_key=settings.session_secret_key or secrets.token_urlsafe(32),
+        secret_key=settings.session_secret_key.get_secret_value() or secrets.token_urlsafe(32),
         same_site="lax",
         https_only=settings.environment not in {"development", "test"},
     )

@@ -49,10 +49,10 @@ class Settings(BaseSettings):
     zitadel_client_id: str = ""
     # Confidential-client secret for the browser OIDC authorization-code flow (ADR 0068). Empty
     # default; fail-closed in prod when auth is configured (validate_production_secrets).
-    zitadel_client_secret: str = ""
+    zitadel_client_secret: SecretStr = SecretStr("")
     # Signs the Starlette SessionMiddleware cookie that carries the browser session principal
     # (ADR 0068). An empty/guessable key would let anyone forge a session — fail-closed in prod.
-    session_secret_key: str = ""
+    session_secret_key: SecretStr = SecretStr("")
     # Absolute public base URL (e.g. ``https://wm.example.com``) used to build the absolute OIDC
     # ``redirect_uri`` (``app_base_url`` + ``/auth/callback``) — NOT a Host-derived URL (ADR 0068).
     app_base_url: str = ""
@@ -71,12 +71,12 @@ class Settings(BaseSettings):
     # --- Backing services (URLs only; clients land in later phases) ---
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
-    neo4j_password: str = ""
+    neo4j_password: SecretStr = SecretStr("")
     postgres_dsn: str = "postgresql://worldmonitor:worldmonitor@localhost:5432/worldmonitor"
     redis_url: str = "redis://localhost:6379/0"
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "worldmonitor"
-    minio_secret_key: str = ""
+    minio_secret_key: SecretStr = SecretStr("")
     minio_secure: bool = False
     landing_bucket: str = "landing"
 
@@ -388,11 +388,11 @@ class Settings(BaseSettings):
     # --- Secrets ---
     # Fernet key for encrypting connector-instance config at rest. Required in
     # any environment that persists connector configs; empty default fails fast.
-    config_encryption_key: str = ""
+    config_encryption_key: SecretStr = SecretStr("")
     # Comma/whitespace-separated decryption-only OLD keys (ADR 0058). During a key
     # rotation the previous CONFIG_ENCRYPTION_KEY moves here so tokens written under it
     # still decrypt; empty default => one-key cipher == today's behaviour.
-    config_encryption_key_fallbacks: str = ""
+    config_encryption_key_fallbacks: SecretStr = SecretStr("")
 
     @model_validator(mode="after")
     def _validate_abstain_band(self) -> "Settings":
@@ -474,15 +474,19 @@ class Settings(BaseSettings):
         if self.environment in _LOCAL_ENVIRONMENTS:
             return
 
-        if not self.config_encryption_key or self.config_encryption_key == "change-me":
+        cek = self.config_encryption_key.get_secret_value()
+        if not cek or cek == "change-me":
             raise ValueError(
                 "config_encryption_key is a placeholder/empty value; set a real secret "
                 f"(non-development environment={self.environment!r} refuses placeholders, ADR 0061)"
             )
 
+        # DSN-shaped fields stay plain str (their value IS a composite URL, consumed as a string
+        # everywhere); the pure credentials are SecretStr and unwrap here only (re-review #7).
         guarded_fields = ("postgres_dsn", "redis_url", "neo4j_password", "minio_secret_key")
         for field in guarded_fields:
-            value: str = getattr(self, field)
+            raw = getattr(self, field)
+            value: str = raw.get_secret_value() if isinstance(raw, SecretStr) else raw
             for marker in _PLACEHOLDER_SECRET_MARKERS:
                 if marker in value:
                     raise ValueError(
@@ -496,9 +500,8 @@ class Settings(BaseSettings):
         # whether or not OIDC is wired. An empty/guessable ``session_secret_key`` therefore lets
         # anyone forge a browser session REGARDLESS of ``auth_configured`` — so it is required
         # outside the local/test environments unconditionally (NOT gated behind auth_configured).
-        if not self.session_secret_key or any(
-            marker in self.session_secret_key for marker in _PLACEHOLDER_SECRET_MARKERS
-        ):
+        ssk = self.session_secret_key.get_secret_value()
+        if not ssk or any(marker in ssk for marker in _PLACEHOLDER_SECRET_MARKERS):
             raise ValueError(
                 "session_secret_key is a placeholder/empty value; set a real secret "
                 f"(non-development environment={self.environment!r} refuses placeholders, ADR 0068)"
@@ -508,9 +511,9 @@ class Settings(BaseSettings):
         # browser OIDC flow is actually wired up (``zitadel_domain`` + ``client_id``) — a
         # confidential client cannot ship without its secret. With auth unconfigured no OIDC client
         # is built, so it is never read.
+        zcs = self.zitadel_client_secret.get_secret_value()
         if self.auth_configured and (
-            not self.zitadel_client_secret
-            or any(marker in self.zitadel_client_secret for marker in _PLACEHOLDER_SECRET_MARKERS)
+            not zcs or any(marker in zcs for marker in _PLACEHOLDER_SECRET_MARKERS)
         ):
             raise ValueError(
                 "zitadel_client_secret is a placeholder/empty value but auth is configured; set a "

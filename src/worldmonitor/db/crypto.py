@@ -35,8 +35,8 @@ class ConfigCipher:
     def from_settings(cls, settings: Settings | None = None) -> ConfigCipher:
         """Build a cipher from the process settings (primary + fallback keys)."""
         resolved = settings or get_settings()
-        fallbacks = _parse_fallbacks(resolved.config_encryption_key_fallbacks)
-        return cls(resolved.config_encryption_key, fallbacks)
+        fallbacks = _parse_fallbacks(resolved.config_encryption_key_fallbacks.get_secret_value())
+        return cls(resolved.config_encryption_key.get_secret_value(), fallbacks)
 
     @staticmethod
     def generate_key() -> str:
