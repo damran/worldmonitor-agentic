@@ -29,7 +29,7 @@ See [`docs/40_ROADMAP.md`](docs/40_ROADMAP.md) for the authoritative milestone s
 ## Quickstart (dashboard)
 
 ```bash
-cp .env.example .env                                          # fill in values first
+uv run python scripts/dev/gen_env.py    # generates .env with strong random secrets
 docker compose -f deploy/compose.yaml --env-file .env up -d
 # then open http://localhost:8000/app
 ```
@@ -54,7 +54,7 @@ uv run pre-commit install   # enable git hooks
 ### Local stack
 
 ```bash
-cp .env.example .env                                          # fill in values first
+uv run python scripts/dev/gen_env.py    # generates .env with strong random secrets
 docker compose -f deploy/compose.yaml --env-file .env up -d   # core services
 ./scripts/dev/zitadel_provision.sh                            # create the OIDC apps
 ```

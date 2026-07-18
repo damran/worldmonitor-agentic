@@ -22,7 +22,10 @@
 ## 1. Deploy the always-on stack
 
 ```bash
-cp .env.example .env    # fill values (or copy your maintained host .env)
+# One command generates .env with strong random secrets satisfying every template
+# constraint (32-char masterkey, Fernet key, MinIO root==app creds, DSN-embedded
+# passwords, Zitadel complexity). Or copy your maintained host .env instead.
+uv run python scripts/dev/gen_env.py
 docker compose -f deploy/compose.yaml --env-file .env up -d
 ./scripts/dev/zitadel_provision.sh     # once; idempotent — paste ZITADEL_* back into .env
 docker compose -f deploy/compose.yaml ps           # everything healthy
