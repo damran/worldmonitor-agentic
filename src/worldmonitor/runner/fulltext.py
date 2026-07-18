@@ -18,6 +18,9 @@ arrival rate, exactly like extraction's LLM cost. Best-effort by design — an e
 outruns this pass simply processes that article title-only.
 """
 
+# pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
+# pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
+# (lxml ships no stubs — same file-scoped idiom as resolution/eval.py for pandas/splink.)
 from __future__ import annotations
 
 import logging
