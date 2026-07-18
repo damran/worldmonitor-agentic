@@ -46,6 +46,25 @@ The three non-circularity invariants (ADR 0079 §"The non-circularity invariant"
   label set byte-identical.
 * **N3** — every silver row carries ``clerical_score=None``; :func:`persist_silver_pairs`
   asserts this at the write boundary.
+
+**Candidate blocking (ADR 0085 follow-up, WP-1 D2 — ``docs/reviews/
+GATE_WP1_MEASUREMENT_SPEC.md``):** :func:`build_silver_pairs` no longer evaluates the full O(n²)
+cross-product of entities. Instead, for each anchor property in :data:`ANCHOR_PROPERTIES` it forms
+``S_prop`` — the entities carrying >=1 non-empty value for that property — and generates candidate
+pairs as the union, over every property, of the within-``S_prop`` pairs (canonical-keyed,
+deduplicated); the per-pair classification itself is UNCHANGED. This is EXACT-equivalent, not an
+approximation: a pair outside every ``S_prop × S_prop`` combination has, for every anchor property,
+at least one side with no value at all — the same ``if not av or not bv: continue`` guard the
+classifier already applies per-tier — so it was ALWAYS going to abstain in the unblocked loop too;
+omitting it from the candidate set is therefore byte-identical output (proven by
+``tests/property/test_prop_silver_blocking.py``, a `@given` equivalence test against a
+self-contained copy of the pre-blocking double-loop semantics).
+
+**Residual revisit trigger:** the labelled NEGATIVES this module produces are, by construction,
+inherently pairwise WITHIN one anchor block (whichever tier's ``S_prop`` the conflicting pair
+shares) — there is no cross-block negative sampling. If any single ``S_prop`` grows past roughly
+10k members, the within-block O(|S_prop|²) pair count becomes the new bottleneck and negative
+sampling would need its own ADR; this module does not attempt that today.
 """
 
 from __future__ import annotations
@@ -222,7 +241,7 @@ def build_silver_pairs(entities: Sequence[FtmEntity]) -> list[GoldPair]:
         return []
 
     # Pre-compute anchor values, jurisdiction values, and source_ids once per entity
-    # (O(n) cache, O(n²) pair loop).
+    # (O(n) cache; candidate generation + pair loop are BLOCKED — see below, ADR 0085 / WP-1 D2).
     anchor_cache: dict[str, dict[str, frozenset[str]]] = {}
     jurisdiction_cache: dict[str, frozenset[str]] = {}
     source_cache: dict[str, str | None] = {}
@@ -234,84 +253,109 @@ def build_silver_pairs(entities: Sequence[FtmEntity]) -> list[GoldPair]:
         prov = get_provenance(e)
         source_cache[eid] = prov.source_id if prov is not None else None
 
-    # Evaluate all O(n²) pairs and collect into a canonical-keyed dict (de-dup on (left, right)).
+    # ---------------------------------------------------------------------------------------
+    # Candidate generation — anchor-key BLOCKING (WP-1 D2, ``docs/reviews/
+    # GATE_WP1_MEASUREMENT_SPEC.md``), replacing the full O(n²) cross-product. For each anchor
+    # property, ``S_prop`` is the set of entity ids carrying >=1 (non-empty) value for that
+    # property; the candidate set is the union, over every ``ANCHOR_PROPERTIES`` entry, of ALL
+    # within-``S_prop`` pairs (canonical-keyed, deduplicated) — NOT just pairs that happen to
+    # SHARE the identical value, because the classifier below also needs to see CONFLICTING
+    # (disjoint, both-non-empty) value pairs within a tier to emit ``non_match``.
+    #
+    # EXACT-EQUIVALENCE ARGUMENT (proven byte-for-byte by
+    # ``tests/property/test_prop_silver_blocking.py``): a pair (a, b) outside EVERY
+    # ``S_prop × S_prop`` combination has, for EVERY anchor property, at least one side with an
+    # EMPTY value set — precisely the ``if not av or not bv: continue`` guard the per-pair
+    # classifier below applies to every tier. Such a pair therefore has ``has_shared ==
+    # has_conflict == False`` for every property in BOTH the globally-unique and the
+    # jurisdiction-scoped tier, in the ORIGINAL unblocked loop too — it always ABSTAINS. Omitting
+    # it from the candidate set is therefore byte-identical to generating and then classifying it:
+    # emitting nothing for a pair that was always going to emit nothing.
+    #
+    # RESIDUAL REVISIT TRIGGER: the labelled NEGATIVES this module produces are, by construction,
+    # inherently pairwise WITHIN one anchor block (S_prop for whichever tier conflicted) — there
+    # is no cross-block negative sampling. If any single ``S_prop`` grows past roughly 10k members
+    # (e.g. a globally-popular anchor property saturating one dataset), the within-block
+    # O(|S_prop|²) candidate count itself becomes the bottleneck and negative sampling would need
+    # its own ADR (this module does not attempt that — flagged here as the known scaling edge).
+    # ---------------------------------------------------------------------------------------
+    candidate_keys: set[tuple[str, str]] = set()
+    for prop in ANCHOR_PROPERTIES:
+        populated = [eid for eid in anchor_cache if anchor_cache[eid][prop]]
+        for i in range(len(populated)):
+            for j in range(i + 1, len(populated)):
+                candidate_keys.add(_canonical(populated[i], populated[j]))
+
+    # Evaluate every candidate pair (the UNCHANGED per-pair classification, ADR 0085 ordering) and
+    # collect into a canonical-keyed dict.
     by_pair: dict[tuple[str, str], GoldPair] = {}
-    for i in range(n):
-        for j in range(i + 1, n):
-            a_id = records[i].id
-            b_id = records[j].id
-            assert a_id is not None and b_id is not None
-            if a_id == b_id:
-                continue  # no self-pair (should be impossible via the range, but safe)
+    for key in candidate_keys:
+        a_id, b_id = key
 
-            key = _canonical(a_id, b_id)
-            if key in by_pair:
-                continue  # already resolved for this (left, right) pair
+        a_anchors = anchor_cache[a_id]
+        b_anchors = anchor_cache[b_id]
+        a_jur = jurisdiction_cache[a_id]
+        b_jur = jurisdiction_cache[b_id]
+        a_src = source_cache[a_id]
+        b_src = source_cache[b_id]
 
-            a_anchors = anchor_cache[a_id]
-            b_anchors = anchor_cache[b_id]
-            a_jur = jurisdiction_cache[a_id]
-            b_jur = jurisdiction_cache[b_id]
-            a_src = source_cache[a_id]
-            b_src = source_cache[b_id]
+        # Step 1: compute has_shared + has_conflict INDEPENDENTLY of the source check
+        # (ADR 0085 Finding 2 — contradiction detection must precede the source gate).
+        has_shared = False
+        has_conflict = False
 
-            # Step 1: compute has_shared + has_conflict INDEPENDENTLY of the source check
-            # (ADR 0085 Finding 2 — contradiction detection must precede the source gate).
-            has_shared = False
-            has_conflict = False
+        # Globally-unique tier: a shared value alone is definitive; a conflict is definitive.
+        for prop in GLOBALLY_UNIQUE:
+            av = a_anchors[prop]
+            bv = b_anchors[prop]
+            if not av or not bv:
+                continue  # at least one side empty — no signal for this anchor type
+            if av & bv:
+                has_shared = True
+            else:
+                has_conflict = True
 
-            # Globally-unique tier: a shared value alone is definitive; a conflict is definitive.
-            for prop in GLOBALLY_UNIQUE:
+        # Jurisdiction-scoped tier: signal only when jurisdiction/country corroborates.
+        if _jurisdictions_corroborate(a_jur, b_jur):
+            for prop in JURISDICTION_SCOPED:
                 av = a_anchors[prop]
                 bv = b_anchors[prop]
                 if not av or not bv:
-                    continue  # at least one side empty — no signal for this anchor type
+                    continue
                 if av & bv:
                     has_shared = True
                 else:
                     has_conflict = True
+        # else: jurisdiction absent or disjoint → all jurisdiction-scoped anchors abstain
 
-            # Jurisdiction-scoped tier: signal only when jurisdiction/country corroborates.
-            if _jurisdictions_corroborate(a_jur, b_jur):
-                for prop in JURISDICTION_SCOPED:
-                    av = a_anchors[prop]
-                    bv = b_anchors[prop]
-                    if not av or not bv:
-                        continue
-                    if av & bv:
-                        has_shared = True
-                    else:
-                        has_conflict = True
-            # else: jurisdiction absent or disjoint → all jurisdiction-scoped anchors abstain
-
-            # Step 2: classify (contradiction checked BEFORE the source gate — ADR 0085).
-            if has_shared and has_conflict:
-                # Contradiction: drop entirely — never emit as either label.
-                continue
-            elif has_shared:
-                # Positive signal present: match iff distinct sources; abstain if same source.
-                # NEVER emit non_match for a same-source clean positive (ADR 0085 Finding 2).
-                if a_src is not None and b_src is not None and a_src != b_src:
-                    left, right = key
-                    by_pair[key] = GoldPair(
-                        left_id=left,
-                        right_id=right,
-                        label="match",
-                        source=SILVER_SOURCE,
-                        clerical_score=None,
-                    )
-                # else: same source → abstain (no label emitted)
-            elif has_conflict:
-                # Negative signal only — source-independent (ADR 0079 §Decision 4).
+        # Step 2: classify (contradiction checked BEFORE the source gate — ADR 0085).
+        if has_shared and has_conflict:
+            # Contradiction: drop entirely — never emit as either label.
+            continue
+        elif has_shared:
+            # Positive signal present: match iff distinct sources; abstain if same source.
+            # NEVER emit non_match for a same-source clean positive (ADR 0085 Finding 2).
+            if a_src is not None and b_src is not None and a_src != b_src:
                 left, right = key
                 by_pair[key] = GoldPair(
                     left_id=left,
                     right_id=right,
-                    label="non_match",
+                    label="match",
                     source=SILVER_SOURCE,
                     clerical_score=None,
                 )
-            # else: abstain — no label emitted
+            # else: same source → abstain (no label emitted)
+        elif has_conflict:
+            # Negative signal only — source-independent (ADR 0079 §Decision 4).
+            left, right = key
+            by_pair[key] = GoldPair(
+                left_id=left,
+                right_id=right,
+                label="non_match",
+                source=SILVER_SOURCE,
+                clerical_score=None,
+            )
+        # else: abstain — no label emitted
 
     # Deterministic ordering (mirrors gold.build_gold_pairs).
     return sorted(by_pair.values(), key=lambda p: (p.left_id, p.right_id))
