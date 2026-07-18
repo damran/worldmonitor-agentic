@@ -65,7 +65,7 @@ class LandingStore:
         return cls.connect(
             endpoint=cfg.minio_endpoint,
             access_key=cfg.minio_access_key,
-            secret_key=cfg.minio_secret_key,
+            secret_key=cfg.minio_secret_key.get_secret_value(),
             bucket=cfg.landing_bucket,
             secure=cfg.minio_secure,
         )

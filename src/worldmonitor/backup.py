@@ -139,11 +139,10 @@ def _allowed_node_labels() -> frozenset[str]:
     from worldmonitor.settings import get_settings
 
     settings = get_settings()
+    pw = settings.neo4j_password.get_secret_value()
     config: Any = Configuration(
         path=Path("."),
-        db=DatabaseConfig(
-            url=settings.neo4j_uri, username=settings.neo4j_user, password=settings.neo4j_password
-        ),
+        db=DatabaseConfig(url=settings.neo4j_uri, username=settings.neo4j_user, password=pw),
     )
     labels: set[str] = {ENTITY_LABEL, "Ghost"}
     labels.update(str(schema.label) for schema in config.nodes.schemata.values())
@@ -164,11 +163,10 @@ def _allowed_edge_types() -> frozenset[str]:
     from worldmonitor.settings import get_settings
 
     settings = get_settings()
+    pw = settings.neo4j_password.get_secret_value()
     config: Any = Configuration(
         path=Path("."),
-        db=DatabaseConfig(
-            url=settings.neo4j_uri, username=settings.neo4j_user, password=settings.neo4j_password
-        ),
+        db=DatabaseConfig(url=settings.neo4j_uri, username=settings.neo4j_user, password=pw),
     )
     types: set[str] = set()
     types.update(str(schema.label) for schema in config.edges.schemata.values())

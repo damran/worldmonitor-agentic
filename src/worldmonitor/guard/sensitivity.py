@@ -157,11 +157,10 @@ def _risk_labels() -> tuple[str, ...]:
     # (we read the static topic-label map, never the driver). Built identically to graph/writer.py's
     # ``_ftmg_config`` so the Stage-2 risk labels match exactly what the writer projects onto nodes.
     settings = get_settings()
+    pw = settings.neo4j_password.get_secret_value()
     config = Configuration(
         path=Path("."),  # unused: we read config.nodes.topics, never load_entities()
-        db=DatabaseConfig(
-            url=settings.neo4j_uri, username=settings.neo4j_user, password=settings.neo4j_password
-        ),
+        db=DatabaseConfig(url=settings.neo4j_uri, username=settings.neo4j_user, password=pw),
     )
     return tuple(sorted({config.nodes.topics[code].label for code in registry.topic.RISKS}))
 

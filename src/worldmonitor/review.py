@@ -49,9 +49,8 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
     engine = engine_from_settings(settings)
     sessions = session_factory(engine)
-    neo4j = Neo4jClient.connect(
-        uri=settings.neo4j_uri, user=settings.neo4j_user, password=settings.neo4j_password
-    )
+    pw = settings.neo4j_password.get_secret_value()
+    neo4j = Neo4jClient.connect(uri=settings.neo4j_uri, user=settings.neo4j_user, password=pw)
     try:
         if args.command == "list":
             # Pass neo4j so a half-committed sign-off (graph written, audit still pending —
