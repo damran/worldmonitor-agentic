@@ -2,6 +2,7 @@
 
 - **Status:** ACCEPTED (2026-07-18)
 - **Date:** 2026-07-18
+- **human_cosign:** Mithat Akyol 2026-07-18 — confirms the `person_affecting: false` classification (in-session ruling; checker-held gate condition resolved)
 - **human_fork:** false — reversible. The connector is an additive plugin (disable/remove =
   reversal); the `gid` anchor tier is additive to `CANONICAL_ID_FIELDS`/`_PRECEDENCE` and can
   carry no effect on any existing entity (none holds a `mitre_gid` anchor), so removal
