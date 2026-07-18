@@ -119,6 +119,27 @@ def test_derive_returns_empty_without_summary_or_type() -> None:
     assert _derive({"is_event": True, "summary": "", "event_type": ""}) == []
 
 
+def test_event_date_is_the_article_publish_date_when_present() -> None:
+    """WP-2c: an event happened when it was reported, not when the extraction pass ran."""
+    article = {**_ARTICLE, "published": "2026-07-15T08:30:00+00:00"}
+    entities = derive_entities(
+        article, {"is_event": True, "summary": "A thing"}, retrieved_at="2026-07-18T00:00:00Z"
+    )
+    event = next(e for e in entities if e.schema.name == "Event")
+    assert list(event.get("date")) == ["2026-07-15T08:30:00+00:00"]
+
+
+def test_event_date_falls_back_to_retrieved_at() -> None:
+    """No publish date (or a malformed one) → the extraction timestamp, never a bad FtM date."""
+    for published in (None, "", "yesterday-ish", "12 Jul 2026"):
+        article = {**_ARTICLE, "published": published}
+        entities = derive_entities(
+            article, {"is_event": True, "summary": "A thing"}, retrieved_at="2026-07-18T00:00:00Z"
+        )
+        event = next(e for e in entities if e.schema.name == "Event")
+        assert list(event.get("date")) == ["2026-07-18T00:00:00Z"], f"published={published!r}"
+
+
 def test_derive_precise_geo_emits_address_for_known_city() -> None:
     """A known city (Slice F) yields a precise FtM Address linked to the Event; the Event then
     carries NO country (so /points plots the precise pin, not a duplicate country-centroid dot)."""
@@ -255,6 +276,8 @@ def test_select_query_gates_to_feeds_and_excludes_processed() -> None:
     assert "'feeds' IN n.datasets" in captured["q"]
     assert "n.extraction_done IS NULL" in captured["q"]
     assert "bluesky" not in captured["q"]
+    # WP-2c: the selection must surface the publish date so the derived Event can carry it.
+    assert "AS published" in captured["q"]
 
 
 def _sessions() -> MagicMock:

@@ -46,6 +46,9 @@ _SUMMARY_MAX = 240
 _NAME_MAX = 160
 _MAX_ACTORS = 5
 _2LETTER = re.compile(r"^[a-z]{2}$")
+# An FtM-safe ISO-8601 date prefix (YYYY[-MM[-DD]]…) — the shape the feeds connector's
+# ``_entry_date`` normalizer emits. Anything else falls back to the extraction timestamp.
+_ISO_DATE_PREFIX = re.compile(r"^\d{4}(-\d{2}(-\d{2})?)?([T ].*)?$")
 
 # The extraction contract. Kept deliberately small + strict so a weak local model can satisfy it;
 # the parser is defensive regardless (a wrong shape is dropped, never trusted).
@@ -282,7 +285,18 @@ def derive_entities(
     # would let a crafted headline stamp a risk label on the Event, flipping adjacent (INVOLVED)
     # real actors to sensitive/parked via the catastrophic-merge sensitivity guard. It lives only in
     # the Event's ``name`` (display), never the risk model.
-    event_props: dict[str, list[str]] = {"name": [name], "date": [retrieved_at]}
+    #
+    # Event ``date`` = the article's PUBLISH date when the feed carried one (WP-2c) — an event
+    # happened when it was reported, not when the extraction pass got to it. The extraction
+    # timestamp is only the fallback for date-less feed entries; a non-ISO-shaped value also falls
+    # back (never trust a malformed feed date into a validated FtM property).
+    published = article.get("published")
+    event_date = (
+        published.strip()
+        if isinstance(published, str) and _ISO_DATE_PREFIX.match(published.strip())
+        else retrieved_at
+    )
+    event_props: dict[str, list[str]] = {"name": [name], "date": [event_date]}
     if summary:
         event_props["summary"] = [summary]
     if place:
@@ -324,6 +338,7 @@ def select_feed_articles(neo4j: Neo4jClient, *, limit: int) -> list[dict[str, An
         "MATCH (n:Entity) "
         "WHERE 'Article' IN labels(n) AND 'feeds' IN n.datasets AND n.extraction_done IS NULL "
         "RETURN n.id AS id, head(n.title) AS title, head(n.summary) AS summary, "
+        "coalesce(head(n.publishedAt), head(n.date)) AS published, "
         "n.prov_source_record AS source_record "
         "ORDER BY coalesce(head(n.publishedAt), head(n.date), n.prov_retrieved_at) DESC "
         f"LIMIT {max(1, int(limit))}"
