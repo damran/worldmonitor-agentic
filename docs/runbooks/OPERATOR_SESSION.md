@@ -60,9 +60,13 @@ Leave the stack running **≥24–48 h** so the candidate corpus accumulates (OF
 "real-seed connector run" blocker. Then produce the calibration evidence:
 
 ```bash
-# Label-sufficiency report (lands with WP-1 this stretch — the WP-1 PR updates this line
-# with the exact CLI): labels by source, 0.5–0.95 boundary coverage, B³/CEAFe/over-merge CIs.
+docker compose -f deploy/compose.yaml exec api python -m worldmonitor.resolution.measure
 ```
+
+Prints the label-sufficiency report: labels by source, the 0.5–0.95 boundary-band coverage, and
+(once the ledger has resolved anything) bootstrap B³/CEAFe/over-merge confidence intervals. Add
+`--json` for a machine-readable render, or `--boot N` / `--seed N` to change the bootstrap sample
+count / RNG seed (both default to 200 / 0).
 
 **Report back:** the sufficiency report output. Threshold promotion itself stays human-gated —
 this session only produces the measurement.
