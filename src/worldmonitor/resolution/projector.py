@@ -276,17 +276,17 @@ def _load_alias_map(session: Session) -> dict[str, str]:
     }
 
 
-def build_survivor_of(session: Session) -> Callable[[str], str]:
-    """Build the transitive ``survivor_of`` resolver over the FULL canonical_id_ledger.
+def survivor_of_from_alias_map(alias_map: dict[str, str]) -> Callable[[str], str]:
+    """PURE builder of the transitive ``survivor_of`` resolver from an ALREADY-LOADED alias map.
 
-    A pure extraction (ADR 0102 D9) of the F2 deterministic supersession-only ledger read +
-    the cycle-guarded fixed-point walk :func:`project` uses to fold the log. Exported so the
-    projection rebuild-and-diff guard (``runner.driver``) can apply the IDENTICAL referent
-    semantics as the fold when measuring divergence — no second, drifting implementation.
-    :func:`worldmonitor.resolution.canonical.resolve_durable` is single-hop/per-alias and is
-    NOT usable here (the transitive walk below is required).
+    The exact cycle-guarded fixed-point walk :func:`build_survivor_of` has always performed,
+    extracted (Gate 3b LOW-1, ADR 0114 D-7) so it can be built from a map that was already read
+    ONCE elsewhere — the driver's diff guard, or a caller passing
+    ``project(..., alias_map=..., survivor_of=...)`` — without a second ``canonical_id_ledger``
+    read. No DB/Neo4j/session access; the map must be SUPERSESSION-only
+    (``canonical_alias != canonical_id`` rows, :func:`_load_alias_map`'s contract) so a
+    coexisting self-row never shadows the survivor mapping.
     """
-    alias_map = _load_alias_map(session)
 
     def survivor_of(cid: str) -> str:
         """Resolve a (possibly superseded) canonical_id to its durable survivor.
@@ -305,12 +305,42 @@ def build_survivor_of(session: Session) -> Callable[[str], str]:
     return survivor_of
 
 
+def load_alias_map_and_survivor_of(
+    session: Session,
+) -> tuple[dict[str, str], Callable[[str], str]]:
+    """ONE ledger read; returns BOTH the alias map and its ``survivor_of`` resolver (LOW-1).
+
+    The single-read seam: the fold, the WPI-2 completeness check, and the driver's divergence
+    measure can all share this one consistent ledger snapshot instead of three separate reads
+    that a concurrent promote could interleave (READ COMMITTED — each read otherwise sees its
+    own instant).
+    """
+    alias_map = _load_alias_map(session)
+    return alias_map, survivor_of_from_alias_map(alias_map)
+
+
+def build_survivor_of(session: Session) -> Callable[[str], str]:
+    """Build the transitive ``survivor_of`` resolver over the FULL canonical_id_ledger.
+
+    A pure extraction (ADR 0102 D9) of the F2 deterministic supersession-only ledger read +
+    the cycle-guarded fixed-point walk :func:`project` uses to fold the log. Exported so the
+    projection rebuild-and-diff guard (``runner.driver``) can apply the IDENTICAL referent
+    semantics as the fold when measuring divergence — no second, drifting implementation.
+    :func:`worldmonitor.resolution.canonical.resolve_durable` is single-hop/per-alias and is
+    NOT usable here (the transitive walk is required). Since LOW-1 this is a thin wrapper over
+    :func:`load_alias_map_and_survivor_of`.
+    """
+    return load_alias_map_and_survivor_of(session)[1]
+
+
 def project(
     session: Session,
     target: Neo4jClient,
     *,
     full_rebuild: bool = False,
     checkpoint_id: str = _TARGET_ID,
+    survivor_of: Callable[[str], str] | None = None,
+    alias_map: dict[str, str] | None = None,
 ) -> ProjectionResult:
     """Fold the statement + decision log into the isolated ``target`` Neo4j.
 
@@ -329,6 +359,14 @@ def project(
                           rebuild-and-diff guard passes ``"projection-diff"`` — a SEPARATE
                           row — so its full-rebuild fold NEVER advances the live projector's
                           own watermark.
+    :param survivor_of:   OPTIONAL pre-built referent resolver (Gate 3b LOW-1). When BOTH this
+                          and ``alias_map`` are supplied they are reused for the fold AND the
+                          ``full_rebuild``-gated completeness check — ONE ledger read shared
+                          across the whole diff run instead of per-step re-reads a concurrent
+                          promote could interleave. Supplying only one of the pair falls back
+                          to the internal single read (both must describe the SAME snapshot).
+    :param alias_map:     The supersession-only alias map ``survivor_of`` was built from
+                          (:func:`load_alias_map_and_survivor_of`'s first element).
     :returns: :class:`ProjectionResult` with counts for the tests + future observability.
     """
     # --- Read current checkpoint ---
@@ -371,7 +409,12 @@ def project(
     statements_deduped = statements_read - unique_stmt_ids
 
     # --- Build survivor_of (ADR 0100 D2 global-fold-is-truth; extracted, ADR 0102 D9) ---
-    survivor_of = build_survivor_of(session)
+    # LOW-1 (ADR 0114 D-7): when the caller supplies BOTH the pre-built resolver and the map it
+    # was built from, reuse them — one ledger read shared by the fold, the completeness check
+    # below, and (in the diff guard) the divergence measure. Otherwise ONE internal read serves
+    # both uses here (previously the completeness check performed its own second read).
+    if survivor_of is None or alias_map is None:
+        alias_map, survivor_of = load_alias_map_and_survivor_of(session)
 
     # --- INV-ALIAS-COCOMMIT fold-side completeness check (Gate WPI-2 / ADR 0111) ---
     # full_rebuild-gated ONLY: under full_rebuild the statement rows just read above are the
@@ -384,7 +427,7 @@ def project(
     # (a context-only survivor materialises no node; that residual is WPI-1 / ADR 0112).
     if full_rebuild:
         incomplete = find_incomplete_aliased_survivors(
-            _load_alias_map(session),
+            alias_map,
             statement_rows,
             survivor_of=survivor_of,
         )

@@ -123,12 +123,19 @@ and the driver log for divergence or `ProjectionDiffMisconfiguredError` refusals
 
 ## 7. One-time reconciliation instruments (PR #185; §4 of the cutover plan)
 
-Run the two-directional + count + label reconciliation over the real corpus:
-`reconcile_counts`, `compare_labels`, `find_erased_source_residue`,
-`find_copresent_value_divergence` from `worldmonitor.resolution.reconciliation`
-(a `python -m` CLI wrapper lands with WP-3 this stretch — that PR updates this section with the
-one-liner). **All four must PASS** — `compare_labels` and `find_copresent_value_divergence` are the
-executed closure of the two red-team CRITICALs (topic-label loss; erased-value resurrection).
+Run the two-directional + count + label reconciliation over the real corpus (requires the §6
+`PROJECTION_DIFF_*` settings — the same isolated target; the CLI double-fences exactly like the
+scheduled guard and exits 2 if the target is not provably distinct):
+
+```bash
+docker compose -f deploy/compose.yaml exec driver \
+  python -m worldmonitor.resolution.reconcile_cli
+```
+
+**Exit 0 = all four instruments PASS** (counts R11/R11b, label parity §3.1, erased-source residue
+R9b, co-present value divergence R9c) — `compare_labels`' loss direction and
+`find_erased_source_residue` are the executed closure of the two red-team CRITICALs (topic-label
+loss; erased-value resurrection). Paste the printed report into §10.
 
 ## 8. Hermes S4 — deploy, verify, first Telegram brief (Phase-3 resume condition)
 
