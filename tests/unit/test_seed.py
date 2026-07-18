@@ -49,3 +49,16 @@ def test_curated_feed_set_is_multi_category() -> None:
     """The seed spans categories (world/conflict/cyber/finance/energy/disaster) — not one topic."""
     categories = {spec.category for spec in SEED_CONNECTORS if spec.connector_id == "feeds"}
     assert len(categories) >= 5, f"expected a broad category spread, got {categories}"
+
+
+def test_feed_urls_are_unique() -> None:
+    """A duplicate URL would seed two instances polling the same feed (double ingest)."""
+    urls = [spec.natural_key for spec in SEED_CONNECTORS if spec.connector_id == "feeds"]
+    assert len(urls) == len(set(urls)), "duplicate feed URL in _CURATED_FEEDS"
+
+
+def test_feed_breadth_floor() -> None:
+    """WP-2a (2026-07-18) expanded the set to ~50; a regression below the floor should be loud."""
+    feeds = [spec for spec in SEED_CONNECTORS if spec.connector_id == "feeds"]
+    assert len(feeds) >= 45, f"expected >=45 curated feeds, got {len(feeds)}"
+    assert all(spec.enabled for spec in feeds), "curated feeds seed enabled"
