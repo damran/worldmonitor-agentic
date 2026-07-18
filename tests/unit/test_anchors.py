@@ -191,7 +191,14 @@ def test_unanchored_merge_keeps_wmc(ledger_session: Session) -> None:
 def test_durable_precedence_is_separate_from_canonical_id_fields() -> None:
     """The durable precedence reads FtM identifier props / ``wm_anchor_*`` context — it does NOT
     reuse ``CANONICAL_ID_FIELDS`` (wrong storage keys, no regNo/taxNo, GeoNames is a place anchor).
-    Pins that the existing anchor vocabulary is unchanged by the gate."""
-    assert CANONICAL_ID_FIELDS == ("wikidata_id", "geonames_id", "lei", "opencorporates_id")
+    Pins the EXACT anchor vocabulary so it can only grow by a recorded decision: the original
+    four (Gate B-front) + ``mitre_gid`` (ADR 0117 — the ATT&CK G-id namespace)."""
+    assert CANONICAL_ID_FIELDS == (
+        "wikidata_id",
+        "geonames_id",
+        "lei",
+        "opencorporates_id",
+        "mitre_gid",
+    )
     # name + country only -> no durable anchor (geonames_id/opencorporates_id are not v0 anchors).
     assert canonical.pick_anchor([_company("a")]) is None

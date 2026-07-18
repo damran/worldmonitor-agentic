@@ -169,6 +169,22 @@ SEED_CONNECTORS: tuple[SeedSpec, ...] = (
         category="sanctions",
     ),
     SeedSpec("bluesky", "firehose", {}, enabled=False, category="social"),
+    # Named-threat-actor substrate for the CTI persona (ADR 0094 D4) — the ATT&CK intrusion-set
+    # catalog (~180 groups), anchored on `mitre_gid` (Gate S-3, ADR 0117). Pull-only, free, tiny.
+    # `url` is spelled out explicitly (matching the connector's own pinned default) so an operator
+    # sees + can override the exact bundle version from the Integrations UI (ADR 0117 residual c).
+    SeedSpec(
+        "mitre_attack",
+        "enterprise",
+        {
+            "url": (
+                "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/"
+                "enterprise-attack/enterprise-attack-19.1.json"
+            )
+        },
+        enabled=True,
+        category="cti",
+    ),
 )
 
 

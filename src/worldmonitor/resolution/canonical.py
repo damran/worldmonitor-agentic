@@ -124,7 +124,13 @@ _ANCHOR_CONTEXT_PREFIX = "wm_anchor_"
 
 @dataclass(frozen=True, slots=True)
 class _Tier:
-    """One durable-precedence tier (anchor kind + the FtM property + context key it reads)."""
+    """One durable-precedence tier (anchor kind + the FtM property + context key it reads).
+
+    ``ftm_prop`` is normally a real FtM identifier property name (``wikidataId``, ``leiCode``, …).
+    An EMPTY ``ftm_prop`` marks a **context-only** tier (Gate S-3, ADR 0117) — the anchor kind has
+    no FtM property home, so :func:`_tier_values` skips the property read entirely and reads only
+    the ``wm_anchor_*`` context.
+    """
 
     kind: str
     ftm_prop: str
@@ -138,12 +144,25 @@ def _is_lei(value: str) -> bool:
     return len(value) == 20 and value.isalnum()
 
 
-# QID > LEI > regNo > taxNo. regNo/taxNo are normalized via the FtM ``identifier`` type exactly as
-# ADR 0039's ``_distinguishing_ids`` does, so the same government id reconciles whether it was
-# stored as ``registrationNumber`` on one record and ``taxNumber`` on another.
+_GID_RE = re.compile(r"^G\d{4}$")
+
+
+def _is_gid(value: str) -> bool:
+    """A MITRE ATT&CK intrusion-set G-id shape (ADR 0117): a literal ``G`` + exactly 4 digits."""
+    return bool(_GID_RE.fullmatch(value))
+
+
+# QID > LEI > gid > regNo > taxNo. regNo/taxNo are normalized via the FtM ``identifier`` type
+# exactly as ADR 0039's ``_distinguishing_ids`` does, so the same government id reconciles whether
+# it was stored as ``registrationNumber`` on one record and ``taxNumber`` on another. ``gid`` (Gate
+# S-3, ADR 0117) has no FtM property home — its ``ftm_prop`` is the empty string, a context-only
+# tier (``_tier_values`` skips the FtM property read for it); it reads only the ``wm_anchor_*``
+# context ``ontology.anchors.set_anchor`` writes. Inserted between ``lei`` and ``regno``: it cannot
+# re-anchor any existing entity (none carries a ``mitre_gid`` anchor before this change).
 _PRECEDENCE: tuple[_Tier, ...] = (
     _Tier("qid", "wikidataId", "wikidata_id", normalize=False, valid=is_qid),
     _Tier("lei", "leiCode", "lei", normalize=False, valid=_is_lei),
+    _Tier("gid", "", "mitre_gid", normalize=False, valid=_is_gid),
     _Tier("regno", "registrationNumber", "registration_number", normalize=True, valid=bool),
     _Tier("taxno", "taxNumber", "tax_number", normalize=True, valid=bool),
 )
@@ -161,12 +180,15 @@ def _context_values(entity: FtmEntity, key: str) -> list[str]:
 def _tier_values(entity: FtmEntity, tier: _Tier) -> set[str]:
     """The VALID, normalized anchor values one entity carries at ``tier``.
 
-    Reads the FtM identifier property AND the ``wm_anchor_*`` context, normalizing regNo/taxNo via
-    the FtM ``identifier`` type (ADR 0039) and keeping only values that pass the tier's validity
-    check (``is_qid`` for QID, the 20-char shape for LEI, non-empty for regNo/taxNo).
+    Reads the FtM identifier property (skipped for a context-only tier — an empty ``ftm_prop``,
+    Gate S-3 / ADR 0117) AND the ``wm_anchor_*`` context, normalizing regNo/taxNo via the FtM
+    ``identifier`` type (ADR 0039) and keeping only values that pass the tier's validity check
+    (``is_qid`` for QID, the 20-char shape for LEI, the ``^G\\d{4}$`` shape for gid, non-empty for
+    regNo/taxNo).
     """
     raw: list[str] = []
-    raw.extend(value for value in entity.get(tier.ftm_prop, quiet=True) if value)
+    if tier.ftm_prop:
+        raw.extend(value for value in entity.get(tier.ftm_prop, quiet=True) if value)
     raw.extend(_context_values(entity, tier.context_key))
     values: set[str] = set()
     for value in raw:

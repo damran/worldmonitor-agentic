@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MITRE ATT&CK connector configuration",
+  "description": "Imports the MITRE ATT&CK Enterprise intrusion-set catalog (a pinned attack-stix-data bundle release) as FtM Organization entities anchored on mitre_gid.",
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "title": "Bundle URL",
+      "description": "URL of the versioned enterprise-attack STIX bundle (over the SSRF guard). Falls back to the pinned default release when omitted.",
+      "minLength": 1
+    },
+    "limit": {
+      "type": "integer",
+      "title": "Record limit",
+      "description": "Optional cap on the number of intrusion sets collected (testing / incremental runs).",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false
+}
