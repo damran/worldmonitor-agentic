@@ -2,6 +2,7 @@
 
 - **Status:** ACCEPTED (2026-07-18)
 - **Date:** 2026-07-18
+- **human_cosign:** Mithat Akyol 2026-07-19 — confirms the `person_affecting: false` classification (in-session ruling; checker-verified substance; the matchable finding is recorded as the phase-2 precondition)
 - **human_fork:** false — reversible, operator-directed in-session (the "Build wm:Indicator
   lane" ruling, 2026-07-18). Reversal: remove the wm schema + the connector + the seed row;
   already-written Indicator nodes remain inert provenance-stamped data (or are prunable by
