@@ -222,6 +222,19 @@ SEED_CONNECTORS: tuple[SeedSpec, ...] = (
         enabled=True,
         category="cti",
     ),
+    # IOC substrate for the CTI persona (ADR 0119 slice D, Gate S-2 phase 2) — the abuse.ch SSLBL
+    # SSL Certificate Blacklist CSV export, converging on the SAME shared `wm:Indicator` id scheme
+    # as `feodo`/`threatfox`/`urlhaus` (`ontology.ioc.indicator_id`). Free, anonymous, **CC0**,
+    # pull-only; `url` is spelled out explicitly (matching the connector's own pinned default) so
+    # an operator sees + can override it from the Integrations UI. No `auth_key` here (secret;
+    # operator adds it later if abuse.ch ever gates the endpoint).
+    SeedSpec(
+        "sslbl",
+        "sslblacklist",
+        {"url": "https://sslbl.abuse.ch/blacklist/sslblacklist.csv"},
+        enabled=True,
+        category="cti",
+    ),
 )
 
 
