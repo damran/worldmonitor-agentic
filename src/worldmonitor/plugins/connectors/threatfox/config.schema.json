@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ThreatFox connector configuration",
+  "description": "Imports the abuse.ch ThreatFox recent IOC export as wm:Indicator entities.",
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "title": "Feed URL",
+      "description": "URL of the ThreatFox recent-IOC JSON export (over the SSRF guard). Falls back to the pinned default feed when omitted.",
+      "minLength": 1
+    },
+    "limit": {
+      "type": "integer",
+      "title": "Record limit",
+      "description": "Optional cap on the number of indicators collected (testing / incremental runs).",
+      "minimum": 1
+    },
+    "auth_key": {
+      "type": "string",
+      "title": "Auth-Key",
+      "description": "Optional abuse.ch Auth-Key (a secret; UI password field, vault-encrypted at rest), sent as the Auth-Key HTTP header. Registering a free key at auth.abuse.ch future-proofs this connector against the legacy anonymous endpoint being gated.",
+      "secret": true,
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false
+}

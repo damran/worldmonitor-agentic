@@ -76,6 +76,10 @@ count / RNG seed (both default to 200 / 0).
 **Report back:** the sufficiency report output. Threshold promotion itself stays human-gated —
 this session only produces the measurement.
 
+Optional hardening: register one free Auth-Key at `auth.abuse.ch` and set it on the abuse.ch
+connectors (`feodo`, `threatfox`, and siblings) to future-proof them against the legacy anonymous
+endpoints being gated.
+
 ## 4. Gate 2b backfill RUN (`82_GATE_3B_CUTOVER_PLAN.md` §8, first checkbox)
 
 Dry-run first, review the counts, then commit, then assert completeness:

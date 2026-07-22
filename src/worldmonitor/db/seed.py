@@ -196,6 +196,19 @@ SEED_CONNECTORS: tuple[SeedSpec, ...] = (
         enabled=True,
         category="cti",
     ),
+    # IOC substrate for the CTI persona (ADR 0119 slice B, Gate S-2 phase 2) — the abuse.ch
+    # ThreatFox recent multi-type IOC export (ip:port/domain/url/hash), converging on the SAME
+    # shared `wm:Indicator` id scheme as `feodo` (`ontology.ioc.indicator_id`). Free, legacy
+    # unauthenticated, pull-only; `url` is spelled out explicitly (matching the connector's own
+    # pinned default) so an operator sees + can override it from the Integrations UI. No
+    # `auth_key` here (secret; operator adds it later if abuse.ch gates the endpoint).
+    SeedSpec(
+        "threatfox",
+        "recent",
+        {"url": "https://threatfox.abuse.ch/export/json/recent/"},
+        enabled=True,
+        category="cti",
+    ),
 )
 
 

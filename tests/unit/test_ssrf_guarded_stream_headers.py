@@ -755,3 +755,127 @@ def test_same_host_port_only_change_keeps_sensitive_headers(
         f"port-change redirect. Spec says port-only change must NOT strip. "
         f"hop-2 headers: {hop2}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Gate S-2 phase 2, slice B (ADR 0119) — "auth-key" joins the G-NET-1 denylist
+#
+# The threatfox connector introduces the first `Auth-Key` secret header (abuse.ch's
+# per-endpoint auth scheme). Spec: `docs/decisions/GATE_S2P2_ABUSECH_SIBLINGS_SPEC.md` §5 —
+# "add `auth-key` to `_SENSITIVE_HEADERS` ... so the `Auth-Key` header is stripped on a
+# cross-host redirect / https->http downgrade exactly like `Authorization`". These two tests
+# mirror `test_sensitive_header_stripped_on_cross_host_redirect` /
+# `test_sensitive_header_kept_on_same_host_redirect` mechanics exactly, substituting the
+# `Auth-Key` header for `Authorization`.
+#
+# RED today: `_SENSITIVE_HEADERS` is `frozenset({"authorization", "cookie",
+# "proxy-authorization"})` (net/ssrf.py:32) — "auth-key" is NOT a member, so
+# `_scope_headers` never strips it and it survives onto the cross-host hop.
+# ---------------------------------------------------------------------------
+
+_AUTH_KEY_VAL = "k" * 8  # short dummy — never a real key (secret-scan hook)
+
+
+def test_auth_key_header_stripped_on_cross_host_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G-NET-1 (ADR 0119 slice B): a cross-host 302 MUST NOT carry Auth-Key.
+
+    Hop 1: GET http://example.com/x  (origin)
+    Redirect: 302 -> http://other.example.net/dest  (DIFFERENT host)
+    Hop 2: GET http://other.example.net/dest  -> 200
+
+    Assert: hop-2 request headers do NOT contain Auth-Key.
+
+    RED today: "auth-key" is absent from `_SENSITIVE_HEADERS`, so guarded_stream forwards it
+    unconditionally and this assertion fires on the leak.
+    """
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.host, dict(request.headers)))
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"location": "http://other.example.net/dest"})
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com/x",
+        headers={"Auth-Key": _AUTH_KEY_VAL, "User-Agent": _UA},
+        transport=httpx.MockTransport(_handler),
+    ) as resp:
+        resp.read()
+
+    assert len(calls) == 2, (
+        f"Expected exactly 2 hops (origin + cross-host), got {len(calls)}: {[c[0] for c in calls]}"
+    )
+    hop2 = calls[1][1]
+    assert "auth-key" not in hop2, (
+        f"G-NET-1 VIOLATED (ADR 0119 slice B): Auth-Key leaked to cross-host target "
+        f"'other.example.net'. hop-2 headers: {hop2}"
+    )
+
+
+def test_auth_key_header_kept_on_same_host_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth-Key IS forwarded same-host and on a same-host redirect (no strip triggered).
+
+    Hop 1: GET http://example.com/x  -> 302 -> http://example.com/final
+    Hop 2: GET http://example.com/final  -> 200
+
+    Assert: Auth-Key IS present on hop 2 (same host, no strip).
+
+    This mirrors `test_sensitive_header_kept_on_same_host_redirect` and must be GREEN both
+    before and after the builder's denylist addition — it pins that the fix is scoped to
+    cross-host/downgrade, never a blanket strip.
+    """
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.host, dict(request.headers)))
+        if request.url.path == "/x":
+            return httpx.Response(302, headers={"location": "http://example.com/final"})
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com/x",
+        headers={"Auth-Key": _AUTH_KEY_VAL, "User-Agent": _UA},
+        transport=httpx.MockTransport(_handler),
+    ) as resp:
+        resp.read()
+
+    assert len(calls) == 2, f"Expected 2 hops, got {len(calls)}"
+    hop2 = calls[1][1]
+    assert "auth-key" in hop2, (
+        f"Auth-Key must be kept on a same-host redirect. hop-2 headers: {hop2}"
+    )
+    assert hop2["auth-key"] == _AUTH_KEY_VAL
+
+
+def test_auth_key_header_forwarded_on_original_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth-Key IS forwarded on the ORIGINAL (non-redirected) request — the base happy path
+    a threatfox fetch relies on."""
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_public)
+    seen: dict[str, str] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.headers))
+        return httpx.Response(200, content=b"ok")
+
+    with guarded_stream(
+        "GET",
+        "http://example.com/export/json/recent/",
+        headers={"Auth-Key": _AUTH_KEY_VAL, "User-Agent": _UA},
+        transport=httpx.MockTransport(_handler),
+    ) as resp:
+        resp.read()
+
+    assert seen.get("auth-key") == _AUTH_KEY_VAL, (
+        f"Auth-Key must reach the origin request unchanged. seen={seen}"
+    )

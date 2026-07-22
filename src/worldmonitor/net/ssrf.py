@@ -28,8 +28,12 @@ _DEFAULT_TIMEOUT = 120.0
 
 # G-NET-1 (ADR 0087): headers whose value is scoped to the origin host and must NOT be
 # forwarded to a redirect target on a different host (or on a same-host https→http downgrade).
-# Matched case-insensitively against header key names.
-_SENSITIVE_HEADERS: frozenset[str] = frozenset({"authorization", "cookie", "proxy-authorization"})
+# Matched case-insensitively against header key names. ``auth-key`` is the abuse.ch platform
+# credential (ADR 0119) — a connector-supplied secret outside ``Authorization`` that must never
+# survive a redirect hop, exactly like every other credential here.
+_SENSITIVE_HEADERS: frozenset[str] = frozenset(
+    {"authorization", "cookie", "proxy-authorization", "auth-key"}
+)
 
 
 def _quiet_http_request_logging() -> None:
@@ -186,9 +190,10 @@ def guarded_stream(
 
     ``headers`` is an optional mapping of request headers.  Non-sensitive headers (``User-Agent``,
     ``Accept``, …) are forwarded on every hop.  Sensitive headers (``Authorization``, ``Cookie``,
-    ``Proxy-Authorization`` — see ``_SENSITIVE_HEADERS``) are forwarded ONLY to the original
-    request host; they are stripped before any hop whose host differs from the original request
-    host, or whose scheme is an ``https → http`` downgrade on the same host (G-NET-1, ADR 0087).
+    ``Proxy-Authorization``, ``Auth-Key`` — see ``_SENSITIVE_HEADERS``) are forwarded ONLY to
+    the original request host; they are stripped before any hop whose host differs from the
+    original request host, or whose scheme is an ``https → http`` downgrade on the same host
+    (G-NET-1, ADR 0087).
     The strip is sticky: once triggered it is not reversed even if a later redirect returns to the
     origin host.  Headers default to ``None`` (no additional headers), keeping existing callers
     unaffected.
