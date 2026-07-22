@@ -57,8 +57,11 @@ to True — corrected during the build and recorded in VERIFIED_API.md).
   shared connector-independent id scheme now lives in `ontology/ioc.py::indicator_id`
   (`ioc-<sha1(strip+casefold(value))>`); feodo adopted it before any deployment minted ids, so
   the move was a rename, not a migration. S-2 phase 2 connectors MUST derive ids there; the
-  alternative systemic fix (`score_pairs` consulting `schema.matchable`) remains open as
-  defense-in-depth;
+  alternative systemic fix (`score_pairs` consulting `schema.matchable`) is now **EXECUTED
+  (S-2 phase 2, 2026-07-22, ADR 0119):** `score_pairs` filters `entities` to those whose
+  `schema.matchable` is `True` before any frame construction, so a non-matchable entity never
+  reaches the DataFrame, the blocking rules, the linker, or `predict` — see
+  `docs/decisions/GATE_S2P2_ABUSECH_SIBLINGS_SPEC.md` §4;
   (b) any need for `matchable: true` on Indicators (would require its own ADR + guard
   analysis — do NOT flip it casually); (c) volume growth → per-dataset retention policy;
   (d) the ftm-schema vendoring gate learning to cover wm schemas too (today it guards the

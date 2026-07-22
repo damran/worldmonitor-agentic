@@ -506,10 +506,24 @@ def score_pairs(
 ) -> list[ScoredPair]:
     """Block + score candidate duplicate pairs among ``entities`` (schema-incompatible
     pairs — e.g. an ``Organization`` and a ``Person`` sharing a name — are dropped: they
-    are distinct nodes that cannot merge)."""
-    if len(entities) < 2:
+    are distinct nodes that cannot merge).
+
+    **Non-matchable schemas never enter fuzzy scoring** (Gate S-2 phase 2 slice A, ADR 0119 —
+    executing ADR 0118's revisit-trigger (a) defense-in-depth): ``entities`` is filtered to
+    those whose ``schema.matchable`` is ``True`` BEFORE any frame construction, so a
+    non-matchable entity (e.g. every ``wm:Indicator``) never reaches ``_flatten``, the
+    DataFrame, the blocking rules, the linker, or ``predict`` at all. Such entities converge
+    across sources by their deterministic id only (e.g. ``ontology.ioc.indicator_id``) and can
+    never fuzzy-pair with each other or with a matchable entity. The ``< 2`` short-circuit below
+    applies to this matchable *subset* — a corpus with fewer than two matchable entities
+    (including an all-non-matchable corpus) short-circuits to ``[]`` exactly as an under-2
+    corpus does today. The post-``predict`` ``_schema_compatible`` guard below is unchanged
+    (defense in depth for transitive/sibling clashes among matchable schemas).
+    """
+    matchable = [entity for entity in entities if entity.schema.matchable]
+    if len(matchable) < 2:
         return []
-    frame = pd.DataFrame([_flatten(entity) for entity in entities])
+    frame = pd.DataFrame([_flatten(entity) for entity in matchable])
     settings = SettingsCreator(
         link_type="dedupe_only",
         comparisons=[
@@ -540,7 +554,7 @@ def score_pairs(
     linker = Linker(frame, settings, db_api=DuckDBAPI())  # pyright: ignore[reportArgumentType]
     predictions = linker.inference.predict(threshold_match_probability=predict_threshold)
     result = predictions.as_pandas_dataframe()
-    by_id = {entity.id: entity for entity in entities}
+    by_id = {entity.id: entity for entity in matchable}
     pairs: list[ScoredPair] = []
     for record in result.to_dict("records"):
         left_id, right_id = str(record["unique_id_l"]), str(record["unique_id_r"])
