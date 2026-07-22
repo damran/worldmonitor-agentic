@@ -143,24 +143,27 @@ def test_poison_row_is_quarantined_and_the_drain_terminates(
 def test_unscoreable_all_no_name_batch_is_quarantined_and_the_drain_terminates(
     clean_graph: Neo4jClient, postgres_dsn: str
 ) -> None:
-    """Batch-level: a window of only no-name entities (which trips Splink's name blocking) is
-    quarantined as a set; the queue drains to 0 (pre-fix score_pairs raises and wedges)."""
+    """Batch-level: a window of only no-name MATCHABLE entities (which trips Splink's name
+    blocking) is quarantined as a set; the queue drains to 0 (pre-fix score_pairs raises and
+    wedges). The vehicle must be a matchable schema: since the ADR 0119 slice-A gate,
+    non-matchable schemas never reach Splink at all (see the companion test below), so only a
+    matchable no-name window can still produce the all-null-fingerprint SplinkException."""
     engine = make_engine(postgres_dsn)
     create_all(engine)
     sessions = session_factory(engine)
     ensure_constraints(clean_graph)
 
-    # Two valid but no-name Sanction entities — OpenSanctions emits these; their fingerprint is
-    # null, so the whole batch is unscoreable (SplinkException) rather than a single bad row.
-    for sid in ("sanc-1", "sanc-2"):
+    # Two valid but no-name Company entities — registry sources emit these; their fingerprint
+    # is null, so the whole batch is unscoreable (SplinkException) rather than a single bad row.
+    for cid in ("co-1", "co-2"):
         data: dict[str, object] = {
-            "id": sid,
-            "schema": "Sanction",
-            "properties": {"program": ["RUSSIA-EO14024"]},
+            "id": cid,
+            "schema": "Company",
+            "properties": {"jurisdiction": ["us"]},
             "datasets": ["t"],
         }
         with sessions() as session:
-            session.add(_good_item(data, source=sid))
+            session.add(_good_item(data, source=cid))
             session.commit()
 
     # Must NOT raise and must terminate (pre-fix: score_pairs raises SplinkException → wedge).
@@ -173,8 +176,8 @@ def test_unscoreable_all_no_name_batch_is_quarantined_and_the_drain_terminates(
     dls = _dead_letters(sessions)
     assert {d.stage for d in dls} == {"resolve-batch"}, "quarantined at the batch stage"
     assert {d.source_record for d in dls} == {
-        "s3://landing/sanc-1.json",
-        "s3://landing/sanc-2.json",
+        "s3://landing/co-1.json",
+        "s3://landing/co-2.json",
     }, "each row dead-lettered with its source_record (replayable)"
 
     # Nothing was written for the quarantined batch.
@@ -182,6 +185,46 @@ def test_unscoreable_all_no_name_batch_is_quarantined_and_the_drain_terminates(
     assert nodes == 0
 
     # Re-run is a clean no-op — the quarantined rows are NOT re-loaded.
+    with sessions() as session:
+        again = resolve_pending(session=session, neo4j=clean_graph)
+    assert again.pending == 0
+
+
+def test_non_matchable_no_name_batch_drains_cleanly_as_singletons(
+    clean_graph: Neo4jClient, postgres_dsn: str
+) -> None:
+    """The old vehicle, pinned to its NEW behavior (ADR 0119 slice A): no-name Sanction
+    entities (``Sanction.matchable is False`` in FtM) are filtered out of Splink's fuzzy path
+    before frame construction, so an all-Sanction window no longer crashes scoring — the rows
+    resolve as id-convergent singletons instead of being collaterally quarantined. Pre-0119
+    these two rows dead-lettered at ``resolve-batch`` (the SplinkException containment path
+    above); that was containment of a scorer fragility, not intended data policy."""
+    engine = make_engine(postgres_dsn)
+    create_all(engine)
+    sessions = session_factory(engine)
+    ensure_constraints(clean_graph)
+
+    for sid in ("sanc-1", "sanc-2"):
+        data: dict[str, object] = {
+            "id": sid,
+            "schema": "Sanction",
+            "properties": {"program": ["RUSSIA-EO14024"]},
+            "datasets": ["t"],
+        }
+        with sessions() as session:
+            session.add(_good_item(data, source=sid))
+            session.commit()
+
+    with sessions() as session:
+        resolve_pending(session=session, neo4j=clean_graph)
+
+    # The batch drains, nothing is quarantined, and both rows land as singleton nodes.
+    assert _pending(sessions) == 0
+    assert _dead_letters(sessions) == [], "non-matchable rows must not be collateral dead-letters"
+    nodes = clean_graph.execute_read("MATCH (n:Entity) RETURN count(n) AS n")[0]["n"]
+    assert nodes == 2, "each no-name Sanction resolves as its own singleton node"
+
+    # Re-run is a clean no-op.
     with sessions() as session:
         again = resolve_pending(session=session, neo4j=clean_graph)
     assert again.pending == 0

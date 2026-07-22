@@ -135,4 +135,5 @@
 | [0116](0116-fulltext-article-enricher.md) | Full-text article bodies for extraction (Phase-4 pull-forward) | ACCEPTED | 2026-07-18 | false | false |
 | [0117](0117-attack-catalog-gid-anchor.md) | MITRE ATT&CK intrusion-set catalog + `gid` canonical-anchor namespace | ACCEPTED | 2026-07-18 | false | false |
 | [0118](0118-wm-indicator-feodo.md) | `wm:Indicator`: the first L2 extension + the Feodo Tracker connector | ACCEPTED | 2026-07-18 | false | false |
+| [0119](0119-abusech-sibling-connectors.md) | abuse.ch sibling IOC connectors (ThreatFox / URLhaus / SSLBL) + the Splink `matchable` gate | PROPOSED | 2026-07-22 | false | false |
 <!-- END GENERATED ADR INDEX -->
