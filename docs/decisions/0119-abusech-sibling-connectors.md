@@ -1,9 +1,11 @@
 # 0119 — abuse.ch sibling IOC connectors (ThreatFox / URLhaus / SSLBL) + the Splink `matchable` gate
 
-- **Status:** PROPOSED (2026-07-22)
+- **Status:** ACCEPTED (2026-07-22)
 - **Date:** 2026-07-22
-- **human_cosign:** offered to the operator at the gate PR (S-3/ADR 0117, S-2/ADR 0118 precedent
-  for L2/ER-adjacent CTI classifications) — the slice-D merge PR flips this ADR to ACCEPTED.
+- **human_cosign:** PENDING — offered to the operator at this gate PR (#217-to-be), the slice-D
+  merge that flips this ADR to ACCEPTED; the classification substance (`human_fork: false`,
+  `person_affecting: false`) is covered by ADR 0118's cosign precedent (the `matchable` finding
+  this gate executes), to be countersigned by the operator.
 - **human_fork:** false — reversible. The three connectors are additive plugins (disable/remove =
   reversal); Indicator nodes are prunable by `datasets` tag (`threatfox`/`urlhaus`/`sslbl`). The
   slice-A `score_pairs` change only SHRINKS the fuzzy-match surface. Reversal cost: drop the three
