@@ -157,8 +157,10 @@ the data is person/org-adjacent even though the mechanism is not person-affectin
    `graph.writer`/ftmg path and confirmed the `UnknownLink` claim edge materializes as a real
    `(Organization)-[r]->(Company)` relationship in Neo4j, carrying flat `prov_*` (including
    `reliability="E"`) and the fixed `role`. The writer already projects `UnknownLink` edges — no
-   new projector code was needed; the existing ADR 0046 `ftmg_fork` override (which special-cases
-   `UnknownLink`/`Documentation`-family FtM schemata that lack a native `followthemoney-graph`
-   edge template) already covers this connector's first-edge-emitting `map()` output. The
+   new projector code was needed; the existing ADR 0046 `ftmg_fork` override (which re-keys the
+   abstract-`Thing` **range** of edge endpoints like `UnknownLink.subject/object` — `Thing` has no
+   node-schema config in stock `followthemoney-graph`, so the fork maps such endpoints to the
+   generic entity label; `graph/writer.py` routes any `schema.edge=True` entity through
+   `generate_edge_entity`) already covers this connector's first-edge-emitting `map()` output. The
    §9/§12-item-2 "unproven for edges" open item is therefore CLOSED as verified-working, not
    escalated.
