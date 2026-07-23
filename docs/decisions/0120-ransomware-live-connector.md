@@ -1,6 +1,6 @@
 # 0120 — Ransomware.live victim/group connector (first edge-emitting `map()`; UnknownLink over Event)
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED (2026-07-23)
 - **Date:** 2026-07-23
 - **human_fork:** false — reversible additive connector (full reversal cost + revisit triggers below).
 - **person_affecting:** false — the connector emits only candidates-with-provenance and changes NO
@@ -8,8 +8,8 @@
   Companies (never `Person`); group Orgs carry `crime.cyber` (sensitive ⇒ merges park), and the
   allegation rides a non-matchable `UnknownLink` edge (reliability `"E"`), never a topic/score on the
   victim Company node. Full argument + the allegation-grade nuance in the Classification note.
-- **human_cosign:** PENDING — offered at the gate-completing PR (operator: register a free PRO key at
-  `https://my.ransomware.live` + confirm interim personal-tier posture; countersign this
+- **human_cosign:** PENDING — offered at this gate-completing PR (operator: register a free PRO key
+  at `https://my.ransomware.live` + confirm interim personal-tier posture; countersign this
   classification). ER-adjacent, so cosign is offered per the 0117/0118/0119 precedent.
 
 ## Context
@@ -137,3 +137,28 @@ disputed claim lives on a disclaimed edge. (4) The edge is `matchable: false` (v
 canonical-id/merge invariant surface is touched (a new matchable Company/Org lane + the first edge),
 so the mandatory `@given` property suite applies (CLAUDE.md). Cosign is offered at the gate PR because
 the data is person/org-adjacent even though the mechanism is not person-affecting (0118/0119 precedent).
+
+## Slice-3 amendments (gate close-out, 2026-07-23)
+
+1. **Empty-slug hash fallback.** The slice-2 checker raised an F1 MEDIUM finding: `_group_id`'s
+   naive `f"ransomware-live-group-{_slug(x)}"` formula degenerates to the bare, unqualified prefix
+   `"ransomware-live-group-"` whenever `_slug(x)` folds to the empty string (a raw form with no
+   ASCII alphanumerics at all — non-Latin scripts, pure punctuation/emoji) — silently conflating
+   EVERY such group at the identity layer, *below* the ER sensitivity guard's sight (a genuine
+   fuzzy merge would still park for review under `crime.cyber`; an identity-layer id collision
+   never reaches the guard at all — it is the same node from the first write). Fixed per the
+   amended spec §3.1: an empty slug falls back to `f"ransomware-live-group--{_h(raw)}"` (the
+   double dash is unreachable from any real slug-derived id, since `_slug`'s output never itself
+   contains a `-`) — distinctness over convergence in the degenerate case. Pinned by the mandatory
+   `@given` property test `tests/property/test_prop_ransomware_live_id_scheme.py`.
+2. **Edge-projection proof result: PASS, not STOP-and-escalate.** The spec's designated tripwire
+   (`tests/integration/test_ransomware_live_edge_projection.py`) drove one hermetic
+   `recentvictims` record through the full `run_ingest` → `resolve_pending` →
+   `graph.writer`/ftmg path and confirmed the `UnknownLink` claim edge materializes as a real
+   `(Organization)-[r]->(Company)` relationship in Neo4j, carrying flat `prov_*` (including
+   `reliability="E"`) and the fixed `role`. The writer already projects `UnknownLink` edges — no
+   new projector code was needed; the existing ADR 0046 `ftmg_fork` override (which special-cases
+   `UnknownLink`/`Documentation`-family FtM schemata that lack a native `followthemoney-graph`
+   edge template) already covers this connector's first-edge-emitting `map()` output. The
+   §9/§12-item-2 "unproven for edges" open item is therefore CLOSED as verified-working, not
+   escalated.

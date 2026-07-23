@@ -239,6 +239,31 @@ SEED_CONNECTORS: tuple[SeedSpec, ...] = (
         enabled=True,
         category="cti",
     ),
+    # Relational CTI substrate for the CTI persona (ADR 0094 D4; Gate S-4, ADR 0120) — the
+    # Ransomware.live v2 free datasets: claimed-victim disclosures (Company + claiming-group
+    # Organization + UnknownLink edge, the codebase's first edge-emitting map()) and the
+    # ransomware-group catalog (Organization). ONE connector, two datasets, parametrized by
+    # `dataset` (opensanctions precedent) — each row's `dataset` equals its own `natural_key`.
+    # Free, unauthenticated, pull-only; `url` is spelled out explicitly (mitre/feodo/threatfox
+    # precedent) so an operator sees + can override it from the Integrations UI. Seeded
+    # `reliability="E"` (Admiralty — unreliable, criminal self-declaration, operator-disclaimed as
+    # unverified) — never the global `"B"` default (spec §5/§7).
+    SeedSpec(
+        "ransomware_live",
+        "recentvictims",
+        {"dataset": "recentvictims", "url": "https://api.ransomware.live/v2/recentvictims"},
+        enabled=True,
+        category="cti",
+        reliability="E",
+    ),
+    SeedSpec(
+        "ransomware_live",
+        "groups",
+        {"dataset": "groups", "url": "https://api.ransomware.live/v2/groups"},
+        enabled=True,
+        category="cti",
+        reliability="E",
+    ),
 )
 
 

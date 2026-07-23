@@ -136,5 +136,5 @@
 | [0117](0117-attack-catalog-gid-anchor.md) | MITRE ATT&CK intrusion-set catalog + `gid` canonical-anchor namespace | ACCEPTED | 2026-07-18 | false | false |
 | [0118](0118-wm-indicator-feodo.md) | `wm:Indicator`: the first L2 extension + the Feodo Tracker connector | ACCEPTED | 2026-07-18 | false | false |
 | [0119](0119-abusech-sibling-connectors.md) | abuse.ch sibling IOC connectors (ThreatFox / URLhaus / SSLBL) + the Splink `matchable` gate | ACCEPTED | 2026-07-22 | false | false |
-| [0120](0120-ransomware-live-connector.md) | Ransomware.live victim/group connector (first edge-emitting `map()`; UnknownLink over Event) | PROPOSED | 2026-07-23 | false | false |
+| [0120](0120-ransomware-live-connector.md) | Ransomware.live victim/group connector (first edge-emitting `map()`; UnknownLink over Event) | ACCEPTED | 2026-07-23 | false | false |
 <!-- END GENERATED ADR INDEX -->
