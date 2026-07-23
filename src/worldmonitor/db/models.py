@@ -50,6 +50,10 @@ class ConnectorInstance(Base):
     # batch connector (additive, backward-compatible); the driver injects it into the run config's
     # ``_cursor`` before a run and persists ``IngestStats.last_cursor`` back onto it after.
     stream_cursor: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    # Per-instance provenance reliability grade (admiralty A-F scale; ADR 0120 slice 1). ``None``
+    # for every pre-S4 seed/row — the driver falls back to the historical hardcoded ``"B"`` default,
+    # byte-identical to before this column existed.
+    reliability: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

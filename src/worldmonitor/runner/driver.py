@@ -509,6 +509,10 @@ class IngestDriver:
             # G8 resume (ADR 0070): read the saved stream cursor in the claim txn so it can be
             # injected before the run. ``None`` for every batch connector — nothing is injected.
             stream_cursor = instance.stream_cursor
+            # Per-instance provenance grade (Gate S-4 slice 1, ADR 0120). ``None`` on the instance
+            # (every pre-S4 row) falls back to the historical hardcoded "B" default below —
+            # byte-identical to before this column existed.
+            reliability = instance.reliability
             session.commit()
 
         # 2. Run the connector (its own session; run_ingest commits per window).
@@ -535,6 +539,7 @@ class IngestDriver:
                     config,
                     landing=self._landing,
                     session=work,
+                    reliability=reliability if reliability is not None else "B",
                 )
             stats = asdict(result)
         except Exception as exc:
