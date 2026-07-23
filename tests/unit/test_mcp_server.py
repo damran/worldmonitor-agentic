@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import re
 import sys
@@ -338,3 +339,190 @@ def test_tools_only_call_execute_read() -> None:
         assert not _WRITE_KEYWORDS.search(query), (
             f"a read tool issued Cypher containing a write keyword: {query!r}"
         )
+
+
+# ========================================================================================
+# Gate F-2 (MCP contract polish, ADR 0121) — behavioral annotations, typed output schemas,
+# structured {error, hint} envelopes. Every assertion below targets a row of the per-tool
+# contract table in docs/reviews/GATE_F2_MCP_CONTRACT_POLISH_SPEC.md §4, or one of the
+# parity pins PP-1/PP-2 in §5. No new invariant is touched (§3.1 of the spec records the
+# decision NOT to add a property test here).
+# ========================================================================================
+
+_ALL_TOOL_NAMES = frozenset({"get_entity", "get_neighbors", "get_provenance", "find_paths"})
+
+
+def _list_tools(server: Any) -> dict[str, Any]:
+    """``tools/list``, keyed by name — asserts the tool SET is still exactly the four."""
+    tools = asyncio.run(server.list_tools())
+    by_name = {t.name: t for t in tools}
+    assert by_name.keys() == _ALL_TOOL_NAMES, f"tool set drifted: {by_name.keys()!r}"
+    return by_name
+
+
+def _call_tool(server: Any, name: str, arguments: dict[str, Any]) -> tuple[list[Any], Any]:
+    """``server.call_tool`` -> ``(content blocks, structuredContent)``."""
+    return asyncio.run(server.call_tool(name, arguments))
+
+
+def _all_seeded_server() -> tuple[Any, _RecordingFake]:
+    """A built server whose fake carries TWO items for each list-returning tool, so the
+    "one content block per item" parity claim (PP-1) is actually exercised at N > 1."""
+    fake = _RecordingFake(
+        entity=_entity_fixture(),
+        neighbors=[
+            _neighbor_with_prov(),
+            {"id": "C", "name": ["Gamma"], "prov_source_id": "src:test"},
+        ],
+        provenance={
+            "prov_source_id": "src:test",
+            "prov_source_record": "s3://landing/test/a.json",
+        },
+        paths=[
+            {"nodes": ["A", "B"], "relationships": ["OWNS"]},
+            {"nodes": ["A", "M", "B"], "relationships": ["OWNS", "DIRECTS"]},
+        ],
+    )
+    return build_server(neo4j_client=fake), fake
+
+
+# --- AC-1: readOnlyHint / idempotentHint / openWorldHint / destructiveHint ------------
+def test_all_tools_annotated_readonly_idempotent_closedworld() -> None:
+    server, _fake = _all_seeded_server()
+    tools = _list_tools(server)
+    for name, tool in tools.items():
+        ann = tool.annotations
+        assert ann is not None, f"{name} carries no ToolAnnotations at all (AC-1)"
+        assert ann.readOnlyHint is True, (
+            f"{name}.readOnlyHint must be True; got {ann.readOnlyHint!r}"
+        )
+        assert ann.idempotentHint is True, (
+            f"{name}.idempotentHint must be True; got {ann.idempotentHint!r}"
+        )
+        assert ann.openWorldHint is False, (
+            f"{name}.openWorldHint must be False (closed self-hosted graph domain); "
+            f"got {ann.openWorldHint!r}"
+        )
+        assert ann.destructiveHint is None, (
+            f"{name}.destructiveHint must be left UNSET (meaningless when read-only); "
+            f"got {ann.destructiveHint!r}"
+        )
+
+
+# --- AC-2: outputSchema is not None, and matches the contract table's shape -----------
+def test_all_tools_have_output_schema() -> None:
+    """Pin `outputSchema is not None` PLUS its shape per the contract table (§4): this
+    catches BOTH a totally-absent schema (silent structured_output fallback) and a
+    schema whose shape drifted from the documented per-tool contract."""
+    server, _fake = _all_seeded_server()
+    tools = _list_tools(server)
+
+    entity_schema = tools["get_entity"].outputSchema
+    assert entity_schema is not None, "get_entity carries no outputSchema (AC-2 — silent fallback?)"
+    assert entity_schema.get("type") == "object"
+    assert entity_schema.get("additionalProperties") is True, (
+        f"get_entity's outputSchema must be a permissive object; got {entity_schema!r}"
+    )
+
+    for name in ("get_neighbors", "find_paths"):
+        schema = tools[name].outputSchema
+        assert schema is not None, f"{name} carries no outputSchema (AC-2 — silent fallback?)"
+        assert schema.get("type") == "object"
+        result_prop = schema.get("properties", {}).get("result")
+        assert result_prop is not None and result_prop.get("type") == "array", (
+            f"{name}'s list-tool outputSchema must wrap a 'result' array; got {schema!r}"
+        )
+
+    prov_schema = tools["get_provenance"].outputSchema
+    assert prov_schema is not None, (
+        "get_provenance carries no outputSchema (AC-2 — silent fallback?)"
+    )
+    assert prov_schema.get("type") == "object"
+    assert prov_schema.get("additionalProperties") == {"type": "string"}, (
+        f"get_provenance's outputSchema must constrain values to strings; got {prov_schema!r}"
+    )
+
+
+# --- SHOULD (not a hard acceptance gate): a non-empty human-readable title ------------
+def test_tool_titles_present() -> None:
+    server, _fake = _all_seeded_server()
+    tools = _list_tools(server)
+    for name, tool in tools.items():
+        assert tool.title, f"{name} carries no title (SHOULD per the spec §4, currently unset)"
+
+
+# --- AC-3 / PP-2: structured {error, hint} envelope on the four raise sites -----------
+def test_error_message_is_structured_envelope() -> None:
+    """Every ``ToolError`` the four tools raise carries a JSON ``{"error", "hint"}``
+    envelope (ADR 0121 D3, raise-based) whose ``error`` token is BYTE-IDENTICAL to
+    today's bare string (PP-2: only the *shape* becomes structured, the *signal* does
+    not change)."""
+    fake_absent = _RecordingFake(entity=None, provenance=None)
+
+    with pytest.raises(ToolError) as absent_entity_exc:
+        _call(tool_get_entity, fake_absent, "does-not-exist")
+    envelope = json.loads(str(absent_entity_exc.value))
+    assert envelope.get("error") == "entity not found"
+    assert isinstance(envelope.get("hint"), str) and envelope["hint"].strip() != "", (
+        f"hint must be a non-empty, actionable string; got {envelope.get('hint')!r}"
+    )
+
+    with pytest.raises(ToolError) as absent_prov_exc:
+        _call(tool_get_provenance, fake_absent, "zzz-absent")
+    envelope = json.loads(str(absent_prov_exc.value))
+    assert envelope.get("error") == "entity not found"
+    assert isinstance(envelope.get("hint"), str) and envelope["hint"].strip() != ""
+
+    fake_valid = _RecordingFake(entity=_entity_fixture())
+    with pytest.raises(ToolError) as injection_exc:
+        _call(tool_get_entity, fake_valid, _INJECTION_ID)
+    envelope = json.loads(str(injection_exc.value))
+    assert envelope.get("error") == "invalid entity id"
+    assert isinstance(envelope.get("hint"), str) and envelope["hint"].strip() != ""
+
+
+# --- PP-1: happy-path content bytes unchanged; structuredContent additive+consistent --
+# The oracle is the THIN tool function called directly (bypassing add_tool's
+# annotations/structured_output kwargs entirely) — its code is untouched by this gate,
+# so it is exactly "today's behavior" per the spec's PP-1 wording (§5).
+def test_get_entity_content_and_structured_content_pp1() -> None:
+    server, fake = _all_seeded_server()
+    expected = _call(tool_get_entity, fake, "A")
+    content, structured = _call_tool(server, "get_entity", {"entity_id": "A"})
+    assert len(content) == 1, "get_entity must emit exactly ONE content block (PP-1 block count)"
+    assert json.loads(content[0].text) == expected, (
+        "PP-1: get_entity's content block must be byte-identical (as decoded JSON) to the "
+        "thin tool function's own return value"
+    )
+    assert structured == expected, "structuredContent for a dict tool must be the dict itself"
+
+
+def test_get_provenance_content_and_structured_content_pp1() -> None:
+    server, fake = _all_seeded_server()
+    expected = _call(tool_get_provenance, fake, "A")
+    content, structured = _call_tool(server, "get_provenance", {"entity_id": "A"})
+    assert len(content) == 1
+    assert json.loads(content[0].text) == expected
+    assert structured == expected
+
+
+def test_get_neighbors_content_and_structured_content_pp1() -> None:
+    server, fake = _all_seeded_server()
+    expected = _call(tool_get_neighbors, fake, "A")
+    content, structured = _call_tool(server, "get_neighbors", {"entity_id": "A"})
+    assert len(content) == len(expected) == 2, "one content block per neighbour (PP-1 block count)"
+    assert [json.loads(c.text) for c in content] == expected
+    assert structured == {"result": expected}, (
+        "list-tool structuredContent must be {'result': [...]}"
+    )
+
+
+def test_find_paths_content_and_structured_content_pp1() -> None:
+    server, fake = _all_seeded_server()
+    expected = _call(tool_find_paths, fake, "A", "B", max_hops=1)
+    content, structured = _call_tool(
+        server, "find_paths", {"from_id": "A", "to_id": "B", "max_hops": 1}
+    )
+    assert len(content) == len(expected) == 2, "one content block per path (PP-1 block count)"
+    assert [json.loads(c.text) for c in content] == expected
+    assert structured == {"result": expected}

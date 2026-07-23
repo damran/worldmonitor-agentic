@@ -137,4 +137,5 @@
 | [0118](0118-wm-indicator-feodo.md) | `wm:Indicator`: the first L2 extension + the Feodo Tracker connector | ACCEPTED | 2026-07-18 | false | false |
 | [0119](0119-abusech-sibling-connectors.md) | abuse.ch sibling IOC connectors (ThreatFox / URLhaus / SSLBL) + the Splink `matchable` gate | ACCEPTED | 2026-07-22 | false | false |
 | [0120](0120-ransomware-live-connector.md) | Ransomware.live victim/group connector (first edge-emitting `map()`; UnknownLink over Event) | ACCEPTED | 2026-07-23 | false | false |
+| [0121](0121-mcp-contract-polish.md) | MCP contract polish: tool annotations, typed output schemas, structured error envelopes | ACCEPTED | 2026-07-23 | false | false |
 <!-- END GENERATED ADR INDEX -->
