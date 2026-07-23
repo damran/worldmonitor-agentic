@@ -1,11 +1,11 @@
-"""Graph-read FastMCP **stdio** server (ADR 0063, slice 2b).
+"""Graph-read FastMCP **stdio** server (ADR 0063, slice 2b; Gate F-3, ADR 0122).
 
 The MCP twin of slice 2a's REST routes: it re-exposes the resolved graph over a
-FastMCP stdio server with exactly four structured, read-only, bounded, parameterized
-tools — ``get_entity`` / ``get_neighbors`` / ``get_provenance`` / ``find_paths`` —
-each wrapping the SAME ``graph/queries.py`` helper and the SAME shared
-``graph/read_guards`` (hop clamp + id validation) as REST. There is **no** raw-Cypher
-tool (same call as ADR 0062).
+FastMCP stdio server with exactly five structured, read-only, bounded, parameterized
+tools — ``get_entity`` / ``get_neighbors`` / ``get_provenance`` / ``find_paths`` /
+``get_entity_dossier`` — each wrapping the SAME ``graph/queries.py`` helper and the
+SAME shared ``graph/read_guards`` (hop clamp + id validation) as REST. There is **no**
+raw-Cypher tool (same call as ADR 0062).
 
 HARD INVARIANTS
 - **STDOUT PURITY.** Over stdio, stdout is the JSON-RPC frame channel; any non-frame
@@ -147,11 +147,32 @@ def tool_find_paths(
     )
 
 
+def tool_get_entity_dossier(client: Neo4jClient, entity_id: str, hops: int = 1) -> dict[str, Any]:
+    """Return the deterministic entity dossier (Gate F-3 slice 1, ADR 0122); absent -> error.
+
+    A thin pass-through of :func:`worldmonitor.graph.queries.get_entity_dossier` — the SAME
+    shared assembly helper the REST route calls, so the two surfaces never drift (ADR 0122
+    D1). ``hops`` is clamped to the shared cap before reaching the helper, mirroring
+    :func:`tool_get_neighbors`; the ``"entity not found"`` error token is REUSED verbatim
+    from :func:`tool_get_entity` so the not-found signal stays consistent across tools.
+    """
+    _require_valid_id(entity_id)
+    dossier = queries.get_entity_dossier(
+        client, entity_id=entity_id, hops=read_guards.clamp_hops(hops)
+    )
+    if dossier is None:
+        raise _tool_error(
+            "entity not found",
+            "no resolved node has that id; verify the id or traverse from a known node",
+        )
+    return dossier
+
+
 def _register_read_tools(server: FastMCP, client: Neo4jClient) -> None:
-    """Register exactly the four read tools on ``server``, closing over ``client``.
+    """Register exactly the five read tools on ``server``, closing over ``client``.
 
     Shared by the stdio (:func:`build_server`) and HTTP (:func:`build_http_app`) transports so
-    BOTH surfaces expose an identical 4-tool, read-only set — there is exactly one place a tool
+    BOTH surfaces expose an identical 5-tool, read-only set — there is exactly one place a tool
     is registered (INV-S1-READONLY: the HTTP surface never drifts from stdio).
     """
 
@@ -170,6 +191,11 @@ def _register_read_tools(server: FastMCP, client: Neo4jClient) -> None:
     def find_paths(from_id: str, to_id: str, max_hops: int = 1) -> list[dict[str, Any]]:
         """Return bounded paths between two entities (``max_hops`` clamped to the cap)."""
         return tool_find_paths(client, from_id, to_id, max_hops)
+
+    def get_entity_dossier(entity_id: str, hops: int = 1) -> dict[str, Any]:
+        """Return the deterministic entity dossier (entity + neighbors + provenance +
+        merge_history); error if the entity is absent (Gate F-3, ADR 0122)."""
+        return tool_get_entity_dossier(client, entity_id, hops)
 
     # Every tool below is read-only (calls only ``client.execute_read`` via the query
     # helpers), idempotent (a repeated read has no additional effect), and interacts with
@@ -212,6 +238,13 @@ def _register_read_tools(server: FastMCP, client: Neo4jClient) -> None:
         annotations=read_only_annotations,
         structured_output=True,
     )
+    server.add_tool(
+        get_entity_dossier,
+        name="get_entity_dossier",
+        title="Get entity dossier",
+        annotations=read_only_annotations,
+        structured_output=True,
+    )
 
 
 def _resolve_client(neo4j_client: Neo4jClient | None) -> Neo4jClient:
@@ -220,7 +253,8 @@ def _resolve_client(neo4j_client: Neo4jClient | None) -> Neo4jClient:
 
 
 def build_server(*, neo4j_client: Neo4jClient | None = None) -> FastMCP:
-    """Build the **stdio** FastMCP server, registering exactly the four read tools (ADR 0063).
+    """Build the **stdio** FastMCP server, registering exactly the five read tools (ADR 0063,
+    ADR 0122).
 
     The Neo4j client is INJECTABLE for testability (mirrors ``create_app``, ADR 0062):
     an injected client is used verbatim and NO connection is opened here; only when
@@ -247,7 +281,7 @@ def build_http_app(
     native ``BearerAuthBackend`` + ``RequireAuthMiddleware`` via ``FastMCP(auth=…,
     token_verifier=…)``; we hand-roll no middleware.
 
-    Exposes EXACTLY the same four read tools as :func:`build_server` (INV-S1-READONLY). The
+    Exposes EXACTLY the same five read tools as :func:`build_server` (INV-S1-READONLY). The
     issuer/resource come from settings; in an unconfigured dev/test environment (no
     ``zitadel_domain``) the issuer falls back to a localhost placeholder so the app can still
     be constructed — real token validation is done by the wrapped Zitadel verifier regardless.

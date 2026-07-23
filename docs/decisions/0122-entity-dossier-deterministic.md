@@ -1,6 +1,6 @@
 # 0122 — `get_entity_dossier` (slice 1): deterministic aggregation over the existing read helpers
 
-- **Status:** PROPOSED (2026-07-23)
+- **Status:** ACCEPTED (2026-07-23)
 - **Date:** 2026-07-23
 - **human_fork:** false — a reversible, additive read-only aggregation surface over already-exposed reads;
   no product/architecture fork. The two scoping calls (merge history = recorded absence; no

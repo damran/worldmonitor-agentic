@@ -48,6 +48,41 @@ def get_provenance(client: Neo4jClient, *, entity_id: str) -> dict[str, str]:
     return {str(key): str(value) for key, value in rows[0]["prov"]}
 
 
+def get_entity_dossier(
+    client: Neo4jClient, *, entity_id: str, hops: int = 1
+) -> dict[str, Any] | None:
+    """Assemble a deterministic entity dossier (Gate F-3 slice 1, ADR 0122).
+
+    Composes the three EXISTING read helpers — :func:`get_entity`, :func:`get_neighbors`,
+    :func:`get_provenance` — into one fixed-shape object: ``{entity, neighbors, provenance,
+    merge_history}``. No new Cypher, no write, no ``Session``.
+
+    Returns ``None`` iff ``get_entity`` is ``None`` (absent) — WITHOUT calling
+    ``get_neighbors``/``get_provenance``, so an absent entity costs exactly one read, not
+    three (the short-circuit).
+
+    ``hops`` is clamped to ``read_guards.HOP_CAP`` before it reaches ``get_neighbors``
+    (defense-in-depth: ``get_neighbors`` clamps again internally); the neighbours list
+    inherits ``get_neighbors``' existing ``NEIGHBOR_RESULT_LIMIT`` bound (ADR 0064) — no
+    new limit is introduced.
+
+    ``merge_history`` is a fixed, machine-readable "recorded absence" sentinel (ADR 0122
+    D3): the merge audit trail lives in Postgres and its readers need a SQLAlchemy
+    ``Session``, which the stdio MCP surface does not have — populating it is a later gate.
+    """
+    entity = get_entity(client, entity_id=entity_id)
+    if entity is None:
+        return None
+    neighbors = get_neighbors(client, entity_id=entity_id, hops=read_guards.clamp_hops(hops))
+    provenance = get_provenance(client, entity_id=entity_id)
+    return {
+        "entity": entity,
+        "neighbors": neighbors,
+        "provenance": provenance,
+        "merge_history": {"status": "not_assembled", "available": False},
+    }
+
+
 def find_paths(
     client: Neo4jClient, *, from_id: str, to_id: str, max_hops: int
 ) -> list[dict[str, Any]]:
