@@ -1,6 +1,6 @@
 # 0121 — MCP contract polish: tool annotations, typed output schemas, structured error envelopes
 
-- **Status:** PROPOSED (2026-07-23)
+- **Status:** ACCEPTED (2026-07-23)
 - **Date:** 2026-07-23
 - **human_fork:** false — reversible metadata polish on the read-only MCP tool surface; no
   product/architecture fork. Each of the three sub-decisions has a sensible default and a cheap
@@ -73,7 +73,7 @@ SDK-wrapped as `{"result": […]}` while their `content` blocks are unchanged. R
 reshaped (no richer per-field models — that would change payload bytes and is out of scope).
 
 **D3 — Structured error envelope (raise-based).** Introduce `_tool_error(error, hint)` returning
-`ToolError(json.dumps({"error": error, "hint": hint}))`, and swap the four bare `ToolError("…")` sites
+`ToolError(json.dumps({"error": error, "hint": hint}))`, and swap the three bare `ToolError("…")` sites (two share the "entity not found" token)
 to it, keeping the `error` tokens identical to today's strings (`"invalid entity id"`,
 `"entity not found"`) so the error *signal* is unchanged. On the wire the client sees `isError=true`
 with `content` text `Error executing tool <name>: {"error": …, "hint": …}`.
@@ -111,7 +111,7 @@ the gate-completing PR.
 **Reversible** (both `human_fork` and `person_affecting` = false).
 
 - **Reversal cost:** revert one production file (`server.py` — the `add_tool` kwargs, the `_tool_error`
-  helper, and the four raise-site swaps) plus the added test assertions. **No** data migration, **no**
+  helper, and the three raise-site swaps) plus the added test assertions. **No** data migration, **no**
   schema/store change, **no** stored artifacts, **no** change to REST. Trivial, single-commit reversal.
 - **Revisit triggers:**
   - (a) The `mcp` SDK exposes an **un-prefixed structured tool-error** path → adopt a return-based

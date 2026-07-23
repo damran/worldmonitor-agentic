@@ -15,9 +15,10 @@ by both the stdio and HTTP transports). Three concrete additions:
 
 1. **Behavioral annotations** — `readOnlyHint`, `idempotentHint`, `openWorldHint` (+ a human-readable
    `title`) on every tool, so a host/agent can reason about the tools without calling them.
-2. **Typed output schemas** — enable the SDK's native structured-output so each tool advertises an
-   `outputSchema` and returns a `structuredContent` alongside the existing text payload.
-3. **Structured error envelope** — replace the four bare `ToolError("…")` messages with a
+2. **Typed output schemas** — make the SDK's structured-output derivation explicit and fail-loud
+   (`structured_output=True`); `outputSchema`/`structuredContent` are already live today via the
+   SDK's return-annotation auto-detect — this gate pins them, it does not add them.
+3. **Structured error envelope** — replace the three bare `ToolError("…")` messages (two share the "entity not found" token) with a
    JSON `{"error", "hint"}` envelope, so error content is machine-parseable and actionable.
 
 **Is NOT** (explicit non-goals — see §7): the F-5 `summary` context-budget flag, F-8 CI live-smoke,
@@ -262,7 +263,7 @@ Extend existing files (no new test module needed).
 ## 8. Slice breakdown
 
 **One slice** (this is an XS, single-file production change). The three asks are trivially small and
-all land in `_register_read_tools` + one helper + four raise-site swaps.
+all land in `_register_read_tools` + one helper + three raise-site swaps.
 
 - **Slice 1 — MCP contract polish (annotations + output schemas + `{error,hint}` envelope).**
   Production: in `src/worldmonitor/mcp/server.py` — (a) add a module-level
