@@ -78,9 +78,10 @@ for the fixed `"E"` grade + leads-not-verdicts. The full PRO T&C document was no
   becomes a schema-safe singleton and is projected by the writer/ftmg. The projector path is
   unproven for edges in this codebase — the gate STOPS and escalates if the writer cannot yet emit
   edges rather than forcing it (spec §9/§10).
-- **Reliability-column drift closed.** `ConnectorInstance.reliability` was declared in the ORM but
-  never migrated (migration 0009's `reliability` is on the `statement` table); slice 1 adds the
-  missing migration + threads the value through the driver. Every other connector's `"B"` default is
+- **Reliability-column gap closed.** `ConnectorInstance.reliability` existed in neither the ORM nor
+  any migration (migration 0009's `reliability` is on the `statement` table; the dossier's "declared
+  in the ORM" claim was wrong — checker-verified); slice 1 adds the ORM field, the migration, the
+  seed field, and threads the value through the driver. Every other connector's `"B"` default is
   byte-identical (`None → "B"`).
 - **Sensitivity posture is deliberate.** `crime.cyber` makes every group Org sensitive so group
   merges (incl. `_slug` collisions) park for review; victims never get a risk topic, so a victim
