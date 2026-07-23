@@ -28,12 +28,14 @@ spawn the process inside the single-tenant deployment (D1, ADR 0042) — no per-
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ToolAnnotations
 
 from worldmonitor.authz.oidc import ZitadelTokenVerifier
 from worldmonitor.graph import queries, read_guards
@@ -74,13 +76,28 @@ def configure_stderr_logging() -> None:
     _ensure_stderr_handler(logging.getLogger())
 
 
+def _tool_error(error: str, hint: str) -> ToolError:
+    """Build a ``ToolError`` whose message is a JSON ``{"error", "hint"}`` envelope.
+
+    Raise-based (ADR 0121 D3): the SDK re-wraps any raised exception as
+    ``ToolError(f"Error executing tool <name>: {original}")`` with no un-prefixed raise
+    path, so the client-visible text carries that prefix ahead of this JSON payload. The
+    ``error`` token is the SAME machine-parseable signal as before this gate (byte-identical
+    to the prior bare-string message); only the *shape* becomes structured.
+    """
+    return ToolError(json.dumps({"error": error, "hint": hint}))
+
+
 def _require_valid_id(entity_id: str) -> None:
     """Reject an injection-/malformed-shaped id BEFORE any query (logs to stderr, raises)."""
     if not read_guards.validate_entity_id(entity_id):
         # Log-on-rejection lands on stderr (never stdout); the raise surfaces as a
         # JSON-RPC error frame.
         logger.warning("rejected malformed entity id (failed ID_PATTERN): %r", entity_id)
-        raise ToolError("invalid entity id")
+        raise _tool_error(
+            "invalid entity id",
+            "must match the canonical id shape (ID_PATTERN); pass a resolved canonical id",
+        )
 
 
 # ----------------------------------------------------------------------------------------
@@ -93,7 +110,10 @@ def tool_get_entity(client: Neo4jClient, entity_id: str) -> dict[str, Any]:
     _require_valid_id(entity_id)
     entity = queries.get_entity(client, entity_id=entity_id)
     if entity is None:
-        raise ToolError("entity not found")
+        raise _tool_error(
+            "entity not found",
+            "no resolved node has that id; verify the id or traverse from a known node",
+        )
     return entity
 
 
@@ -108,7 +128,11 @@ def tool_get_provenance(client: Neo4jClient, entity_id: str) -> dict[str, str]:
     _require_valid_id(entity_id)
     prov = queries.get_provenance(client, entity_id=entity_id)
     if not prov:
-        raise ToolError("entity not found")
+        raise _tool_error(
+            "entity not found",
+            "the graph guarantees provenance on every present node, so absent means no node;"
+            " verify the id or traverse from a known node",
+        )
     return prov
 
 
@@ -147,10 +171,47 @@ def _register_read_tools(server: FastMCP, client: Neo4jClient) -> None:
         """Return bounded paths between two entities (``max_hops`` clamped to the cap)."""
         return tool_find_paths(client, from_id, to_id, max_hops)
 
-    server.add_tool(get_entity, name="get_entity")
-    server.add_tool(get_neighbors, name="get_neighbors")
-    server.add_tool(get_provenance, name="get_provenance")
-    server.add_tool(find_paths, name="find_paths")
+    # Every tool below is read-only (calls only ``client.execute_read`` via the query
+    # helpers), idempotent (a repeated read has no additional effect), and interacts with
+    # a closed domain (our own resolved graph, never an open external world) — ADR 0121 D1.
+    # ``destructiveHint`` is left unset (meaningful only when ``readOnlyHint == False``).
+    # ``structured_output=True`` makes the SDK's existing schema derivation EXPLICIT and
+    # fail-loud (ADR 0121 D2): it does not add net-new structured output — the SDK already
+    # auto-detects it from these closures' return annotations — it just stops relying on
+    # implicit auto-detection.
+    read_only_annotations = ToolAnnotations(
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+    server.add_tool(
+        get_entity,
+        name="get_entity",
+        title="Get entity",
+        annotations=read_only_annotations,
+        structured_output=True,
+    )
+    server.add_tool(
+        get_neighbors,
+        name="get_neighbors",
+        title="Get neighbors",
+        annotations=read_only_annotations,
+        structured_output=True,
+    )
+    server.add_tool(
+        get_provenance,
+        name="get_provenance",
+        title="Get provenance",
+        annotations=read_only_annotations,
+        structured_output=True,
+    )
+    server.add_tool(
+        find_paths,
+        name="find_paths",
+        title="Find paths",
+        annotations=read_only_annotations,
+        structured_output=True,
+    )
 
 
 def _resolve_client(neo4j_client: Neo4jClient | None) -> Neo4jClient:

@@ -7,9 +7,10 @@
   reversal (full reversal cost + revisit triggers below).
 - **person_affecting:** false — the four tools are read-only graph reads; this gate changes **no** ER
   threshold, guard mode, sensitivity park, or individual-affecting score, and touches **no** person's
-  data shape. It adds read-only annotations + a derived output schema and restructures error content.
-  Provenance is returned verbatim, unchanged. No CLAUDE.md invariant (provenance / ER / merge /
-  canonical-id) is touched (so no mandatory `@given` test — recorded in the spec §3.1).
+  data shape. It adds read-only annotations, makes the (already-live) output-schema derivation explicit
+  and fail-loud, and restructures error content. Provenance is returned verbatim, unchanged. No
+  CLAUDE.md invariant (provenance / ER / merge / canonical-id) is touched (so no mandatory `@given`
+  test — recorded in the spec §3.1).
 - **human_cosign:** not required — reversible, non-person-affecting, non-ER-adjacent metadata polish.
   (Unlike the 0117-0120 CTI connectors, this gate is not ER-adjacent and touches no merge path; the
   cost-directive posture is to reserve cosign for irreversible / person-affecting changes.)
@@ -22,10 +23,18 @@
 Our graph-read MCP surface (ADR 0063 stdio, ADR 0090 authenticated HTTP) exposes exactly four
 read-only tools — `get_entity`, `get_neighbors`, `get_provenance`, `find_paths` — registered in one
 shared place (`_register_read_tools` in `src/worldmonitor/mcp/server.py`) so the stdio and HTTP
-transports never drift. Today those tools carry **no** MCP behavioral annotations, advertise **no**
-output schema, and raise **bare-string** `ToolError`s. A host/agent (Hermes) therefore cannot tell that
-the tools are read-only/idempotent without calling them, cannot validate or shape their output against a
-schema, and gets un-parseable free-text on errors.
+transports never drift. Today those tools carry **no** MCP behavioral annotations and raise
+**bare-string** `ToolError`s. A host/agent (Hermes) therefore cannot tell that the tools are
+read-only/idempotent without calling them, and gets un-parseable free-text on errors.
+
+**Correction (output schemas are not net-new):** `outputSchema`/`structuredContent` are **already
+live today** — `add_tool` defaults `structured_output=None`, under which the SDK **auto-detects**
+structured output from a closure's return-type annotation (verified: `dict[str, Any]` /
+`dict[str, str]` / `list[dict[str, Any]]`, our four tools' exact return types, already build a
+schema and populate `structuredContent` with no code change). This gate does not "add" output
+schemas; it makes that derivation **explicit and fail-loud** (`structured_output=True`), so a
+future return-type change that the SDK can't schema-build surfaces as a registration-time signal
+instead of silently falling back to `outputSchema=None` under implicit auto-detection.
 
 Backlog row F-2 asks for the standard MCP contract polish — `readOnlyHint`/`idempotentHint`
 annotations, typed output schemas, and structured `{error, hint}` envelopes — as **one XS gate with no
@@ -51,11 +60,15 @@ effect on repeat) and is set per the row's explicit request, acknowledging the M
 "meaningful only when `readOnlyHint == false`" — harmless and explicit. `destructiveHint` is left unset
 (meaningful only when not read-only).
 
-**D2 — Typed output schemas.** Pass `structured_output=True` to each `add_tool`, letting the SDK derive
-`outputSchema` from the **existing** return annotations. This adds `structuredContent` to each result
-and `outputSchema` to each tool listing. Crucially, the SDK computes the unstructured `content` with the
-**same** `_convert_to_content(result)` call it uses today, so the existing text payload is
-**byte-identical**; the new fields are purely additive. The list-returning tools' `structuredContent` is
+**D2 — Explicit, fail-loud output schemas.** Pass `structured_output=True` to each `add_tool` so the
+SDK's schema derivation from the **existing** return annotations is **explicit** rather than relying
+on today's implicit `structured_output=None` auto-detection. `outputSchema`/`structuredContent` are
+**not net-new** (they are already produced today by auto-detection for these four return types); the
+change is that a future return-type change the SDK can't schema-build now fails loud (an explicit
+`structured_output=True` errors at registration instead of silently falling back to
+`outputSchema=None`). Crucially, the SDK computes the unstructured `content` with the **same**
+`_convert_to_content(result)` call it uses today, so the existing text payload is **byte-identical**;
+only the explicitness/fail-loud guarantee is new. The list-returning tools' `structuredContent` is
 SDK-wrapped as `{"result": […]}` while their `content` blocks are unchanged. Return types are **not**
 reshaped (no richer per-field models — that would change payload bytes and is out of scope).
 
@@ -66,8 +79,10 @@ to it, keeping the `error` tokens identical to today's strings (`"invalid entity
 with `content` text `Error executing tool <name>: {"error": …, "hint": …}`.
 
 The gate holds a strict **no-behavior-change** contract: happy-path `content` bytes are unchanged
-(byte-identical), and only additive metadata (`annotations`, `outputSchema`, `structuredContent`) plus
-**error-content** structure are added. This ADR flips to **ACCEPTED** at the gate-completing PR.
+(byte-identical). The only genuinely new thing is `annotations` metadata (D1) and the
+`{error, hint}` shape (D3); `outputSchema`/`structuredContent` (D2) were already produced today via
+implicit auto-detection and become explicit/fail-loud, not net-new. This ADR flips to **ACCEPTED** at
+the gate-completing PR.
 
 ## Alternatives considered
 
