@@ -463,7 +463,11 @@ def test_dossier_absent_entity_404() -> None:
 
 def test_dossier_rejects_injection_id_422() -> None:
     fake = _FakeNeo4jClient(entity=_entity_fixture())
-    payload = quote('") DETACH DELETE n //', safe="")
+    # NOT a trailing "//" — that quotes to a literal path separator (%2F%2F), so
+    # "/entities/<...>///dossier" matches NO route and 404s at the router before
+    # Path(pattern=...) validation ever runs. "--" keeps the same injection intent
+    # (a Cypher comment terminator) without introducing a path-separator byte.
+    payload = quote('") DETACH DELETE n --', safe="")
     resp = _client(_FakeVerifier(), fake).get(f"/entities/{payload}/dossier", headers=_auth())
     assert resp.status_code in (400, 422), (
         f"injection-shaped id must be rejected: {resp.status_code}"
@@ -472,7 +476,9 @@ def test_dossier_rejects_injection_id_422() -> None:
 
 
 def test_dossier_hops_clamped() -> None:
-    fake = _FakeNeo4jClient(neighbors=[_neighbor_with_prov()])
+    # entity= is REQUIRED here (unlike the sibling /neighbors clamp test): the dossier's
+    # mandatory short-circuit 404s before get_neighbors ever runs when get_entity is None.
+    fake = _FakeNeo4jClient(entity=_entity_fixture(), neighbors=[_neighbor_with_prov()])
     resp = _client(_FakeVerifier(), fake).get("/entities/A/dossier?hops=99", headers=_auth())
     assert resp.status_code == 200, f"{resp.status_code}: {resp.text}"
     call = fake.neighbors_call()
