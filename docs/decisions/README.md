@@ -139,4 +139,5 @@
 | [0120](0120-ransomware-live-connector.md) | Ransomware.live victim/group connector (first edge-emitting `map()`; UnknownLink over Event) | ACCEPTED | 2026-07-23 | false | false |
 | [0121](0121-mcp-contract-polish.md) | MCP contract polish: tool annotations, typed output schemas, structured error envelopes | ACCEPTED | 2026-07-23 | false | false |
 | [0122](0122-entity-dossier-deterministic.md) | `get_entity_dossier` (slice 1): deterministic aggregation over the existing read helpers | ACCEPTED | 2026-07-23 | false | false |
+| [0123](0123-freshness-surface.md) | Source-freshness surface (F-1 slice 1): a derived 6-state machine over connector run-metadata | PROPOSED | 2026-07-24 | false | false |
 <!-- END GENERATED ADR INDEX -->
