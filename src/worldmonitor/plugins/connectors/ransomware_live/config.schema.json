@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Ransomware.live connector configuration",
+  "description": "Imports Ransomware.live v2 free datasets (recentvictims claims, groups catalog) as FollowTheMoney entities. One connector, two datasets, parametrized by `dataset` (opensanctions precedent).",
+  "type": "object",
+  "properties": {
+    "dataset": {
+      "type": "string",
+      "title": "Dataset",
+      "description": "Which Ransomware.live v2 dataset this instance imports.",
+      "enum": ["recentvictims", "groups"]
+    },
+    "url": {
+      "type": "string",
+      "title": "Feed URL",
+      "description": "URL of the dataset's JSON endpoint (over the SSRF guard). Falls back to the pinned default per dataset when omitted.",
+      "minLength": 1
+    },
+    "limit": {
+      "type": "integer",
+      "title": "Record limit",
+      "description": "Optional cap on the number of records collected (testing / incremental runs).",
+      "minimum": 1
+    },
+    "api_key": {
+      "type": "string",
+      "title": "API key",
+      "description": "Optional PRO API key (a secret; UI password field, vault-encrypted at rest). The free v2 endpoints used by this connector ignore it; PRO-ready only, no PRO code path.",
+      "secret": true,
+      "minLength": 1
+    }
+  },
+  "required": ["dataset"],
+  "additionalProperties": false
+}
