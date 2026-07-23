@@ -105,8 +105,25 @@ def _url_slug(url: str) -> str:
 
 def _group_id(slug_or_name: str) -> str:
     """``ransomware-live-group-{_slug(slug_or_name)}`` — converges the victim- and groups-side
-    natural keys (a raw `group` string, or a `groups[].url` slug) onto one id (spec §3.1)."""
-    return f"ransomware-live-group-{_slug(slug_or_name)}"
+    natural keys (a raw `group` string, or a `groups[].url` slug) onto one id (spec §3.1).
+
+    **Degenerate-slug amendment (spec §3.1, end):** when `_slug` folds the raw input to the empty
+    string (no ASCII alphanumerics at all — non-Latin scripts, pure punctuation/emoji), the naive
+    formula would collapse to the bare, unqualified prefix `"ransomware-live-group-"`, silently
+    conflating EVERY such group at the identity layer — *below* the ER sensitivity guard's sight
+    (a real fuzzy merge would still park for review; an identity-layer collision never even
+    reaches the guard, it is the same node from the first write). The fix falls back to
+    `f"ransomware-live-group--{_h(raw)}"` — note the DOUBLE dash, which is unreachable from any
+    slug-derived id (`_slug`'s output never itself contains a `-`), so hash-fallback ids can never
+    collide with slug-derived ones. Distinctness beats convergence in the degenerate case: the two
+    sides no longer converge to one id, but each degenerate raw form still mints deterministically,
+    and both are still `crime.cyber`-sensitive Organizations that L3/ER can merge under human
+    review — never a silent connector-level conflation.
+    """
+    slug = _slug(slug_or_name)
+    if not slug:
+        return f"ransomware-live-group--{_h(slug_or_name)}"
+    return f"ransomware-live-group-{slug}"
 
 
 def _victim_id(permalink_url: str) -> str:

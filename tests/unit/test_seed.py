@@ -82,6 +82,46 @@ def test_feed_breadth_floor() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Gate S-4 slice 3 — the two ransomware_live seed rows (spec §7, ADR 0120)
+# ---------------------------------------------------------------------------
+
+
+def test_ransomware_live_is_seeded_with_both_datasets_and_reliability_e() -> None:
+    """Spec §7: SEED_CONNECTORS carries exactly the two ``ransomware_live`` rows
+    (``recentvictims`` + ``groups``), each ``enabled=True``, ``category="cti"``,
+    ``reliability="E"`` (Admiralty -- unreliable, criminal self-declaration, operator-disclaimed),
+    with the pinned free v2 URL spelled out explicitly (mitre/feodo/threatfox precedent -- an
+    operator sees + can override it from the Integrations UI)."""
+    by_dataset = {
+        spec.natural_key: spec for spec in SEED_CONNECTORS if spec.connector_id == "ransomware_live"
+    }
+    assert set(by_dataset) == {"recentvictims", "groups"}, (
+        f"expected exactly the recentvictims+groups ransomware_live seed rows, got "
+        f"{sorted(by_dataset)}"
+    )
+
+    expected_urls = {
+        "recentvictims": "https://api.ransomware.live/v2/recentvictims",
+        "groups": "https://api.ransomware.live/v2/groups",
+    }
+    for dataset, spec in by_dataset.items():
+        assert spec.enabled is True, f"ransomware_live/{dataset} must be seeded enabled"
+        assert spec.category == "cti", f"ransomware_live/{dataset} must be category='cti'"
+        assert spec.reliability == "E", (
+            f"ransomware_live/{dataset} must be seeded reliability='E' (Admiralty -- criminal "
+            f"self-declaration), got {spec.reliability!r}"
+        )
+        assert spec.config.get("dataset") == dataset, (
+            f"ransomware_live/{dataset} config['dataset'] must equal its own natural_key, got "
+            f"{spec.config.get('dataset')!r}"
+        )
+        assert spec.config.get("url") == expected_urls[dataset], (
+            f"ransomware_live/{dataset} must pin the explicit free v2 URL, got "
+            f"{spec.config.get('url')!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Gate S-4 slice 1 — reliability threading (AC1)
 # ---------------------------------------------------------------------------
 

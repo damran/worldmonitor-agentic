@@ -111,6 +111,19 @@ _h(s)     = hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
 Re-ingesting the same record yields identical ids (pin in unit tests). The group id derived from the
 victim side and from the groups side is **byte-identical** for the same group (pin this).
 
+**Degenerate-slug rule (slice-3 amendment, from the slice-2 checker's F1 MEDIUM finding):** when
+`_slug(raw)` folds to the empty string (a name/url-slug with no ASCII alphanumerics, e.g.
+`"Кибер Група"`, `"!!!"`), the bare id `ransomware-live-group-` would silently conflate every such
+group at the identity layer — *below* the ER sensitivity guard's sight. The rule: an empty slug
+falls back to `f"ransomware-live-group--{_h(raw)}"` (note the **double dash** — unreachable from any
+real slug, since `_slug` output never contains `-`, so hash-fallback ids can never collide with
+slug-derived ids). Determinism per raw form is kept; **cross-side convergence is deliberately
+sacrificed in the degenerate case** — distinctness beats convergence (Organizations are matchable,
+so L3/ER can still merge the two sides, and `crime.cyber` sensitivity parks that merge for human
+review; silent connector-level conflation would bypass exactly that guard). Pin with a `@given`
+property test: for arbitrary strings, a minted group id is never the bare prefix
+`ransomware-live-group-`, and two raw forms with distinct non-empty slugs never collide.
+
 ### 3.2 recentvictims → victim Company + group Organization + UnknownLink
 
 | Source field (probed) | Target | FtM property | Rule |
