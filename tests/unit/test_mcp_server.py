@@ -12,7 +12,9 @@ CONTRACT ASSUMED (the builder MUST match these names/signatures exactly):
         tool_get_neighbors(client, entity_id, hops=1)  # -> list of neighbour props (each w/ prov_*)
         tool_get_provenance(client, entity_id)      # -> prov_* map; ToolError if absent
         tool_find_paths(client, from_id, to_id, max_hops=1)  # -> list of {nodes, relationships}
-        build_server(*, neo4j_client=None) -> FastMCP  # registers exactly the 4 tools
+        tool_get_entity_dossier(client, entity_id, hops=1)  # -> {entity, neighbors, provenance,
+            merge_history} dict (Gate F-3, ADR 0122); ToolError if absent
+        build_server(*, neo4j_client=None) -> FastMCP  # registers exactly the 5 tools
     Each tool validates id-shape via read_guards BEFORE any execute_read (raising
     ``mcp.server.fastmcp.exceptions.ToolError`` on a bad id), clamps hops via
     ``read_guards.clamp_hops``, and calls the matching ``graph.queries`` helper.
@@ -194,15 +196,18 @@ def test_configure_stderr_logging_is_idempotent_and_never_stdout() -> None:
 
 
 # ======================================================================================
-# Tool set — exactly the four 2a structured tools, no raw-Cypher / query_graph.
+# Tool set — exactly the five structured tools (2a's four + Gate F-3's get_entity_dossier),
+# no raw-Cypher / query_graph. Gate F-3 (ADR 0122) deliberately breaks F-2's "exactly four"
+# pin — 4 -> 5, spec §6.1 P-2. RED today: the tool is not yet registered.
 # ======================================================================================
-def test_tool_set_is_exactly_the_four() -> None:
+def test_tool_set_is_exactly_the_five() -> None:
     server = build_server(neo4j_client=_RecordingFake(entity=_entity_fixture()))
     assert _tool_names(server) == {
         "get_entity",
         "get_neighbors",
         "get_provenance",
         "find_paths",
+        "get_entity_dossier",
     }
 
 
@@ -349,11 +354,16 @@ def test_tools_only_call_execute_read() -> None:
 # decision NOT to add a property test here).
 # ========================================================================================
 
-_ALL_TOOL_NAMES = frozenset({"get_entity", "get_neighbors", "get_provenance", "find_paths"})
+# Gate F-3 (ADR 0122, spec §6.1 P-3): 4 -> 5, deliberately breaking F-2's PP-3 pin. Propagates
+# to _list_tools's set assertion below and the F-2 annotation/schema loops, which then also
+# assert the dossier tool's annotations + non-null outputSchema once it is registered.
+_ALL_TOOL_NAMES = frozenset(
+    {"get_entity", "get_neighbors", "get_provenance", "find_paths", "get_entity_dossier"}
+)
 
 
 def _list_tools(server: Any) -> dict[str, Any]:
-    """``tools/list``, keyed by name — asserts the tool SET is still exactly the four."""
+    """``tools/list``, keyed by name — asserts the tool SET is still exactly the five."""
     tools = asyncio.run(server.list_tools())
     by_name = {t.name: t for t in tools}
     assert by_name.keys() == _ALL_TOOL_NAMES, f"tool set drifted: {by_name.keys()!r}"
@@ -442,6 +452,14 @@ def test_all_tools_have_output_schema() -> None:
         f"get_provenance's outputSchema must constrain values to strings; got {prov_schema!r}"
     )
 
+    # Gate F-3 (ADR 0122, spec §6.1 P-4): the fifth tool also carries a non-null, permissive
+    # object outputSchema (same shape family as get_entity — a dict[str, Any] return).
+    dossier_schema = tools["get_entity_dossier"].outputSchema
+    assert dossier_schema is not None, (
+        "get_entity_dossier carries no outputSchema (AC-2 — silent fallback?)"
+    )
+    assert dossier_schema.get("type") == "object"
+
 
 # --- SHOULD (not a hard acceptance gate): a non-empty human-readable title ------------
 def test_tool_titles_present() -> None:
@@ -526,3 +544,110 @@ def test_find_paths_content_and_structured_content_pp1() -> None:
     assert len(content) == len(expected) == 2, "one content block per path (PP-1 block count)"
     assert [json.loads(c.text) for c in content] == expected
     assert structured == {"result": expected}
+
+
+# ========================================================================================
+# Gate F-3 slice 1 (get_entity_dossier, ADR 0122) — the fifth tool. The thin tool function
+# is imported LOCALLY inside each test (not at module top) so a missing symbol fails ONLY
+# these new tests, never the whole module's collection (fail-soft, mirrors the existing
+# local-import idiom already used in this file / test_mcp_http_auth.py for a not-yet-shipped
+# symbol). RED today: worldmonitor.mcp.server has no tool_get_entity_dossier.
+# ========================================================================================
+
+
+def _dossier_merge_history_sentinel() -> dict[str, Any]:
+    return {"status": "not_assembled", "available": False}
+
+
+def test_get_entity_dossier_tool_returns_sections() -> None:
+    from worldmonitor.mcp.server import tool_get_entity_dossier
+
+    fake = _RecordingFake(
+        entity=_entity_fixture(),
+        neighbors=[_neighbor_with_prov()],
+        provenance={
+            "prov_source_id": "src:test",
+            "prov_source_record": "s3://landing/test/a.json",
+        },
+    )
+    dossier = _call(tool_get_entity_dossier, fake, "A")
+
+    assert set(dossier.keys()) == {"entity", "neighbors", "provenance", "merge_history"}, (
+        f"dossier must have exactly the four top-level keys (§4); got {list(dossier.keys())}"
+    )
+    assert dossier["entity"]["id"] == "A"
+    assert dossier["entity"]["prov_source_id"] == "src:test"
+    neighbor = next(n for n in dossier["neighbors"] if n.get("id") == "B")
+    assert neighbor["prov_source_id"] == "src:test"
+    assert dossier["provenance"]["prov_source_id"] == "src:test"
+    assert dossier["provenance"]["prov_source_record"] == "s3://landing/test/a.json"
+    assert dossier["merge_history"] == _dossier_merge_history_sentinel()
+
+
+def test_get_entity_dossier_absent_raises() -> None:
+    from worldmonitor.mcp.server import tool_get_entity_dossier
+
+    fake = _RecordingFake(entity=None)
+    with pytest.raises(ToolError) as exc:
+        _call(tool_get_entity_dossier, fake, "does-not-exist")
+    envelope = json.loads(str(exc.value))
+    assert envelope.get("error") == "entity not found"
+    assert isinstance(envelope.get("hint"), str) and envelope["hint"].strip() != ""
+
+
+def test_get_entity_dossier_injection_raises() -> None:
+    from worldmonitor.mcp.server import tool_get_entity_dossier
+
+    fake = _RecordingFake(entity=_entity_fixture())
+    with pytest.raises(ToolError) as exc:
+        _call(tool_get_entity_dossier, fake, _INJECTION_ID)
+    envelope = json.loads(str(exc.value))
+    assert envelope.get("error") == "invalid entity id"
+    assert isinstance(envelope.get("hint"), str) and envelope["hint"].strip() != ""
+    assert fake.read_calls == [], "an injection-shaped id must never reach execute_read"
+
+
+def test_get_entity_dossier_read_only() -> None:
+    from worldmonitor.mcp.server import tool_get_entity_dossier
+
+    fake = _RecordingFake(
+        entity=_entity_fixture(),
+        neighbors=[_neighbor_with_prov()],
+        provenance={"prov_source_id": "src:test"},
+    )
+    _call(tool_get_entity_dossier, fake, "A")
+    assert fake.read_calls, "the tool must actually query (via execute_read)"
+    for query, _ in fake.read_calls:
+        assert not _WRITE_KEYWORDS.search(query), (
+            f"get_entity_dossier issued Cypher containing a write keyword: {query!r}"
+        )
+
+
+def test_get_entity_dossier_content_and_structured_content_pp1() -> None:
+    """Mirrors the four existing PP-1 parity tests: the tool's content block(s) + structuredContent,
+    driven THROUGH the built server (server.add_tool machinery), are byte-identical (as decoded
+    JSON) to the thin tool function's own return value."""
+    from worldmonitor.mcp.server import tool_get_entity_dossier
+
+    server, fake = _all_seeded_server()
+    expected = _call(tool_get_entity_dossier, fake, "A")
+    content, structured = _call_tool(server, "get_entity_dossier", {"entity_id": "A"})
+    assert len(content) == 1, "get_entity_dossier must emit exactly ONE content block (a dict tool)"
+    assert json.loads(content[0].text) == expected
+    assert structured == expected, "structuredContent for a dict tool must be the dict itself"
+
+
+def test_get_entity_dossier_absent_error_envelope_via_call_tool() -> None:
+    """AC-3 via server.call_tool (not the bare thin function): Tool.run wraps ANY raised exception
+    as ``Error executing tool <name>: <msg>`` regardless of transport (mcp 1.28.1, confirmed in
+    Tool.run's except-Exception branch) — so this pins the SAME strip-prefix + json.loads pattern
+    the wire-level integration test uses, at the unit level."""
+    server = build_server(neo4j_client=_RecordingFake(entity=None))
+    with pytest.raises(ToolError) as exc:
+        _call_tool(server, "get_entity_dossier", {"entity_id": "does-not-exist"})
+    text = str(exc.value)
+    stripped = re.sub(r"^Error executing tool \S+: ", "", text, count=1)
+    envelope = json.loads(stripped)
+    assert set(envelope.keys()) == {"error", "hint"}
+    assert envelope["error"] == "entity not found"
+    assert isinstance(envelope["hint"], str) and envelope["hint"].strip() != ""

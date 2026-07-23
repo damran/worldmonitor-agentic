@@ -22,7 +22,13 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from worldmonitor.api.deps import get_neo4j, get_principal
 from worldmonitor.authz.oidc import Principal
 from worldmonitor.graph.neo4j_client import Neo4jClient
-from worldmonitor.graph.queries import find_paths, get_entity, get_neighbors, get_provenance
+from worldmonitor.graph.queries import (
+    find_paths,
+    get_entity,
+    get_entity_dossier,
+    get_neighbors,
+    get_provenance,
+)
 
 # Read guards (hop cap / hop clamp / id alphabet) live in one shared module so the REST
 # and MCP read surfaces can never drift (ADR 0063: one cap, one place). ``HOP_CAP`` is
@@ -78,6 +84,26 @@ def read_provenance(
     if not prov:
         raise HTTPException(status_code=404, detail="Entity not found")
     return prov
+
+
+@router.get("/entities/{entity_id}/dossier")
+def read_dossier(
+    entity_id: EntityId,
+    _principal: Annotated[Principal, Depends(get_principal)],
+    client: Annotated[Neo4jClient, Depends(get_neo4j)],
+    hops: Annotated[int, Query(ge=1)] = 1,
+) -> dict[str, Any]:
+    """Return the deterministic entity dossier (Gate F-3 slice 1, ADR 0122); 404 if absent.
+
+    A thin pass-through of :func:`worldmonitor.graph.queries.get_entity_dossier` — the ONE
+    shared assembly point also called by the MCP tool of the same name, so the two surfaces
+    never drift (ADR 0122 D1). ``hops`` is clamped to the shared cap before reaching the
+    helper, mirroring :func:`read_neighbors`.
+    """
+    dossier = get_entity_dossier(client, entity_id=entity_id, hops=clamp_hops(hops))
+    if dossier is None:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    return dossier
 
 
 @router.get("/paths")

@@ -8,7 +8,7 @@ mcp_servers:
     headers:
       Authorization: "Bearer ${WM_MCP_TOKEN}"
     tools:
-      include: [get_entity, get_neighbors, get_provenance, find_paths]   # EXACTLY the 4 read tools
+      include: [get_entity, get_neighbors, get_provenance, find_paths, get_entity_dossier]   # EXACTLY the 5 read tools
     timeout: 300
     connect_timeout: 60
     ssl_verify: true

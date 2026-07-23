@@ -169,6 +169,7 @@ def test_all_graph_routes_require_a_token() -> None:
         "/entities/A/neighbors?hops=1",
         "/entities/A/provenance",
         "/paths?from=A&to=B&max_hops=1",
+        "/entities/A/dossier",  # Gate F-3 (ADR 0122) — same auth gate as the sibling routes
     ]
     for route in routes:
         resp = client.get(route)
@@ -190,6 +191,7 @@ def test_all_graph_routes_accept_a_valid_token() -> None:
         "/entities/A/neighbors?hops=1",
         "/entities/A/provenance",
         "/paths?from=A&to=B&max_hops=1",
+        "/entities/A/dossier",  # Gate F-3 (ADR 0122) — same auth gate as the sibling routes
     ]:
         resp = client.get(route, headers=_auth())
         assert resp.status_code == 200, f"{route} -> {resp.status_code}: {resp.text}"
@@ -406,3 +408,113 @@ def test_paths_allows_from_equals_to() -> None:
     _, params = call
     assert params.get("from_id") == "A", f"from_id not passed through to find_paths: {params}"
     assert params.get("to_id") == "A", f"to_id not passed through to find_paths: {params}"
+
+
+# ======================================================================================
+# Gate F-3 slice 1 — GET /entities/{id}/dossier (ADR 0122). The route doesn't exist yet on
+# the current tree, so every request below 404s (FastAPI's default "route not found"
+# handler) regardless of id validity — a NAIVE 404-only assertion would pass vacuously for
+# the wrong reason. So the 404 test below additionally pins the explicit ``detail`` body
+# ``read_entity`` uses (the route's OWN not-found idiom, spec §4.1), which only a REAL
+# implementation can produce; a route-not-found 404 carries FastAPI's generic
+# ``{"detail": "Not Found"}`` instead. No import of a not-yet-existing symbol is needed
+# here — the route is exercised purely over HTTP, so this section is fail-soft by
+# construction (assertions fail; the module still collects and the rest of the file
+# stays green).
+# ======================================================================================
+
+
+def test_dossier_returns_assembled_sections() -> None:
+    fake = _FakeNeo4jClient(
+        entity=_entity_fixture(),
+        neighbors=[_neighbor_with_prov()],
+        provenance={
+            "prov_source_id": "src:test",
+            "prov_source_record": "s3://landing/test/a.json",
+        },
+    )
+    resp = _client(_FakeVerifier(), fake).get("/entities/A/dossier", headers=_auth())
+    assert resp.status_code == 200, f"{resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert isinstance(body, dict)
+    assert set(body.keys()) == {"entity", "neighbors", "provenance", "merge_history"}, (
+        f"dossier body must have exactly the four top-level keys (§4); got {list(body.keys())}"
+    )
+    assert body["entity"]["id"] == "A"
+    assert body["entity"]["prov_source_id"] == "src:test"
+    neighbor = next(n for n in body["neighbors"] if n.get("id") == "B")
+    assert neighbor["prov_source_id"] == "src:test"
+    assert body["provenance"]["prov_source_id"] == "src:test"
+    assert body["provenance"]["prov_source_record"] == "s3://landing/test/a.json"
+    assert body["merge_history"] == {"status": "not_assembled", "available": False}
+
+
+def test_dossier_absent_entity_404() -> None:
+    fake = _FakeNeo4jClient(entity=None)
+    resp = _client(_FakeVerifier(), fake).get("/entities/zzz-absent/dossier", headers=_auth())
+    assert resp.status_code == 404, f"{resp.status_code}: {resp.text}"
+    # Pins the ROUTE's OWN not-found idiom (mirrors read_entity's HTTPException detail) so
+    # this can't pass merely because the route doesn't exist yet.
+    assert resp.json().get("detail") == "Entity not found", (
+        f"dossier 404 must carry the route's own 'Entity not found' detail (not a generic "
+        f"route-not-found 404); got {resp.json()!r}"
+    )
+
+
+def test_dossier_rejects_injection_id_422() -> None:
+    fake = _FakeNeo4jClient(entity=_entity_fixture())
+    # NOT a trailing "//" — that quotes to a literal path separator (%2F%2F), so
+    # "/entities/<...>///dossier" matches NO route and 404s at the router before
+    # Path(pattern=...) validation ever runs. "--" keeps the same injection intent
+    # (a Cypher comment terminator) without introducing a path-separator byte.
+    payload = quote('") DETACH DELETE n --', safe="")
+    resp = _client(_FakeVerifier(), fake).get(f"/entities/{payload}/dossier", headers=_auth())
+    assert resp.status_code in (400, 422), (
+        f"injection-shaped id must be rejected: {resp.status_code}"
+    )
+    assert fake.calls == [], "validation must short-circuit before the Neo4j client is touched"
+
+
+def test_dossier_hops_clamped() -> None:
+    # entity= is REQUIRED here (unlike the sibling /neighbors clamp test): the dossier's
+    # mandatory short-circuit 404s before get_neighbors ever runs when get_entity is None.
+    fake = _FakeNeo4jClient(entity=_entity_fixture(), neighbors=[_neighbor_with_prov()])
+    resp = _client(_FakeVerifier(), fake).get("/entities/A/dossier?hops=99", headers=_auth())
+    assert resp.status_code == 200, f"{resp.status_code}: {resp.text}"
+    call = fake.neighbors_call()
+    assert call is not None, "the neighbors helper was never invoked by the dossier route"
+    query, _ = call
+    match = re.search(r"\*1\.\.(\d+)", query)
+    assert match is not None, f"could not read the traversal depth from: {query!r}"
+    depth = int(match.group(1))
+    assert depth == EXPECTED_HOP_CAP, f"hops not clamped: traversal bound was {depth}, want 4"
+    assert "99" not in query, "the unclamped hop count leaked into the query"
+
+
+# ======================================================================================
+# AC-5 — REST <-> MCP lockstep parity (spec §3.2 / §6.4): ONE shared recording fake drives
+# BOTH thin surfaces for the SAME entity_id/hops; the decoded REST body must deep-equal the
+# MCP tool's returned dict. ``tool_get_entity_dossier`` is imported LOCALLY (fail-soft: a
+# missing symbol fails only this test, not the whole module).
+# ======================================================================================
+def test_dossier_rest_mcp_parity() -> None:
+    from worldmonitor.mcp.server import tool_get_entity_dossier
+
+    fake = _FakeNeo4jClient(
+        entity=_entity_fixture(),
+        neighbors=[_neighbor_with_prov()],
+        provenance={
+            "prov_source_id": "src:test",
+            "prov_source_record": "s3://landing/test/a.json",
+        },
+    )
+    rest_resp = _client(_FakeVerifier(), fake).get("/entities/A/dossier?hops=1", headers=_auth())
+    assert rest_resp.status_code == 200, f"{rest_resp.status_code}: {rest_resp.text}"
+    rest_body = rest_resp.json()
+
+    mcp_result = tool_get_entity_dossier(fake, "A", hops=1)
+
+    assert rest_body == mcp_result, (
+        "REST body and MCP tool result must be byte-identical (as decoded JSON) for the same "
+        f"seeded input (AC-5 lockstep): rest={rest_body!r} mcp={mcp_result!r}"
+    )

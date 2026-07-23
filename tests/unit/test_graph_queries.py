@@ -162,3 +162,194 @@ def test_get_neighbors_is_read_only() -> None:
     )
     # Exactly one read ran; no write method was ever invoked (they raise if touched).
     assert len(fake.read_calls) == 1
+
+
+# ======================================================================================
+# Gate F-3 slice 1 (get_entity_dossier, ADR 0122, spec §6.5) — the shared assembly helper.
+# ``get_entity_dossier`` is imported LOCALLY inside each test (not at module top) so a
+# missing symbol fails ONLY these new tests, never the whole module's collection (the
+# module's existing get_neighbors/find_paths tests must stay green). RED today:
+# worldmonitor.graph.queries has no get_entity_dossier.
+#
+# _DossierFake (distinct from the query-string-only _RecordingFake above) dispatches
+# canned rows per Cypher FRAGMENT so it can stand in for get_entity/get_neighbors/
+# get_provenance simultaneously — mirroring the identical fake shape already used in
+# tests/unit/test_mcp_server.py and tests/unit/test_api_graph.py.
+# ======================================================================================
+
+_ENTITY_FRAGMENT = "RETURN properties(n) AS props"
+_NEIGHBORS_FRAGMENT = "properties(m) AS props"
+_PROVENANCE_FRAGMENT = "STARTS WITH 'prov_'"
+
+
+class _DossierFake:
+    def __init__(
+        self,
+        *,
+        entity: dict[str, Any] | None = None,
+        neighbors: list[dict[str, Any]] | None = None,
+        provenance: dict[str, str] | None = None,
+    ) -> None:
+        self.entity = entity
+        self.neighbors = neighbors or []
+        self.provenance = provenance
+        self.read_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def execute_read(self, query: str, /, **params: Any) -> list[dict[str, Any]]:
+        self.read_calls.append((query, params))
+        if _ENTITY_FRAGMENT in query and _NEIGHBORS_FRAGMENT not in query:
+            return [{"props": self.entity}] if self.entity is not None else []
+        if _NEIGHBORS_FRAGMENT in query:
+            return [{"props": n} for n in self.neighbors]
+        if _PROVENANCE_FRAGMENT in query:
+            if self.provenance is None:
+                return []
+            return [{"prov": [[k, v] for k, v in self.provenance.items()]}]
+        return []
+
+    def execute_write(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        raise AssertionError("get_entity_dossier must NEVER call execute_write")
+
+    def session(self) -> Any:
+        raise AssertionError("get_entity_dossier must NEVER open a write session")
+
+    def call_with(self, fragment: str) -> tuple[str, dict[str, Any]] | None:
+        for query, params in self.read_calls:
+            if fragment in query:
+                return query, params
+        return None
+
+
+def _dossier_entity_fixture() -> dict[str, Any]:
+    return {
+        "id": "A",
+        "name": ["Acme Holdings"],
+        "prov_source_id": "src:test",
+        "prov_source_record": "s3://landing/test/a.json",
+        "prov_retrieved_at": "2026-06-21T00:00:00Z",
+        "prov_reliability": "A",
+    }
+
+
+def _dossier_neighbor_fixture() -> dict[str, Any]:
+    return {
+        "id": "B",
+        "name": ["Beta"],
+        "prov_source_id": "src:test",
+        "prov_source_record": "s3://landing/b.json",
+    }
+
+
+# --- AC-1 / §4: the helper assembles all four sections, sourced ONLY from the three
+# existing helpers' queries (no new Cypher) --------------------------------------------
+def test_get_entity_dossier_assembles_sections() -> None:
+    from worldmonitor.graph.queries import get_entity_dossier
+
+    fake = _DossierFake(
+        entity=_dossier_entity_fixture(),
+        neighbors=[_dossier_neighbor_fixture()],
+        provenance={
+            "prov_source_id": "src:test",
+            "prov_source_record": "s3://landing/test/a.json",
+        },
+    )
+    dossier = get_entity_dossier(fake, entity_id="A")
+
+    assert dossier is not None
+    assert set(dossier.keys()) == {"entity", "neighbors", "provenance", "merge_history"}, (
+        f"dossier must have exactly the four top-level keys (§4); got {list(dossier.keys())}"
+    )
+    assert dossier["entity"]["id"] == "A"
+    assert dossier["entity"]["prov_source_id"] == "src:test"
+    neighbor = next(n for n in dossier["neighbors"] if n.get("id") == "B")
+    assert neighbor["prov_source_id"] == "src:test"
+    assert dossier["provenance"] == {
+        "prov_source_id": "src:test",
+        "prov_source_record": "s3://landing/test/a.json",
+    }
+    assert dossier["merge_history"] == {"status": "not_assembled", "available": False}
+
+    # AC-1: no new Cypher — exactly one read per existing helper (entity/neighbors/prov),
+    # and every recorded query matches one of the three known fragments.
+    assert len(fake.read_calls) == 3, (
+        f"expected exactly 3 reads (one per existing helper), got {len(fake.read_calls)}: "
+        f"{fake.read_calls}"
+    )
+    for query, _ in fake.read_calls:
+        assert (
+            _ENTITY_FRAGMENT in query
+            or _NEIGHBORS_FRAGMENT in query
+            or _PROVENANCE_FRAGMENT in query
+        ), f"get_entity_dossier issued Cypher outside the three existing helpers: {query!r}"
+
+
+# --- §9.2: the None short-circuit — absent entity does ONE read, never three ----------
+def test_get_entity_dossier_none_when_absent() -> None:
+    from worldmonitor.graph.queries import get_entity_dossier
+
+    fake = _DossierFake(entity=None)
+    dossier = get_entity_dossier(fake, entity_id="zzz-absent")
+
+    assert dossier is None
+    assert len(fake.read_calls) == 1, (
+        "an absent entity must short-circuit BEFORE calling get_neighbors/get_provenance "
+        f"(one read, not three); got {len(fake.read_calls)}: {fake.read_calls}"
+    )
+    assert _ENTITY_FRAGMENT in fake.read_calls[0][0], (
+        "the single read for an absent entity must be the get_entity query"
+    )
+
+
+# --- §4.1 / §9.6: hops clamp to the shared cap, propagated to the underlying
+# get_neighbors call (mirrors test_get_neighbors_clamps_own_depth_to_hop_cap) ----------
+def test_get_entity_dossier_clamps_hops_to_hop_cap() -> None:
+    from worldmonitor.graph.queries import get_entity_dossier
+
+    fake = _DossierFake(entity=_dossier_entity_fixture(), neighbors=[_dossier_neighbor_fixture()])
+    get_entity_dossier(fake, entity_id="A", hops=99)
+
+    call = fake.call_with(_NEIGHBORS_FRAGMENT)
+    assert call is not None, "get_entity_dossier never invoked the neighbors helper"
+    query, _ = call
+    assert _depth_bound(query) == read_guards.HOP_CAP, (
+        f"dossier neighbours must clamp to read_guards.HOP_CAP ({read_guards.HOP_CAP}); "
+        f"got *1..{_depth_bound(query)}"
+    )
+    assert "99" not in query, f"the unclamped hop count leaked into the query: {query!r}"
+
+
+# --- ADR 0064: the dossier's neighbours inherit get_neighbors' result LIMIT -----------
+def test_get_entity_dossier_neighbors_limit_matches_read_guards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from worldmonitor.graph.queries import get_entity_dossier
+
+    monkeypatch.setattr(read_guards, "NEIGHBOR_RESULT_LIMIT", 7, raising=False)
+    fake = _DossierFake(entity=_dossier_entity_fixture(), neighbors=[_dossier_neighbor_fixture()])
+    get_entity_dossier(fake, entity_id="A")
+
+    call = fake.call_with(_NEIGHBORS_FRAGMENT)
+    assert call is not None, "get_entity_dossier never invoked the neighbors helper"
+    query, _ = call
+    assert _limit_value(query) == 7, (
+        f"dossier neighbours must carry the SAME LIMIT as get_neighbors (monkeypatched to 7); "
+        f"got {query!r}"
+    )
+
+
+# --- §3.3 / AC-7: merge_history is the exact recorded-absence sentinel, always -------
+def test_get_entity_dossier_merge_history_is_exact_sentinel_constant() -> None:
+    from worldmonitor.graph.queries import get_entity_dossier
+
+    fake = _DossierFake(
+        entity=_dossier_entity_fixture(),
+        neighbors=[],
+        provenance={"prov_source_id": "src:test"},
+    )
+    dossier = get_entity_dossier(fake, entity_id="A")
+    assert dossier is not None
+    assert dossier["merge_history"] == {"status": "not_assembled", "available": False}
+    assert dossier["merge_history"]["status"] == "not_assembled"
+    assert dossier["merge_history"]["available"] is False
+    # No Postgres/Session dependency: the fake exposes NO session()/db surface beyond
+    # execute_read, and it was reached without error — proving the helper never touched one.
