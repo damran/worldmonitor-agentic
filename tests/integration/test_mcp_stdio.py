@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -35,6 +36,7 @@ from typing import Any
 import pytest
 from mcp.types import LATEST_PROTOCOL_VERSION
 
+from worldmonitor.graph import queries
 from worldmonitor.graph.constraints import ensure_constraints
 from worldmonitor.graph.neo4j_client import Neo4jClient
 from worldmonitor.graph.writer import write_entities
@@ -357,3 +359,150 @@ def test_stdio_get_neighbors_and_paths_bounded(
     assert any("c1" in nodes and "c2" in nodes for nodes in far), (
         f"p1 -> c2 via c1 must be returned at max_hops=3; got {far}"
     )
+
+
+# ========================================================================================
+# Gate F-2 (MCP contract polish, ADR 0121) — wire-level pins: annotations + outputSchema on
+# tools/list (AC-4), PP-1 happy-path content parity on the wire, and the {error, hint}
+# envelope recoverable from a raised ToolError's wire text once the SDK's
+# ``Error executing tool <name>: `` prefix is stripped (AC-3 on the wire, ADR 0121 D3/§1.2).
+# ========================================================================================
+
+_TOOL_ERROR_PREFIX_RE = re.compile(r"^Error executing tool \S+: ")
+
+
+def _strip_tool_error_prefix(text: str) -> str:
+    """Strip the SDK's ``Error executing tool <name>: `` prefix (ADR 0121 D3, spec §1.2).
+
+    ``Tool.run`` re-wraps any exception as ``ToolError(f"Error executing tool {name}: {e}")``
+    — there is no un-prefixed raise path in mcp 1.28.1 — so a wire-level error test must
+    strip this known prefix before ``json.loads``-ing the remainder.
+    """
+    return _TOOL_ERROR_PREFIX_RE.sub("", text, count=1)
+
+
+def test_stdio_tools_list_advertises_annotations_and_schema(
+    clean_graph: Neo4jClient, neo4j_conn: tuple[str, str, str]
+) -> None:
+    """AC-4: the wire ``tools/list`` frame carries ``annotations.readOnlyHint == true`` and a
+    non-null ``outputSchema`` for all four tools."""
+    _seed_owns_chain(clean_graph)
+
+    frames, _out, err = _stdio_session(neo4j_conn, [("tools/list", {})])
+    assert frames, f"server produced no JSON-RPC frames on stdout; stderr:\n{err}"
+    by_id = _by_id(frames)
+
+    tools = by_id[2]["result"]["tools"]
+    names = {t["name"] for t in tools}
+    assert names == {"get_entity", "get_neighbors", "get_provenance", "find_paths"}, names
+
+    for tool in tools:
+        annotations = tool.get("annotations")
+        assert annotations is not None, (
+            f"{tool['name']} carries no 'annotations' object on the wire tools/list frame"
+        )
+        assert annotations.get("readOnlyHint") is True, (
+            f"{tool['name']}.annotations.readOnlyHint must be true on the wire; got {annotations!r}"
+        )
+        assert tool.get("outputSchema") is not None, (
+            f"{tool['name']} carries no 'outputSchema' on the wire tools/list frame"
+        )
+
+
+def test_stdio_happy_path_content_unchanged(
+    clean_graph: Neo4jClient, neo4j_conn: tuple[str, str, str]
+) -> None:
+    """PP-1 (AC-4): the ``get_entity``/``get_neighbors`` content text block(s), decoded, are
+    deep-equal to the SAME ``graph.queries`` helper's return value queried directly against
+    the same graph — proving the new annotations/output-schema registration adds ZERO
+    happy-path payload bytes. ``structuredContent`` is additionally present and consistent.
+    """
+    _seed_owns_chain(clean_graph)
+
+    expected_entity = queries.get_entity(clean_graph, entity_id="p1")
+    expected_neighbors = queries.get_neighbors(clean_graph, entity_id="p1", hops=1)
+    assert expected_entity is not None, "seed fixture broken: p1 must exist"
+    assert expected_neighbors, "seed fixture broken: p1 must have at least one one-hop neighbour"
+
+    frames, _out, err = _stdio_session(
+        neo4j_conn,
+        [
+            ("tools/call", {"name": "get_entity", "arguments": {"entity_id": "p1"}}),  # id 2
+            ("tools/call", {"name": "get_neighbors", "arguments": {"entity_id": "p1"}}),  # id 3
+        ],
+    )
+    assert frames, f"server produced no JSON-RPC frames on stdout; stderr:\n{err}"
+    by_id = _by_id(frames)
+
+    entity_result = by_id[2]["result"]
+    assert not entity_result.get("isError"), f"get_entity(p1) must not error: {entity_result}"
+    entity_content = entity_result["content"]
+    assert len(entity_content) == 1, "PP-1: get_entity must emit exactly ONE content block"
+    assert json.loads(entity_content[0]["text"]) == expected_entity, (
+        "PP-1: get_entity's content block must be byte-identical (as decoded JSON) to "
+        "graph.queries.get_entity's own return value"
+    )
+    assert entity_result.get("structuredContent") == expected_entity, (
+        "structuredContent for get_entity (a dict tool) must be the dict itself, unwrapped"
+    )
+
+    neighbors_result = by_id[3]["result"]
+    assert not neighbors_result.get("isError"), (
+        f"get_neighbors(p1) must not error: {neighbors_result}"
+    )
+    neighbors_content = neighbors_result["content"]
+    assert len(neighbors_content) == len(expected_neighbors), (
+        "PP-1: one content block per neighbour, block count unchanged"
+    )
+    decoded_neighbors = [json.loads(block["text"]) for block in neighbors_content]
+    assert decoded_neighbors == expected_neighbors, (
+        "PP-1: get_neighbors content blocks must be byte-identical (as decoded JSON) to "
+        "graph.queries.get_neighbors's own return value"
+    )
+    assert neighbors_result.get("structuredContent") == {"result": expected_neighbors}, (
+        "structuredContent for get_neighbors (a list tool) must be SDK-wrapped as {'result': [...]}"
+    )
+
+
+def test_stdio_error_envelope_on_wire(
+    clean_graph: Neo4jClient, neo4j_conn: tuple[str, str, str]
+) -> None:
+    """AC-3 on the wire: ``get_entity(<absent>)`` / ``get_entity(<injection>)`` surface
+    ``isError=true`` with a ``{"error", "hint"}`` JSON object recoverable from
+    ``content[0].text`` after stripping the SDK's ``Error executing tool <name>: ``
+    prefix (ADR 0121 D3)."""
+    _seed_owns_chain(clean_graph)
+
+    frames, _out, err = _stdio_session(
+        neo4j_conn,
+        [
+            (
+                "tools/call",
+                {"name": "get_entity", "arguments": {"entity_id": "zzz-absent"}},
+            ),  # id 2
+            (
+                "tools/call",
+                {"name": "get_entity", "arguments": {"entity_id": _INJECTION_ID}},
+            ),  # id 3
+        ],
+    )
+    assert frames, f"server produced no JSON-RPC frames on stdout; stderr:\n{err}"
+    by_id = _by_id(frames)
+
+    absent = by_id[2]
+    assert _is_error_outcome(absent), f"absent entity must surface as an error frame: {absent}"
+    absent_text = absent["result"]["content"][0]["text"]
+    envelope = json.loads(_strip_tool_error_prefix(absent_text))
+    assert set(envelope.keys()) == {"error", "hint"}, (
+        f"error envelope must be exactly {{error, hint}}: {envelope!r}"
+    )
+    assert envelope["error"] == "entity not found"
+    assert isinstance(envelope["hint"], str) and envelope["hint"].strip() != ""
+
+    injected = by_id[3]
+    assert _is_error_outcome(injected), f"injection id must surface as an error frame: {injected}"
+    injected_text = injected["result"]["content"][0]["text"]
+    envelope2 = json.loads(_strip_tool_error_prefix(injected_text))
+    assert set(envelope2.keys()) == {"error", "hint"}
+    assert envelope2["error"] == "invalid entity id"
+    assert isinstance(envelope2["hint"], str) and envelope2["hint"].strip() != ""

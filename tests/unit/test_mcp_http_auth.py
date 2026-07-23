@@ -405,3 +405,64 @@ def test_inv_s1_stdio_build_server_constructs_without_auth() -> None:
     assert tools == {"get_entity", "get_neighbors", "get_provenance", "find_paths"}, (
         f"stdio build_server must still register the four tools: {tools!r}"
     )
+
+
+# ── Gate F-2 (ADR 0121): HTTP transport carries the SAME annotations/output-schema as
+#    stdio (INV-S1-READONLY no-drift, extended to the new contract-polish fields). This
+#    reuses the shared `_register_read_tools` — the ONE registration site both transports
+#    call — because `build_http_app`'s returned Starlette app (from `streamable_http_app()`)
+#    exposes no tool-list introspection once wrapped as an ASGI app.
+
+
+def test_http_tools_carry_same_annotations_and_schema_as_stdio() -> None:
+    """The HTTP-mounted tool set carries the same readOnlyHint/idempotentHint/openWorldHint
+    annotations AND a non-null outputSchema as the stdio surface, for all four tools."""
+    from mcp.server.fastmcp import FastMCP
+
+    from worldmonitor.mcp.server import _register_read_tools
+
+    fake_http = _RecordingFake()
+    fake_stdio = _RecordingFake()
+    verifier = _make_mcp_verifier()
+
+    auth_cfg = build_auth_settings(issuer_url=_ISSUER_URL, resource_server_url=None)
+    http_server = FastMCP(
+        name="worldmonitor-graph-read",
+        auth=auth_cfg,
+        token_verifier=verifier,
+        stateless_http=True,
+    )
+    _register_read_tools(http_server, fake_http)
+
+    stdio_server = build_server(neo4j_client=fake_stdio)
+
+    http_tools = {t.name: t for t in asyncio.run(http_server.list_tools())}
+    stdio_tools = {t.name: t for t in asyncio.run(stdio_server.list_tools())}
+
+    expected_names = {"get_entity", "get_neighbors", "get_provenance", "find_paths"}
+    assert http_tools.keys() == expected_names, f"HTTP tool set drifted: {http_tools.keys()!r}"
+    assert stdio_tools.keys() == expected_names, f"stdio tool set drifted: {stdio_tools.keys()!r}"
+
+    for name in expected_names:
+        http_ann = http_tools[name].annotations
+        stdio_ann = stdio_tools[name].annotations
+        assert http_ann is not None, f"{name} carries no annotations on the HTTP transport"
+        assert stdio_ann is not None, f"{name} carries no annotations on the stdio transport"
+
+        http_triple = (http_ann.readOnlyHint, http_ann.idempotentHint, http_ann.openWorldHint)
+        stdio_triple = (stdio_ann.readOnlyHint, stdio_ann.idempotentHint, stdio_ann.openWorldHint)
+        assert http_triple == (True, True, False), (
+            f"{name}: HTTP (readOnlyHint, idempotentHint, openWorldHint) must be "
+            f"(True, True, False); got {http_triple!r}"
+        )
+        assert http_triple == stdio_triple, (
+            f"{name}: HTTP annotations drifted from stdio (INV-S1 no-drift): "
+            f"http={http_triple!r} stdio={stdio_triple!r}"
+        )
+
+        assert http_tools[name].outputSchema is not None, (
+            f"{name} carries no outputSchema on the HTTP transport"
+        )
+        assert stdio_tools[name].outputSchema is not None, (
+            f"{name} carries no outputSchema on the stdio transport"
+        )
