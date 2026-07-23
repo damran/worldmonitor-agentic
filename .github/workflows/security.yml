@@ -3,10 +3,10 @@ name: security
 # Supply-chain + static security scanning. The `security` job (Trivy) is the
 # status check that branch protection requires alongside `quality`.
 #
-# CodeQL is intentionally NOT run here: this repo is private and GitHub code
-# scanning (Advanced Security) is not enabled, so the CodeQL SARIF upload fails
-# with a configuration error. Re-add a `codeql` job once GHAS/code scanning is
-# enabled on the repository.
+# CodeQL runs in the `codeql` job below: the repo is public since 2026-07-23,
+# so GitHub code scanning is free and the SARIF upload works. `codeql` is NOT a
+# branch-protection-required check (the required set stays quality/security/…);
+# findings surface in the Security tab.
 
 on:
   push:
@@ -46,3 +46,32 @@ jobs:
           # source; scanning them for secrets/vuln/misconfig is pure false-positive noise (ADR 0115,
           # Slice D). They are self-hosted static assets, loaded but never executed server-side.
           skip-dirs: src/worldmonitor/api/static/app/vendor
+
+  codeql:
+    name: codeql (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # python = the platform; javascript-typescript = the small dashboard JS
+        # (vendored minified bundles under api/static/app/vendor are excluded via config).
+        language: [python, javascript-typescript]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          config: |
+            paths-ignore:
+              - src/worldmonitor/api/static/app/vendor
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: codeql/${{ matrix.language }}
