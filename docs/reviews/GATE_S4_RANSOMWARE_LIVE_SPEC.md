@@ -186,7 +186,11 @@ column is on the **`statement`** table, not `connector_instance`; the ORM field 
 `driver.py:533`, calls `run_ingest(...)` **without** `reliability`, so today every source stamps the
 `"B"` default (`ingest.py:116`). Threading `"E"` therefore requires three additive, reversible changes:
 
-1. **New migration** `0015_connector_instance_reliability.py` — `op.add_column("connector_instance",
+1. **New migration** `0015_connector_reliability.py` **[CODE-WINS correction: renamed from
+   `0015_connector_instance_reliability.py` — that 35-char revision id overflows
+   `alembic_version.version_num VARCHAR(32)`; every prior revision id equals its filename and
+   `0013_erasure_scrub_dataset_index` sits exactly at the 32-char boundary, so this repo's chain
+   depends on staying at/under it]** — `op.add_column("connector_instance",
    sa.Column("reliability", sa.String(length=16), nullable=True))` (+ `down_revision` = the current
    head `0014_article_text`; `downgrade()` drops it). Closes the drift; no data change.
 2. **`SeedSpec`** (`db/seed.py:44-58`) gains `reliability: str | None = None`; `seed()` writes
@@ -196,7 +200,11 @@ column is on the **`statement`** table, not `connector_instance`; the ORM field 
    existing `"B"` behavior for every other connector is byte-identical.
 
 `ingest.py`'s `reliability` param already exists — no change (in scope for reference only).
-`models.py` already declares the column — no change (in scope only so the migration matches it).
+**[CODE-WINS correction]** the sentence above ("`models.py` already declares the column — no
+change") is **wrong**: `db/models.py:362` is `StatementRecord.reliability` (the `statement` table),
+and `ConnectorInstance` had **no** `reliability` ORM field at all — not drift-from-a-migration, an
+outright missing field. Slice 1 therefore adds **four** things, not three: the `ConnectorInstance`
+ORM field itself (`db/models.py`), the migration, the `SeedSpec` field, and the driver thread.
 **Known residual** (documented, not fixed here to keep the gate small): `operator_run.py` (manual
 REST-triggered runs) still passes no `reliability` ⇒ a *manual* run of this connector stamps `"B"`.
 The autonomous/live path (the driver, "shipping") stamps `"E"`. Recorded as an ADR revisit trigger.
@@ -247,7 +255,9 @@ Draft 2020-12, `additionalProperties: false`, `required: ["dataset"]`:
 ## 9. Acceptance criteria + named tests
 
 ### Slice 1 — reliability threading (infra; connector-independent)
-Scope: `db/migrations/versions/0015_connector_instance_reliability.py` (new), `db/seed.py`,
+Scope: `db/migrations/versions/0015_connector_reliability.py` (new; see the §5 [CODE-WINS
+correction] — renamed from `0015_connector_instance_reliability.py`, VARCHAR(32) revision-id
+column), `db/seed.py`,
 `runner/driver.py`, `docs/decisions/0120-*.md` (PROPOSED) + regenerated `docs/decisions/README.md`.
 - **AC1** `SeedSpec(reliability="E")` persists to `ConnectorInstance.reliability`; a spec with
   `reliability=None` writes NULL. — `tests/unit/test_seed.py` (extend): a new case asserting the

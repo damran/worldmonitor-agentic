@@ -48,7 +48,10 @@ class SeedSpec:
     ``natural_key`` is the stable identity *within* a connector (a feed's URL, a dataset name,
     ``"firehose"`` for a single stream) — it makes the id deterministic without depending on the
     (Fernet-nondeterministic) encrypted config. ``category`` is informational only (the driver
-    never reads it; it is not stored — the feeds schema forbids extra keys).
+    never reads it; it is not stored — the feeds schema forbids extra keys). ``reliability`` (Gate
+    S-4 slice 1, ADR 0120) is the admiralty-scale provenance grade to persist onto the seeded
+    ``ConnectorInstance`` row; ``None`` (the default, every pre-S4 spec) writes NULL, so the driver
+    falls back to its historical hardcoded ``"B"`` — byte-identical to before this field existed.
     """
 
     connector_id: str
@@ -56,6 +59,7 @@ class SeedSpec:
     config: dict[str, Any]
     enabled: bool = True
     category: str = ""
+    reliability: str | None = None
 
     @property
     def instance_id(self) -> str:
@@ -262,6 +266,7 @@ def seed(
                     connector_id=spec.connector_id,
                     config_encrypted=cipher.encrypt(json.dumps(spec.config)),
                     status="enabled" if spec.enabled else "disabled",
+                    reliability=spec.reliability,
                 )
             )
             inserted.append(spec)
