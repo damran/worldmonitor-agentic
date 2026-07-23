@@ -24,7 +24,14 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, create_engine, inspect, make_url, text
 
 from worldmonitor.db._migration_guard import apply_migration_timeouts
-from worldmonitor.db.engine import _alembic_config, create_all, make_engine, migrate_to_head
+from worldmonitor.db.engine import (
+    _alembic_config,
+    create_all,
+    make_engine,
+    migrate_to_head,
+    session_factory,
+)
+from worldmonitor.db.models import ConnectorInstance
 
 pytestmark = pytest.mark.integration
 
@@ -308,3 +315,63 @@ def test_partial_restore_is_refused_not_blindly_stamped(
     assert _alembic_version(engine) is None, "a refused partial restore must not be stamped"
     assert "sign_off" not in set(inspect(engine).get_table_names())
     engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Gate S-4 slice 1 (AC3) — connector_instance.reliability migration round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_connector_instance_reliability_migration_round_trips(postgres_dsn: str) -> None:
+    """GATE_S4_RANSOMWARE_LIVE_SPEC.md §5/§9, ADR 0120 slice 1: a new migration adds the
+    (currently-missing) ``connector_instance.reliability`` column on ``alembic upgrade head`` —
+    closing the ORM/DB drift the spec's own research surfaced (the ORM declared no such column
+    and neither did any migration) — and downgrading ONE step drops it again.
+
+    The existence check is deliberately ``create_all``-independent (asserted straight off
+    ``inspect(engine)`` after ``migrate_to_head``, never compared against a ``create_all``
+    reference schema) so this test cannot pass merely because the ORM model and a *different*
+    migration happen to agree; it pins the migration itself. A follow-up ORM write/read-back
+    proves the column is actually usable, not just declared.
+    """
+    engine = make_engine(_create_fresh_database(postgres_dsn))
+    try:
+        migrate_to_head(engine)
+
+        columns = {c["name"]: c for c in inspect(engine).get_columns("connector_instance")}
+        assert "reliability" in columns, (
+            "alembic upgrade head must add connector_instance.reliability "
+            f"(create_all-independent check) — got columns {sorted(columns)}"
+        )
+        assert columns["reliability"]["nullable"] is True, (
+            f"connector_instance.reliability must be nullable — got {columns['reliability']}"
+        )
+
+        # The column is genuinely usable (ORM write, then a read-back off a fresh session).
+        sessions = session_factory(engine)
+        with sessions() as session:
+            session.add(
+                ConnectorInstance(
+                    id="s4-ac3-migration",
+                    connector_id="ransomware_live",
+                    config_encrypted="x",
+                    status="enabled",
+                    reliability="E",
+                )
+            )
+            session.commit()
+        with sessions() as session:
+            row = session.get(ConnectorInstance, "s4-ac3-migration")
+            assert row is not None and row.reliability == "E", (
+                f"expected the written 'E' to read back unchanged, got {row!r}"
+            )
+
+        # Downgrading exactly one step must remove the column again (a clean revert).
+        command.downgrade(_alembic_config(engine), "-1")
+        post_columns = {c["name"] for c in inspect(engine).get_columns("connector_instance")}
+        assert "reliability" not in post_columns, (
+            "downgrading one step must drop connector_instance.reliability again "
+            f"— still present: {sorted(post_columns)}"
+        )
+    finally:
+        engine.dispose()
