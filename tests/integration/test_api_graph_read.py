@@ -169,3 +169,31 @@ def test_paths_route_connects_two_seeded_entities(clean_graph: Neo4jClient) -> N
     bounded = client.get("/paths?from=p1&to=c2&max_hops=1", headers=_auth())
     assert bounded.status_code == 200
     assert _as_list(bounded.json(), "paths") == []
+
+
+def test_dossier_over_testcontainer(clean_graph: Neo4jClient) -> None:
+    """Gate F-3 slice 1 (ADR 0122): ``GET /entities/{id}/dossier`` against a REAL Neo4j —
+    200 assembled (entity incl. ``prov_*``, a neighbors list, a non-empty provenance map,
+    the merge_history sentinel) for a seeded node; 404 absent."""
+    _seed_chain(clean_graph)
+    client = _client(clean_graph)
+
+    resp = client.get("/entities/p1/dossier", headers=_auth())
+    assert resp.status_code == 200, f"{resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert set(body.keys()) == {"entity", "neighbors", "provenance", "merge_history"}, (
+        f"dossier body must have exactly the four top-level keys; got {list(body.keys())}"
+    )
+    assert "Jane Target" in body["entity"]["name"]
+    assert body["entity"]["prov_source_id"] == _PROV.source_id
+
+    neighbor_ids = {n.get("id") for n in body["neighbors"]}
+    assert "c1" in neighbor_ids, f"c1 must be a one-hop neighbour of p1; got {neighbor_ids}"
+
+    assert body["provenance"]["prov_source_id"] == _PROV.source_id
+    assert body["provenance"]["prov_source_record"] == _PROV.source_record
+
+    assert body["merge_history"] == {"status": "not_assembled", "available": False}
+
+    absent = client.get("/entities/nope/dossier", headers=_auth())
+    assert absent.status_code == 404

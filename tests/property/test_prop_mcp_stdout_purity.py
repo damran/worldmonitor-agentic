@@ -64,8 +64,15 @@ class _RecordingFake:
 
     def execute_read(self, query: str, /, **params: Any) -> list[dict[str, Any]]:
         self.read_calls.append((query, params))
+        if "RETURN properties(n) AS props" in query and "properties(m) AS props" not in query:
+            # get_entity (incl. via get_entity_dossier) -> a present, prov-stamped node, so
+            # the dossier property test below also exercises the get_neighbors leg instead
+            # of always short-circuiting on an absent entity.
+            return [{"props": {"id": params.get("entity_id", "x"), "prov_source_id": "src:test"}}]
         if "properties(m) AS props" in query:
             return []  # get_neighbors -> empty neighbour set
+        if "STARTS WITH 'prov_'" in query:
+            return [{"prov": [["prov_source_id", "src:test"]]}]
         # find_paths fallback -> no path.
         return []
 
@@ -132,4 +139,24 @@ def test_find_paths_stdout_pure_and_bounded(
     fake = _RecordingFake()
     # Use the same (possibly hostile) id for both endpoints — either bad endpoint must reject.
     raised = _drive(tool_find_paths, fake, entity_id, entity_id, max_hops)
+    _assert_invariants(fake, entity_id, raised, capfd.readouterr())
+
+
+# ========================================================================================
+# Gate F-3 slice 1 (get_entity_dossier, ADR 0122) — the fifth tool joins stdout-purity +
+# bounded-traversal + id-gated-read coverage (scope §2 lists this file as "extend").
+# ``tool_get_entity_dossier`` is imported LOCALLY (fail-soft): a missing symbol fails ONLY
+# this test, never the two tests above. RED today: worldmonitor.mcp.server has no
+# tool_get_entity_dossier.
+# ========================================================================================
+@given(entity_id=_IDS, hops=_HOPS)
+@_SETTINGS
+def test_get_entity_dossier_stdout_pure_and_bounded(
+    capfd: pytest.CaptureFixture[str], entity_id: str, hops: int
+) -> None:
+    from worldmonitor.mcp.server import tool_get_entity_dossier
+
+    configure_stderr_logging()
+    fake = _RecordingFake()
+    raised = _drive(tool_get_entity_dossier, fake, entity_id, hops)
     _assert_invariants(fake, entity_id, raised, capfd.readouterr())

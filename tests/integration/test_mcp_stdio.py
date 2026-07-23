@@ -13,11 +13,12 @@ subprocess fails to start and emits no JSON-RPC frames — the assertions below 
 with the spawned process's stderr attached for the reason.
 
 ASSUMPTIONS (builder must match): the server reads Neo4j creds from the standard
-Settings env vars (``NEO4J_URI`` / ``NEO4J_USER`` / ``NEO4J_PASSWORD``); the four
+Settings env vars (``NEO4J_URI`` / ``NEO4J_USER`` / ``NEO4J_PASSWORD``); the five
 tools are named ``get_entity`` / ``get_neighbors`` / ``get_provenance`` /
-``find_paths``; ``get_entity`` returns node props incl. ``prov_*``; ``get_neighbors``
-returns neighbour prop dicts (each with an ``id``); ``find_paths`` returns objects
-carrying a ``nodes`` list.
+``find_paths`` / ``get_entity_dossier`` (Gate F-3, ADR 0122); ``get_entity`` returns
+node props incl. ``prov_*``; ``get_neighbors`` returns neighbour prop dicts (each with
+an ``id``); ``find_paths`` returns objects carrying a ``nodes`` list;
+``get_entity_dossier`` returns ``{entity, neighbors, provenance, merge_history}``.
 """
 
 from __future__ import annotations
@@ -291,7 +292,13 @@ def test_stdio_stdout_is_only_jsonrpc_frames(
     # tools/list exposes EXACTLY the four structured tools — no raw-Cypher / query_graph.
     list_frame = by_id[2]
     names = {t["name"] for t in list_frame["result"]["tools"]}
-    assert names == {"get_entity", "get_neighbors", "get_provenance", "find_paths"}, names
+    assert names == {
+        "get_entity",
+        "get_neighbors",
+        "get_provenance",
+        "find_paths",
+        "get_entity_dossier",
+    }, names
 
     # Present id -> success result carrying provenance.
     ok = by_id[3]
@@ -394,7 +401,13 @@ def test_stdio_tools_list_advertises_annotations_and_schema(
 
     tools = by_id[2]["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert names == {"get_entity", "get_neighbors", "get_provenance", "find_paths"}, names
+    assert names == {
+        "get_entity",
+        "get_neighbors",
+        "get_provenance",
+        "find_paths",
+        "get_entity_dossier",
+    }, names
 
     for tool in tools:
         annotations = tool.get("annotations")
@@ -506,3 +519,62 @@ def test_stdio_error_envelope_on_wire(
     assert set(envelope2.keys()) == {"error", "hint"}
     assert envelope2["error"] == "invalid entity id"
     assert isinstance(envelope2["hint"], str) and envelope2["hint"].strip() != ""
+
+
+# ========================================================================================
+# Gate F-3 slice 1 (get_entity_dossier, ADR 0122, spec §6.3) — the fifth tool over the wire.
+# RED today: get_entity_dossier is not a registered tool, so tools/call for it surfaces as
+# an error frame (unknown-tool) even for the "present" id case below.
+# ========================================================================================
+def test_stdio_get_entity_dossier(
+    clean_graph: Neo4jClient, neo4j_conn: tuple[str, str, str]
+) -> None:
+    """``get_entity_dossier`` over the wire: a present entity assembles all four §4 sections
+    (entity incl. prov_*, a neighbors list, a non-empty provenance map, the merge_history
+    sentinel); an absent entity surfaces a recoverable ``{error, hint}`` envelope, same shape
+    as the other four tools' not-found path."""
+    _seed_owns_chain(clean_graph)
+
+    frames, _out, err = _stdio_session(
+        neo4j_conn,
+        [
+            (
+                "tools/call",
+                {"name": "get_entity_dossier", "arguments": {"entity_id": "p1"}},
+            ),  # id 2
+            (
+                "tools/call",
+                {"name": "get_entity_dossier", "arguments": {"entity_id": "zzz-absent"}},
+            ),  # id 3
+        ],
+    )
+    assert frames, f"server produced no JSON-RPC frames on stdout; stderr:\n{err}"
+    by_id = _by_id(frames)
+
+    ok = by_id[2]
+    assert not _is_error_outcome(ok), f"present entity dossier must not error: {ok}"
+    ok_objs = _result_objs(ok)
+    dossier = next((obj for obj in ok_objs if isinstance(obj, dict) and "entity" in obj), None)
+    assert dossier is not None, f"no dossier-shaped object in the result content: {ok_objs}"
+    assert dossier["entity"].get("prov_source_id") == _PROV.source_id, (
+        f"dossier entity section must carry prov_source_id: {dossier['entity']}"
+    )
+    assert isinstance(dossier.get("neighbors"), list) and dossier["neighbors"], (
+        f"dossier neighbors section must be a non-empty list for p1: {dossier.get('neighbors')}"
+    )
+    assert dossier.get("provenance"), (
+        f"dossier provenance section must be present and non-empty: {dossier.get('provenance')}"
+    )
+    assert dossier.get("merge_history") == {"status": "not_assembled", "available": False}, (
+        f"merge_history must be the exact recorded-absence sentinel: {dossier.get('merge_history')}"
+    )
+
+    absent = by_id[3]
+    assert _is_error_outcome(absent), f"absent entity must surface as an error frame: {absent}"
+    absent_text = absent["result"]["content"][0]["text"]
+    envelope = json.loads(_strip_tool_error_prefix(absent_text))
+    assert set(envelope.keys()) == {"error", "hint"}, (
+        f"error envelope must be exactly {{error, hint}}: {envelope!r}"
+    )
+    assert envelope["error"] == "entity not found"
+    assert isinstance(envelope["hint"], str) and envelope["hint"].strip() != ""

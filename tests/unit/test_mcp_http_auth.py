@@ -346,11 +346,12 @@ def test_inv_s1_noleak_403_body_excludes_token_and_claim_and_traceback() -> None
 # ── §4c: INV-S1-READONLY — HTTP server registers EXACTLY the four read tools ─────────
 
 
-def test_inv_s1_readonly_http_server_registers_exactly_four_tools() -> None:
-    """build_http_app registers EXACTLY {get_entity, get_neighbors, get_provenance, find_paths}.
+def test_inv_s1_readonly_http_server_registers_exactly_five_tools() -> None:
+    """build_http_app registers EXACTLY {get_entity, get_neighbors, get_provenance, find_paths,
+    get_entity_dossier} (Gate F-3, ADR 0122 — the deliberate 4 -> 5 break of the prior pin).
 
     The HTTP surface must not add, remove, or rename any tool compared to the stdio
-    surface (INV-S1-READONLY: same four read tools, no write/active tool).
+    surface (INV-S1-READONLY: same five read tools, no write/active tool).
     """
     import asyncio
 
@@ -373,6 +374,7 @@ def test_inv_s1_readonly_http_server_registers_exactly_four_tools() -> None:
         "get_neighbors",
         "get_provenance",
         "find_paths",
+        "get_entity_dossier",
     }, f"build_server tool set drifted: {stdio_tools!r}"
 
     # build_http_app must be built from the same registration; calling it proves it doesn't crash.
@@ -402,9 +404,13 @@ def test_inv_s1_stdio_build_server_constructs_without_auth() -> None:
     assert server is not None
 
     tools = {t.name for t in asyncio.run(server.list_tools())}
-    assert tools == {"get_entity", "get_neighbors", "get_provenance", "find_paths"}, (
-        f"stdio build_server must still register the four tools: {tools!r}"
-    )
+    assert tools == {
+        "get_entity",
+        "get_neighbors",
+        "get_provenance",
+        "find_paths",
+        "get_entity_dossier",
+    }, f"stdio build_server must still register the five tools: {tools!r}"
 
 
 # ── Gate F-2 (ADR 0121): HTTP transport carries the SAME annotations/output-schema as
@@ -439,7 +445,13 @@ def test_http_tools_carry_same_annotations_and_schema_as_stdio() -> None:
     http_tools = {t.name: t for t in asyncio.run(http_server.list_tools())}
     stdio_tools = {t.name: t for t in asyncio.run(stdio_server.list_tools())}
 
-    expected_names = {"get_entity", "get_neighbors", "get_provenance", "find_paths"}
+    expected_names = {
+        "get_entity",
+        "get_neighbors",
+        "get_provenance",
+        "find_paths",
+        "get_entity_dossier",
+    }
     assert http_tools.keys() == expected_names, f"HTTP tool set drifted: {http_tools.keys()!r}"
     assert stdio_tools.keys() == expected_names, f"stdio tool set drifted: {stdio_tools.keys()!r}"
 
