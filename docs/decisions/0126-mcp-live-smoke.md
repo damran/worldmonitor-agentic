@@ -1,6 +1,6 @@
 # 0126 — MCP live-smoke in CI (stdio `tools/list` + `prompts/list` set-pin on compose-boot)
 
-- **Status:** PROPOSED (→ ACCEPTED at the gate-completing PR — the 0117–0125 convention)
+- **Status:** ACCEPTED (2026-07-24)
 - **Date:** 2026-07-24
 - **human_fork:** false — a reversible, purely **additive** CI check (one appended `compose-boot` step + a
   small package smoke module) that asserts the **already-registered** MCP surface. No product/architecture
