@@ -117,10 +117,22 @@ def tool_get_entity(client: Neo4jClient, entity_id: str) -> dict[str, Any]:
     return entity
 
 
-def tool_get_neighbors(client: Neo4jClient, entity_id: str, hops: int = 1) -> list[dict[str, Any]]:
-    """Return entities linked to ``entity_id`` within ``hops`` (clamped to the shared cap)."""
+def tool_get_neighbors(
+    client: Neo4jClient, entity_id: str, hops: int = 1, summary: bool = False
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """Return entities linked to ``entity_id`` within ``hops`` (clamped to the shared cap).
+
+    ``summary=True`` (Gate F-5, ADR 0124) returns the shared context-budget envelope
+    ``{count, sample}`` (:func:`worldmonitor.graph.queries.summarize_result`) in place of the
+    full list; ``summary`` absent/false is byte-identical to before this gate.
+    """
     _require_valid_id(entity_id)
-    return queries.get_neighbors(client, entity_id=entity_id, hops=read_guards.clamp_hops(hops))
+    neighbors = queries.get_neighbors(
+        client, entity_id=entity_id, hops=read_guards.clamp_hops(hops)
+    )
+    if summary:
+        return queries.summarize_result(neighbors)
+    return neighbors
 
 
 def tool_get_provenance(client: Neo4jClient, entity_id: str) -> dict[str, str]:
@@ -137,14 +149,22 @@ def tool_get_provenance(client: Neo4jClient, entity_id: str) -> dict[str, str]:
 
 
 def tool_find_paths(
-    client: Neo4jClient, from_id: str, to_id: str, max_hops: int = 1
-) -> list[dict[str, Any]]:
-    """Return bounded paths between two entities (``max_hops`` clamped to the shared cap)."""
+    client: Neo4jClient, from_id: str, to_id: str, max_hops: int = 1, summary: bool = False
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """Return bounded paths between two entities (``max_hops`` clamped to the shared cap).
+
+    ``summary=True`` (Gate F-5, ADR 0124) returns the shared context-budget envelope
+    ``{count, sample}`` (:func:`worldmonitor.graph.queries.summarize_result`) in place of the
+    full list; ``summary`` absent/false is byte-identical to before this gate.
+    """
     _require_valid_id(from_id)
     _require_valid_id(to_id)
-    return queries.find_paths(
+    paths = queries.find_paths(
         client, from_id=from_id, to_id=to_id, max_hops=read_guards.clamp_hops(max_hops)
     )
+    if summary:
+        return queries.summarize_result(paths)
+    return paths
 
 
 def tool_get_entity_dossier(client: Neo4jClient, entity_id: str, hops: int = 1) -> dict[str, Any]:
@@ -180,17 +200,29 @@ def _register_read_tools(server: FastMCP, client: Neo4jClient) -> None:
         """Return a resolved entity's properties (incl. provenance); error if absent."""
         return tool_get_entity(client, entity_id)
 
-    def get_neighbors(entity_id: str, hops: int = 1) -> list[dict[str, Any]]:
-        """Return entities linked to an entity within ``hops`` (clamped to the cap)."""
-        return tool_get_neighbors(client, entity_id, hops)
+    def get_neighbors(
+        entity_id: str, hops: int = 1, summary: bool = False
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """Return entities linked to an entity within ``hops`` (clamped to the cap).
+
+        ``summary=True`` (Gate F-5, ADR 0124) returns ``{count, sample}`` in place of the
+        full list; ``summary`` absent/false is byte-identical to before this gate.
+        """
+        return tool_get_neighbors(client, entity_id, hops, summary)
 
     def get_provenance(entity_id: str) -> dict[str, str]:
         """Return an entity's provenance (``prov_*``) map; error if absent."""
         return tool_get_provenance(client, entity_id)
 
-    def find_paths(from_id: str, to_id: str, max_hops: int = 1) -> list[dict[str, Any]]:
-        """Return bounded paths between two entities (``max_hops`` clamped to the cap)."""
-        return tool_find_paths(client, from_id, to_id, max_hops)
+    def find_paths(
+        from_id: str, to_id: str, max_hops: int = 1, summary: bool = False
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """Return bounded paths between two entities (``max_hops`` clamped to the cap).
+
+        ``summary=True`` (Gate F-5, ADR 0124) returns ``{count, sample}`` in place of the
+        full list; ``summary`` absent/false is byte-identical to before this gate.
+        """
+        return tool_find_paths(client, from_id, to_id, max_hops, summary)
 
     def get_entity_dossier(entity_id: str, hops: int = 1) -> dict[str, Any]:
         """Return the deterministic entity dossier (entity + neighbors + provenance +

@@ -1,6 +1,6 @@
 # 0124 — `summary` context-budget flag on `get_neighbors` / `find_paths` (REST + MCP)
 
-- **Status:** PROPOSED (flips to ACCEPTED at the gate-completing PR — the 0117–0123 convention)
+- **Status:** ACCEPTED (flipped at the gate-completing PR — the 0117–0123 convention)
 - **Date:** 2026-07-24
 - **human_fork:** false — a reversible, additive, opt-in, read-only **shaping** of two existing
   list-returning graph reads. No product/architecture fork. Default is a sensible one (flag off, full list
