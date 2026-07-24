@@ -138,3 +138,11 @@ The smoke enumerates tool/prompt **names** over a local stdio transport and comp
 It opens no Neo4j connection, calls no tool, reads no entity or provenance, performs no inference/scoring/ER,
 makes no live-system change (no threshold/guard/model/param), and has zero egress. There is no path by which
 it affects a real person. `person_affecting=false`, `human_cosign=false`.
+
+## Known residual (checker LOW-1, 2026-07-24)
+
+The ~60s inter-frame deadline is checked between reads; a pathological silent-but-alive child can
+block one `readline()` past it. Impact is bounded to a **RED** job by compose-boot's
+`timeout-minutes: 25` — never a false-pass, never an unbounded pipeline hang; the real server
+answers in ~1.2s. Revisit trigger: if the smoke ever needs to run outside a timeout-bounded CI
+job, move the bound to the OS side (non-blocking read / reader-thread wait).

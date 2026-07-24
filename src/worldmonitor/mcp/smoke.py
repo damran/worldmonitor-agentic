@@ -120,7 +120,9 @@ def run_smoke() -> int:
     served tool/prompt surface is exactly :data:`EXPECTED_TOOLS` / :data:`EXPECTED_PROMPTS`.
 
     Forces ``MCP_TRANSPORT=stdio`` on the child (overriding any inherited value — the `mcp`
-    compose service configures ``streamable-http``). Bounds every read with a ~60s deadline
+    compose service configures ``streamable-http``). Checks a ~60s deadline between frames
+    (a silent-but-alive child can block one readline past it — bounded to a RED by the
+    CI job's timeout-minutes, never a false-pass; checker finding F-8/LOW-1)
     and always terminates the child in a ``finally``. Prints the one-line summary
     (:func:`compare`'s message) to stdout on completion; diagnostics (spawn/handshake
     failures, the child's captured stderr) go to stderr. Returns the process exit code
