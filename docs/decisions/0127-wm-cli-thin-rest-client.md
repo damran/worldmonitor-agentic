@@ -1,6 +1,6 @@
 # 0127 — Thin read-only `wm` CLI over our REST (slice 1: `health` / `ready` / `entity`)
 
-- **Status:** PROPOSED
+- **Status:** ACCEPTED
 - **Date:** 2026-07-24
 - **human_fork:** false — a thin, read-only, additive command-line client over **existing** REST
   endpoints. No product/architecture fork; it introduces no new server behaviour, datastore, or
