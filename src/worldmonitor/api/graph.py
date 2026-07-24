@@ -28,6 +28,7 @@ from worldmonitor.graph.queries import (
     get_entity_dossier,
     get_neighbors,
     get_provenance,
+    summarize_result,
 )
 
 # Read guards (hop cap / hop clamp / id alphabet) live in one shared module so the REST
@@ -61,9 +62,17 @@ def read_neighbors(
     _principal: Annotated[Principal, Depends(get_principal)],
     client: Annotated[Neo4jClient, Depends(get_neo4j)],
     hops: Annotated[int, Query(ge=1)] = 1,
-) -> dict[str, list[dict[str, Any]]]:
-    """Return entities linked to ``entity_id`` within ``hops`` (clamped to the cap)."""
+    summary: Annotated[bool, Query()] = False,
+) -> dict[str, Any]:
+    """Return entities linked to ``entity_id`` within ``hops`` (clamped to the cap).
+
+    ``summary=true`` (Gate F-5, ADR 0124) returns the shared context-budget envelope
+    ``{count, sample}`` (:func:`worldmonitor.graph.queries.summarize_result`) in place of the
+    full list; ``summary`` absent/false is byte-identical to before this gate.
+    """
     neighbors = get_neighbors(client, entity_id=entity_id, hops=clamp_hops(hops))
+    if summary:
+        return summarize_result(neighbors)
     return {"neighbors": neighbors}
 
 
@@ -113,7 +122,15 @@ def read_paths(
     from_id: Annotated[str, Query(alias="from", min_length=1, pattern=ID_PATTERN)],
     to_id: Annotated[str, Query(alias="to", min_length=1, pattern=ID_PATTERN)],
     max_hops: Annotated[int, Query(ge=1)] = 1,
-) -> dict[str, list[dict[str, Any]]]:
-    """Return bounded paths between two entities (``max_hops`` clamped to the cap)."""
+    summary: Annotated[bool, Query()] = False,
+) -> dict[str, Any]:
+    """Return bounded paths between two entities (``max_hops`` clamped to the cap).
+
+    ``summary=true`` (Gate F-5, ADR 0124) returns the shared context-budget envelope
+    ``{count, sample}`` (:func:`worldmonitor.graph.queries.summarize_result`) in place of the
+    full list; ``summary`` absent/false is byte-identical to before this gate.
+    """
     paths = find_paths(client, from_id=from_id, to_id=to_id, max_hops=clamp_hops(max_hops))
+    if summary:
+        return summarize_result(paths)
     return {"paths": paths}

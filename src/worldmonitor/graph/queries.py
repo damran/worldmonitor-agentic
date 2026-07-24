@@ -8,6 +8,7 @@ API/MCP surface (Phase 2) builds on these. This answers the Phase-1 done-when:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from worldmonitor.graph import read_guards
@@ -107,6 +108,30 @@ def find_paths(
     )
     rows = client.execute_read(query, from_id=from_id, to_id=to_id)
     return [{"nodes": row["nodes"], "relationships": row["relationships"]} for row in rows]
+
+
+def summarize_result(items: list[dict[str, Any]], *, sample_size: int = 3) -> dict[str, Any]:
+    """Shape a `{count, sample}` context-budget envelope over an already-fetched list.
+
+    Gate F-5 (ADR 0124): the ONE shared, PURE helper both the REST and MCP surfaces call on
+    the list they already fetched from :func:`get_neighbors` / :func:`find_paths`, so the two
+    surfaces are byte-identical by construction (the F-3 lockstep convention). Takes only an
+    in-memory list — no :class:`Neo4jClient`, no ``Session``, no Cypher, no I/O — so it is a
+    pure, deterministic, trivially-testable transform. Does NOT modify ``get_neighbors`` /
+    ``find_paths`` themselves and does NOT mutate ``items`` (a new list is returned).
+
+    ``count`` is ``len(items)`` — the length of the full, already-bounded result (bounded by
+    the existing ``NEIGHBOR_RESULT_LIMIT`` / ``PATH_RESULT_LIMIT``), never a graph-wide degree.
+
+    ``sample`` is a deterministic prefix of ``items`` under a field-agnostic canonical-JSON
+    total order (ADR 0124 §3.4): the underlying Cypher carries no ``ORDER BY`` (ADR 0064), so
+    determinism is established here rather than by touching the query. Each ``sample`` element
+    is a verbatim member of ``items`` (never a synthesised/projected record), so G1 provenance
+    (``prov_*``) rides along unlaundered — this reduces cardinality only, never per-record
+    detail (the same lossiness class as ADR 0064's ``LIMIT``).
+    """
+    sample = sorted(items, key=lambda d: json.dumps(d, sort_keys=True, default=str))[:sample_size]
+    return {"count": len(items), "sample": sample}
 
 
 # ================================================================================================

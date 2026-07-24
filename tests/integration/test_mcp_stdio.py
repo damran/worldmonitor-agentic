@@ -578,3 +578,81 @@ def test_stdio_get_entity_dossier(
     )
     assert envelope["error"] == "entity not found"
     assert isinstance(envelope["hint"], str) and envelope["hint"].strip() != ""
+
+
+# ========================================================================================
+# Gate F-5 (`summary` context-budget flag, ADR 0124, spec §6.3) — summary over the wire,
+# against a REAL Neo4j testcontainer. Wire set-assertions elsewhere in this file are
+# UNCHANGED (still five tools) — F-5 adds an argument to two existing tools, not a tool.
+# ========================================================================================
+def test_stdio_get_neighbors_and_paths_summary(
+    clean_graph: Neo4jClient, neo4j_conn: tuple[str, str, str]
+) -> None:
+    """`summary: true` over the wire for BOTH `get_neighbors` and `find_paths`: not
+    ``isError``; the single content block decodes to ``{count, sample}`` with ``count``
+    matching the SAME query helper called directly against the same graph, ``sample`` a
+    list capped at 3, and each sample element carrying its own ``prov_source_id`` verbatim
+    (provenance not laundered, G1)."""
+    _seed_owns_chain(clean_graph)
+
+    expected_neighbor_count = len(queries.get_neighbors(clean_graph, entity_id="p1", hops=1))
+    expected_path_count = len(queries.find_paths(clean_graph, from_id="p1", to_id="c2", max_hops=3))
+    assert expected_neighbor_count >= 1, "seed fixture broken: p1 must have >=1 neighbour"
+    assert expected_path_count >= 1, "seed fixture broken: p1 -> c2 must be reachable in 3 hops"
+
+    frames, _out, err = _stdio_session(
+        neo4j_conn,
+        [
+            (
+                "tools/call",
+                {"name": "get_neighbors", "arguments": {"entity_id": "p1", "summary": True}},
+            ),  # id 2
+            (
+                "tools/call",
+                {
+                    "name": "find_paths",
+                    "arguments": {
+                        "from_id": "p1",
+                        "to_id": "c2",
+                        "max_hops": 3,
+                        "summary": True,
+                    },
+                },
+            ),  # id 3
+        ],
+    )
+    assert frames, f"server produced no JSON-RPC frames on stdout; stderr:\n{err}"
+    by_id = _by_id(frames)
+
+    neighbors_result = by_id[2]
+    assert not _is_error_outcome(neighbors_result), (
+        f"summary get_neighbors must not error: {neighbors_result}"
+    )
+    n_content = neighbors_result["result"]["content"]
+    assert len(n_content) == 1, "summary mode must emit exactly ONE content block"
+    n_decoded = json.loads(n_content[0]["text"])
+    assert set(n_decoded.keys()) == {"count", "sample"}
+    assert n_decoded["count"] == expected_neighbor_count
+    assert isinstance(n_decoded["sample"], list)
+    assert len(n_decoded["sample"]) <= 3
+    for element in n_decoded["sample"]:
+        assert isinstance(element, dict) and "prov_source_id" in element, (
+            f"a summary sample element must carry prov_source_id verbatim: {element!r}"
+        )
+    assert neighbors_result["result"].get("structuredContent") == {"result": n_decoded}, (
+        "structuredContent for the summary dict must be {'result': {count, sample}}"
+    )
+
+    paths_result = by_id[3]
+    assert not _is_error_outcome(paths_result), f"summary find_paths must not error: {paths_result}"
+    p_content = paths_result["result"]["content"]
+    assert len(p_content) == 1
+    p_decoded = json.loads(p_content[0]["text"])
+    assert set(p_decoded.keys()) == {"count", "sample"}
+    assert p_decoded["count"] == expected_path_count
+    assert isinstance(p_decoded["sample"], list)
+    assert len(p_decoded["sample"]) <= 3
+    for element in p_decoded["sample"]:
+        assert isinstance(element, dict) and "nodes" in element, (
+            f"a path summary sample element must carry 'nodes': {element!r}"
+        )

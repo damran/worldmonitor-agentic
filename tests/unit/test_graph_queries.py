@@ -353,3 +353,125 @@ def test_get_entity_dossier_merge_history_is_exact_sentinel_constant() -> None:
     assert dossier["merge_history"]["available"] is False
     # No Postgres/Session dependency: the fake exposes NO session()/db surface beyond
     # execute_read, and it was reached without error — proving the helper never touched one.
+
+
+# ======================================================================================
+# Gate F-5 (`summary` context-budget flag, ADR 0124) — `graph/queries.py::summarize_result`
+# is the ONE shared, PURE helper both REST and MCP call: `{"count": len(items), "sample":
+# <deterministic canonical-sorted first <= sample_size>}`. It is imported LOCALLY inside
+# each test function (not at module top): it does not exist yet on the current tree, and
+# this module's EXISTING get_neighbors/find_paths tests above must keep collecting and
+# passing regardless (fail-soft per the repo's local-import RED idiom).
+#
+# RED today: worldmonitor.graph.queries has no summarize_result (ImportError inside each
+# test body -> that test alone fails; the rest of the module is unaffected).
+# ======================================================================================
+
+
+def _five_unsorted_dicts() -> list[dict[str, Any]]:
+    # Deliberately out of order — the canonical sort key is json.dumps(d, sort_keys=True),
+    # which (since every dict here shares the SAME key set) sorts ascending by the "id"
+    # value (the first alphabetical key) -> A, B, C, D, E.
+    return [
+        {"id": "E", "name": ["Echo"]},
+        {"id": "A", "name": ["Alpha"]},
+        {"id": "C", "name": ["Charlie"]},
+        {"id": "D", "name": ["Delta"]},
+        {"id": "B", "name": ["Bravo"]},
+    ]
+
+
+def test_summarize_result_count_and_sample() -> None:
+    from worldmonitor.graph.queries import summarize_result
+
+    items = _five_unsorted_dicts()
+    result = summarize_result(items)
+
+    assert result["count"] == 5
+    assert len(result["sample"]) == 3
+    assert result["sample"] == [
+        {"id": "A", "name": ["Alpha"]},
+        {"id": "B", "name": ["Bravo"]},
+        {"id": "C", "name": ["Charlie"]},
+    ], f"sample must be the canonical-sorted first 3; got {result['sample']!r}"
+    for item in result["sample"]:
+        assert item in items, f"sample element {item!r} is not a member of the input"
+
+
+def test_summarize_result_below_sample_size() -> None:
+    from worldmonitor.graph.queries import summarize_result
+
+    items = [{"id": "B"}, {"id": "A"}]
+    result = summarize_result(items)
+
+    assert result["count"] == 2
+    assert len(result["sample"]) == 2, "when count < sample_size, sample must equal count"
+    assert result["sample"] == [{"id": "A"}, {"id": "B"}]
+
+
+def test_summarize_result_empty() -> None:
+    from worldmonitor.graph.queries import summarize_result
+
+    assert summarize_result([]) == {"count": 0, "sample": []}
+
+
+def test_summarize_result_sample_never_exceeds_default_cap_of_three() -> None:
+    from worldmonitor.graph.queries import summarize_result
+
+    items = [{"id": str(i)} for i in range(10)]
+    result = summarize_result(items)
+    assert result["count"] == 10
+    assert len(result["sample"]) == 3, "the default sample_size is fixed at 3 (backlog literal)"
+
+
+def test_summarize_result_deterministic_repeat_calls() -> None:
+    from worldmonitor.graph.queries import summarize_result
+
+    items = _five_unsorted_dicts()
+    first = summarize_result(items)
+    second = summarize_result(items)
+    assert first == second, "summarize_result must be a pure function of its input"
+
+
+def test_summarize_result_reorder_invariance() -> None:
+    """Same MULTISET, different input order -> IDENTICAL {count, sample} (the canonical-sort
+    determinism guarantee, ADR 0124 §3.4 — no ORDER BY in the query, determinism established
+    at the summary layer instead)."""
+    from worldmonitor.graph.queries import summarize_result
+
+    items = _five_unsorted_dicts()
+    shuffled = [items[3], items[0], items[4], items[1], items[2]]
+    reversed_items = list(reversed(items))
+
+    baseline = summarize_result(items)
+    assert summarize_result(shuffled) == baseline
+    assert summarize_result(reversed_items) == baseline
+
+
+def test_summarize_result_does_not_mutate_input() -> None:
+    from worldmonitor.graph.queries import summarize_result
+
+    items = _five_unsorted_dicts()
+    original_order = list(items)
+    original_identities = [id(d) for d in items]
+
+    summarize_result(items)
+
+    assert items == original_order, "summarize_result must not reorder the caller's list"
+    assert [id(d) for d in items] == original_identities, (
+        "summarize_result must not mutate/replace the caller's list elements"
+    )
+
+
+def test_summarize_result_honors_sample_size_override() -> None:
+    """AC-1's exact signature is ``summarize_result(items, *, sample_size=3)`` — the kwarg
+    must be a REAL, functional override (no surface currently passes a non-default value,
+    per the spec's non-goal on a configurable `sample_size`, but the pure helper's own
+    contract still names it), not a cosmetic parameter a builder could hardcode past."""
+    from worldmonitor.graph.queries import summarize_result
+
+    items = _five_unsorted_dicts()
+    result = summarize_result(items, sample_size=2)
+    assert result["count"] == 5
+    assert len(result["sample"]) == 2, "an explicit sample_size override must be honored"
+    assert result["sample"] == [{"id": "A", "name": ["Alpha"]}, {"id": "B", "name": ["Bravo"]}]
