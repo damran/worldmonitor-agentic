@@ -18,6 +18,7 @@ import json
 import os
 import sys
 from typing import NoReturn, cast
+from urllib.parse import quote
 
 import httpx
 
@@ -199,7 +200,11 @@ def main(argv: list[str] | None = None) -> int:
             elif command == "ready":
                 response = client.get("/ready")
             else:
-                response = client.get(f"/entities/{args.entity_id}")
+                # Percent-encode the id segment (safe="") so an id like "../ready" cannot
+                # be client-side path-normalized into escaping the /entities/ route (e.g. to
+                # /ready): "../ready" -> "..%2Fready", which matches no route -> 404/exit 1.
+                # Legitimate ids (unreserved chars per RFC 3986) are left byte-identical.
+                response = client.get(f"/entities/{quote(args.entity_id, safe='')}")
     except httpx.RequestError as exc:
         print(f"could not reach {base_url}: {exc}", file=sys.stderr)
         return EXIT_CONNECTION

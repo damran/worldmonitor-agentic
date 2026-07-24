@@ -610,3 +610,50 @@ def test_all_commands_are_get_only(
     assert len(calls) == 3
     assert all(c.method == "GET" for c in calls)
     capsys.readouterr()
+
+
+# ---------------------------------------------------------------------------------------
+# Checker LOW -- entity id path-traversal cannot escape the /entities/ route
+# ---------------------------------------------------------------------------------------
+
+
+def test_entity_path_traversal_id_stays_under_entities_route(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An id shaped like ``../ready`` must never route-escape ``/entities/`` to ``/ready``.
+
+    Without percent-encoding the id segment, httpx RFC-3986-normalizes
+    ``/entities/../ready`` down to ``/ready`` client-side *before* the request ever leaves the
+    process -- so ``wm entity '../ready'`` would silently GET the ready endpoint and exit 0 on
+    a non-entity body. The fix (``quote(args.entity_id, safe="")``) turns the literal ``/`` in
+    the id into ``%2F`` so there is no path separator left for httpx to collapse; the request
+    that actually goes out on the wire targets ``/entities/..%2Fready`` -- a single (bogus)
+    segment under the entities route, never ``/ready`` itself.
+
+    This pins the fix at the wire level (``str(request.url)``), not just the decoded display
+    form of ``.path`` (which httpx re-decodes ``%2F`` back to ``/`` for readability and would
+    misleadingly still show ``..`` -- that decoded view is irrelevant to what was actually
+    requested).
+    """
+    monkeypatch.setenv("WM_TOKEN", TEST_TOKEN)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.startswith("/entities/"), (
+            f"path escaped the /entities/ route: {request.url.path}"
+        )
+        if str(request.url) == "http://localhost:8000/entities/NRC-abc123":
+            return _json_response(200, _ENTITY_BODY)
+        return _json_response(404, {"detail": "Entity not found"})
+
+    calls, _ = _patch_build_client(monkeypatch, _handler)
+
+    code = cli.main(["entity", "../ready"])
+
+    assert code == 1
+    assert len(calls) == 1
+    # The definitive wire-level pin: the actual request target, never simply "/ready".
+    assert str(calls[0].url) == "http://localhost:8000/entities/..%2Fready"
+    assert calls[0].url.path != "/ready"
+    assert calls[0].url.path.startswith("/entities/")
+    captured = capsys.readouterr()
+    assert captured.out == ""

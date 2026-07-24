@@ -32,7 +32,9 @@ Row F-6 asks for a **thin read-only `wm` CLI** over **our** REST — `[project.s
   (fail-closed, stores-only); `checks.driver` is **non-fatal observability** (`ok`/`stale`/`unknown`),
   never flips the status (ADR 0059).
 - `GET /entities/{id}` — **auth-gated** (Zitadel bearer JWT), `200` → entity incl. `prov_*`, `404`
-  `{"detail":…}`, injection-shaped id → `422`.
+  `{"detail":…}`, injection-shaped id → `422`. (A `../<route>`-shaped id never reaches this
+  server-side check: the CLI percent-encodes the id path segment, so it is neutralized
+  client-side into a bogus `/entities/` path → `404`/exit 1, not `422`.)
 
 The operator already mints Zitadel service-principal bearers (see `zitadel_provision.sh`,
 `deploy/hermes/README.md`); the established, target-surface-named env vars are `WM_MCP_TOKEN` and
