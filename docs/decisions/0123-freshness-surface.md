@@ -1,6 +1,6 @@
 # 0123 — Source-freshness surface (F-1 slice 1): a derived 6-state machine over connector run-metadata
 
-- **Status:** PROPOSED (flips to ACCEPTED at the gate-completing PR — the 0117–0122 convention)
+- **Status:** ACCEPTED (2026-07-24)
 - **Date:** 2026-07-24
 - **human_fork:** false — a reversible, additive, read-only **derivation** over run-metadata we already
   persist and already partly expose (`ConnectorInstance.status` + `task_run` + the shipped

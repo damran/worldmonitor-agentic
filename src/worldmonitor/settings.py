@@ -231,6 +231,16 @@ class Settings(BaseSettings):
     # defaults 9100/9090; bound 0.0.0.0 in-container only (the compose service publishes no host).
     driver_metrics_port: int = Field(default=9108, ge=0)
 
+    # --- Source-freshness surface (Gate F-1 slice 1 / ADR 0123) ---
+    # Absolute seconds (NOT a cadence multiplier) so the Python "stale" boundary consumed by
+    # ``observability.freshness.freshness_status`` and the fixed-literal ``ConnectorSuccessStale``
+    # PromQL alert (``deploy/prometheus/alerts/worldmonitor.rules.yml``) cannot drift — a coupling
+    # test pins ``freshness_stale_after_seconds`` equal to that alert's ``14400`` literal. These are
+    # the SLICE-1 GLOBAL budgets; slice 2 (per-manifest ``max_stale_min``, not built here) will use
+    # them as the fallback when a manifest declares no budget of its own.
+    freshness_stale_after_seconds: int = Field(default=14400, gt=0)  # 4h
+    freshness_very_stale_after_seconds: int = Field(default=86400, gt=0)  # 24h
+
     # --- Fail-closed sensitivity guard (Gate E / ADR 0047) ---
     # The guard's sensitive-topic SET is loaded programmatically from FtM's own
     # ``registry.topic.RISKS`` (never configured — deny-by-default cannot be opened);
@@ -406,6 +416,24 @@ class Settings(BaseSettings):
             raise ValueError(
                 "sensitivity_abstain_low must be <= sensitivity_abstain_high "
                 f"(got low={self.sensitivity_abstain_low}, high={self.sensitivity_abstain_high})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_freshness_budgets(self) -> "Settings":
+        """Reject a non-monotone freshness budget pair (ADR 0123 D4 / spec §2.2).
+
+        Unlike the abstain band (``low == high`` allowed as its OFF configuration),
+        ``freshness_very_stale_after_seconds`` must be STRICTLY greater than
+        ``freshness_stale_after_seconds`` — an equal (or inverted) pair would leave the ``stale``
+        state unreachable (`` stale_after <= age < very_stale_after`` becomes an empty interval),
+        breaking the state machine's monotonicity guarantee.
+        """
+        if self.freshness_very_stale_after_seconds <= self.freshness_stale_after_seconds:
+            raise ValueError(
+                "freshness_very_stale_after_seconds must be strictly greater than "
+                f"freshness_stale_after_seconds (got stale={self.freshness_stale_after_seconds}, "
+                f"very_stale={self.freshness_very_stale_after_seconds})"
             )
         return self
 

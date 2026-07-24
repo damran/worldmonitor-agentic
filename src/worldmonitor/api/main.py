@@ -26,6 +26,7 @@ from worldmonitor.api import auth_web
 from worldmonitor.api.auth_web import build_oauth
 from worldmonitor.api.dashboard import router as dashboard_router
 from worldmonitor.api.deps import get_principal
+from worldmonitor.api.freshness import router as freshness_router
 from worldmonitor.api.graph import router as graph_router
 from worldmonitor.api.integrations import router as integrations_router
 from worldmonitor.api.llm import router as llm_router
@@ -204,4 +205,5 @@ def create_app(
     app.include_router(llm_router)
     app.include_router(review_router)
     app.include_router(dashboard_router)  # public read surface (ADR 0115); prefix /api/dashboard
+    app.include_router(freshness_router)  # GET /sources/freshness (Gate F-1, ADR 0123)
     return app

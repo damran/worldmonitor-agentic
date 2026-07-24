@@ -855,6 +855,9 @@ class IngestDriver:
                 projection_divergence=lambda: self._latest_projection_divergence,
                 # Cumulative misconfiguration refusals (Gate 3b LOW-2, ADR 0114 D-7).
                 projection_diff_refusals=lambda: self._projection_diff_refusals,
+                # Source-freshness budgets (Gate F-1 slice 1, ADR 0123 D4).
+                stale_after_seconds=self._settings.freshness_stale_after_seconds,
+                very_stale_after_seconds=self._settings.freshness_very_stale_after_seconds,
             ),
         )
         last_resolve: datetime | None = None
