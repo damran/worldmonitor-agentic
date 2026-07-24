@@ -518,3 +518,196 @@ def test_dossier_rest_mcp_parity() -> None:
         "REST body and MCP tool result must be byte-identical (as decoded JSON) for the same "
         f"seeded input (AC-5 lockstep): rest={rest_body!r} mcp={mcp_result!r}"
     )
+
+
+# ======================================================================================
+# Gate F-5 (`summary` context-budget flag, ADR 0124) — `?summary=true` on
+# /entities/{id}/neighbors and /paths returns `{count, sample}` in place of the full list;
+# `summary` absent/false stays BYTE-IDENTICAL to today. Today both routes silently IGNORE
+# an unrecognized `summary` query param (FastAPI drops unknown params), so the summary-mode
+# assertions below are RED for the load-bearing reason: no {count, sample} envelope is
+# shaped yet — not merely "the parameter is unrecognized".
+# ======================================================================================
+
+
+def _labeled_neighbor(node_id: str) -> dict[str, Any]:
+    return {
+        "id": node_id,
+        "name": [f"Node {node_id}"],
+        "prov_source_id": "src:test",
+        "prov_source_record": f"s3://landing/{node_id}.json",
+    }
+
+
+def _labeled_path(*nodes: str) -> dict[str, Any]:
+    return {"nodes": list(nodes), "relationships": ["OWNS"] * (len(nodes) - 1)}
+
+
+def test_neighbors_summary_shape() -> None:
+    """AC-2 / spec §6.4: `?summary=true` -> exactly {count, sample}; count == len(seeded);
+    sample capped at 3; each sample element carries its own prov_* (G1, not laundered)."""
+    fake = _FakeNeo4jClient(
+        neighbors=[
+            _labeled_neighbor("D"),
+            _labeled_neighbor("B"),
+            _labeled_neighbor("A"),
+            _labeled_neighbor("C"),
+        ]
+    )
+    resp = _client(_FakeVerifier(), fake).get("/entities/A/neighbors?summary=true", headers=_auth())
+    assert resp.status_code == 200, f"{resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert set(body.keys()) == {"count", "sample"}, (
+        f"summary envelope must be exactly {{count, sample}}; got keys {list(body.keys())}"
+    )
+    assert body["count"] == 4
+    assert len(body["sample"]) == 3
+    for item in body["sample"]:
+        assert item.get("prov_source_id") == "src:test", (
+            f"a sample element must carry its own provenance verbatim (G1); got {item!r}"
+        )
+    # Canonical-sort determinism (§3.4): ascending by the shared "id" key -> A, B, C.
+    assert [item["id"] for item in body["sample"]] == ["A", "B", "C"]
+
+
+def test_paths_summary_shape() -> None:
+    fake = _FakeNeo4jClient(
+        paths=[
+            _labeled_path("A", "D"),
+            _labeled_path("A", "B"),
+            _labeled_path("A", "C"),
+            _labeled_path("A", "Z"),
+        ]
+    )
+    resp = _client(_FakeVerifier(), fake).get(
+        "/paths?from=A&to=B&max_hops=1&summary=true", headers=_auth()
+    )
+    assert resp.status_code == 200, f"{resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert set(body.keys()) == {"count", "sample"}, (
+        f"summary envelope must be exactly {{count, sample}}; got keys {list(body.keys())}"
+    )
+    assert body["count"] == 4
+    assert len(body["sample"]) == 3
+    # Canonical sort orders by the "nodes" key (alphabetically first) -> B, C, D before Z.
+    assert [item["nodes"] for item in body["sample"]] == [["A", "B"], ["A", "C"], ["A", "D"]]
+
+
+def test_neighbors_summary_false_matches_absent_byte_parity() -> None:
+    """AC-2: `summary=false` (explicit) must be BYTE-IDENTICAL to `summary` omitted entirely
+    — the widened `dict[str, Any]` return annotation must not change a single normal-mode
+    byte. (Currently GREEN: today `summary` is simply an ignored, unrecognized query param,
+    so both requests already coincide; this pins that widening the annotation may never
+    change that.)"""
+    neighbor = _labeled_neighbor("B")
+    resp_absent = _client(_FakeVerifier(), _FakeNeo4jClient(neighbors=[neighbor])).get(
+        "/entities/A/neighbors", headers=_auth()
+    )
+    resp_false = _client(_FakeVerifier(), _FakeNeo4jClient(neighbors=[neighbor])).get(
+        "/entities/A/neighbors?summary=false", headers=_auth()
+    )
+    assert resp_absent.status_code == resp_false.status_code == 200
+    assert resp_absent.json() == resp_false.json() == {"neighbors": [neighbor]}
+
+
+def test_paths_summary_false_matches_absent_byte_parity() -> None:
+    path = _labeled_path("A", "B")
+    resp_absent = _client(_FakeVerifier(), _FakeNeo4jClient(paths=[path])).get(
+        "/paths?from=A&to=B&max_hops=1", headers=_auth()
+    )
+    resp_false = _client(_FakeVerifier(), _FakeNeo4jClient(paths=[path])).get(
+        "/paths?from=A&to=B&max_hops=1&summary=false", headers=_auth()
+    )
+    assert resp_absent.status_code == resp_false.status_code == 200
+    assert resp_absent.json() == resp_false.json() == {"paths": [path]}
+
+
+def test_neighbors_summary_invalid_value_is_422() -> None:
+    """A non-boolean `summary` value is rejected by FastAPI's typed `Query(bool)` coercion
+    (empirically verified against this repo's installed FastAPI/pydantic: "banana" ->
+    422 bool_parsing) BEFORE any query runs — an unparseable flag must fail closed, never
+    silently coerce to False."""
+    fake = _FakeNeo4jClient(neighbors=[_labeled_neighbor("B")])
+    resp = _client(_FakeVerifier(), fake).get(
+        "/entities/A/neighbors?summary=banana", headers=_auth()
+    )
+    assert resp.status_code == 422, (
+        f"non-boolean summary must 422; got {resp.status_code}: {resp.text}"
+    )
+    assert fake.calls == [], "a rejected summary value must short-circuit before any query runs"
+
+
+def test_paths_summary_invalid_value_is_422() -> None:
+    fake = _FakeNeo4jClient(paths=[_labeled_path("A", "B")])
+    resp = _client(_FakeVerifier(), fake).get(
+        "/paths?from=A&to=B&max_hops=1&summary=banana", headers=_auth()
+    )
+    assert resp.status_code == 422, (
+        f"non-boolean summary must 422; got {resp.status_code}: {resp.text}"
+    )
+    assert fake.calls == [], "a rejected summary value must short-circuit before any query runs"
+
+
+# ======================================================================================
+# AC-4 lockstep parity (spec §6.4) — ONE shared recording fake drives BOTH surfaces for the
+# SAME seeded input; the REST summary body must deep-equal the MCP tool's summary return.
+# tool_get_neighbors / tool_find_paths are imported LOCALLY (fail-soft, the F-3 idiom) —
+# they exist today but lack the `summary` kwarg, so calling with it raises TypeError until
+# the builder adds it.
+# ======================================================================================
+def test_neighbors_summary_rest_mcp_parity() -> None:
+    from worldmonitor.mcp.server import tool_get_neighbors
+
+    fake = _FakeNeo4jClient(
+        neighbors=[
+            _labeled_neighbor("D"),
+            _labeled_neighbor("B"),
+            _labeled_neighbor("A"),
+            _labeled_neighbor("C"),
+        ]
+    )
+    rest_resp = _client(_FakeVerifier(), fake).get(
+        "/entities/A/neighbors?summary=true", headers=_auth()
+    )
+    assert rest_resp.status_code == 200, f"{rest_resp.status_code}: {rest_resp.text}"
+    rest_body = rest_resp.json()
+
+    mcp_result = tool_get_neighbors(fake, "A", summary=True)
+
+    expected = {
+        "count": 4,
+        "sample": [_labeled_neighbor("A"), _labeled_neighbor("B"), _labeled_neighbor("C")],
+    }
+    assert rest_body == mcp_result == expected, (
+        "REST body and MCP tool result must be byte-identical (AC-4 lockstep) for the same "
+        f"seeded input: rest={rest_body!r} mcp={mcp_result!r}"
+    )
+
+
+def test_paths_summary_rest_mcp_parity() -> None:
+    from worldmonitor.mcp.server import tool_find_paths
+
+    fake = _FakeNeo4jClient(
+        paths=[
+            _labeled_path("A", "D"),
+            _labeled_path("A", "B"),
+            _labeled_path("A", "C"),
+            _labeled_path("A", "Z"),
+        ]
+    )
+    rest_resp = _client(_FakeVerifier(), fake).get(
+        "/paths?from=A&to=B&max_hops=1&summary=true", headers=_auth()
+    )
+    assert rest_resp.status_code == 200, f"{rest_resp.status_code}: {rest_resp.text}"
+    rest_body = rest_resp.json()
+
+    mcp_result = tool_find_paths(fake, "A", "B", max_hops=1, summary=True)
+
+    expected = {
+        "count": 4,
+        "sample": [_labeled_path("A", "B"), _labeled_path("A", "C"), _labeled_path("A", "D")],
+    }
+    assert rest_body == mcp_result == expected, (
+        "REST body and MCP tool result must be byte-identical (AC-4 lockstep) for the same "
+        f"seeded input: rest={rest_body!r} mcp={mcp_result!r}"
+    )

@@ -439,8 +439,18 @@ def test_all_tools_have_output_schema() -> None:
         assert schema is not None, f"{name} carries no outputSchema (AC-2 — silent fallback?)"
         assert schema.get("type") == "object"
         result_prop = schema.get("properties", {}).get("result")
-        assert result_prop is not None and result_prop.get("type") == "array", (
-            f"{name}'s list-tool outputSchema must wrap a 'result' array; got {schema!r}"
+        # Gate F-5 (ADR 0124, spec §6.1 P-1) — the ONE sanctioned relaxation: `result` may
+        # still be the bare array (today) OR an anyOf UNION admitting an array branch (post
+        # F-5's `summary` flag, which adds a dict `{count, sample}` return shape). Either
+        # way the array guarantee must hold; this does NOT accept an array-less union.
+        is_bare_array = result_prop is not None and result_prop.get("type") == "array"
+        is_array_branch_of_union = result_prop is not None and any(
+            branch.get("type") == "array" for branch in result_prop.get("anyOf", [])
+        )
+        assert is_bare_array or is_array_branch_of_union, (
+            f"{name}'s list-tool outputSchema must still describe an array — either bare "
+            f"(today) or as one branch of a summary-flag anyOf union (Gate F-5, ADR 0124); "
+            f"got {schema!r}"
         )
 
     prov_schema = tools["get_provenance"].outputSchema
@@ -651,3 +661,162 @@ def test_get_entity_dossier_absent_error_envelope_via_call_tool() -> None:
     assert set(envelope.keys()) == {"error", "hint"}
     assert envelope["error"] == "entity not found"
     assert isinstance(envelope["hint"], str) and envelope["hint"].strip() != ""
+
+
+# ========================================================================================
+# Gate F-5 (`summary` context-budget flag, ADR 0124/spec `docs/reviews/
+# GATE_F5_SUMMARY_FLAG_SPEC.md`) — `get_neighbors` / `find_paths` gain an opt-in
+# `summary: bool = False` argument; when set, both tools return the shared
+# `graph.queries.summarize_result` envelope `{count, sample}` instead of the full list,
+# and their return annotation widens to a union (`list[dict] | dict`).
+#
+# `tool_get_neighbors` / `tool_find_paths` are ALREADY imported at module top (they exist
+# today, just without a `summary` parameter) — calling them with `summary=...` raises
+# TypeError until the builder adds the kwarg. That TypeError IS the RED failure mode for
+# the tests below that drive the thin functions directly.
+# ========================================================================================
+
+
+def _many_neighbors_for_summary() -> list[dict[str, Any]]:
+    # Deliberately out of alphabetical order — exercises the canonical-sort determinism
+    # (ADR 0124 §3.4): sorted by json.dumps(d, sort_keys=True) ascending on the shared "id"
+    # key (the first alphabetical key every element carries) -> A, B, C, D, E.
+    return [
+        {"id": "E", "name": ["Echo"], "prov_source_id": "src:test"},
+        {"id": "B", "name": ["Bravo"], "prov_source_id": "src:test"},
+        {"id": "D", "name": ["Delta"], "prov_source_id": "src:test"},
+        {"id": "A", "name": ["Alpha"], "prov_source_id": "src:test"},
+        {"id": "C", "name": ["Charlie"], "prov_source_id": "src:test"},
+    ]
+
+
+def test_get_neighbors_summary_returns_envelope() -> None:
+    """§6.6: `summary=True` -> exactly {count, sample}; count == len(seeded); sample capped
+    at 3; every sample element carries its own prov_* verbatim (G1 not laundered)."""
+    fake = _RecordingFake(neighbors=_many_neighbors_for_summary())
+    result = _call(tool_get_neighbors, fake, "A", summary=True)
+    assert set(result.keys()) == {"count", "sample"}, (
+        f"summary envelope must be exactly {{count, sample}}; got keys {list(result.keys())}"
+    )
+    assert result["count"] == 5
+    assert len(result["sample"]) == 3
+    for item in result["sample"]:
+        assert item in _many_neighbors_for_summary(), (
+            f"sample element {item!r} is not one of the seeded neighbours"
+        )
+        assert item.get("prov_source_id") == "src:test", (
+            f"a sample element must carry its own provenance verbatim (G1); got {item!r}"
+        )
+    assert [item["id"] for item in result["sample"]] == ["A", "B", "C"]
+
+
+def test_find_paths_summary_returns_envelope() -> None:
+    """§6.6 analogue for find_paths."""
+    fake = _RecordingFake(
+        paths=[
+            {"nodes": ["A", "D"], "relationships": ["OWNS"]},
+            {"nodes": ["A", "B"], "relationships": ["OWNS"]},
+            {"nodes": ["A", "C"], "relationships": ["OWNS"]},
+            {"nodes": ["A", "Z"], "relationships": ["OWNS"]},
+        ]
+    )
+    result = _call(tool_find_paths, fake, "A", "B", max_hops=1, summary=True)
+    assert set(result.keys()) == {"count", "sample"}
+    assert result["count"] == 4
+    assert len(result["sample"]) == 3
+    assert [item["nodes"] for item in result["sample"]] == [["A", "B"], ["A", "C"], ["A", "D"]]
+
+
+def test_get_neighbors_summary_read_only() -> None:
+    """§6.6: driving the summary path touches ONLY execute_read (the fake raises on any
+    write path — a structural, not merely asserted, read-only proof)."""
+    fake = _RecordingFake(neighbors=_many_neighbors_for_summary())
+    _call(tool_get_neighbors, fake, "A", summary=True)
+    assert fake.read_calls, "the summary path must still actually query (via execute_read)"
+    for query, _ in fake.read_calls:
+        assert not _WRITE_KEYWORDS.search(query), (
+            f"the summary path issued Cypher containing a write keyword: {query!r}"
+        )
+
+
+def test_get_neighbors_summary_absent_and_false_match_pp1_baseline() -> None:
+    """PP-1-style differential pin: `summary` OMITTED and `summary=False` explicit must both
+    be byte-identical to today's baseline list return — driving the SAME fake three ways
+    proves the new union annotation adds ZERO normal-mode bytes."""
+    fake = _RecordingFake(neighbors=_many_neighbors_for_summary())
+    baseline = _call(tool_get_neighbors, fake, "A")
+    explicit_false = _call(tool_get_neighbors, fake, "A", summary=False)
+    assert explicit_false == baseline
+
+
+def test_find_paths_summary_absent_and_false_match_pp1_baseline() -> None:
+    fake = _RecordingFake(paths=[{"nodes": ["A", "B"], "relationships": ["OWNS"]}])
+    baseline = _call(tool_find_paths, fake, "A", "B", max_hops=1)
+    explicit_false = _call(tool_find_paths, fake, "A", "B", max_hops=1, summary=False)
+    assert explicit_false == baseline
+
+
+def test_get_neighbors_and_find_paths_output_schema_admits_object_branch() -> None:
+    """AC-3 — the NEW half of the union that P-1's relaxed pin (above) merely tolerates:
+    post-Gate-F-5 both tools' `outputSchema.result` is an `anyOf` admitting BOTH an array
+    branch (today's shape) AND an object branch (the `{count, sample}` summary shape). RED
+    today: `result` is a bare `{"type": "array", ...}` with no `anyOf` at all — a builder
+    cannot satisfy this by merely deleting the array assertion (P-1's array branch is
+    pinned separately, above, and stays green throughout)."""
+    server, _fake = _all_seeded_server()
+    tools = _list_tools(server)
+    for name in ("get_neighbors", "find_paths"):
+        schema = tools[name].outputSchema
+        result_prop = schema.get("properties", {}).get("result")
+        assert result_prop is not None
+        any_of = result_prop.get("anyOf")
+        assert any_of, (
+            f"{name}'s outputSchema.result must be an anyOf union post-Gate-F-5; got "
+            f"{result_prop!r}"
+        )
+        assert any(branch.get("type") == "array" for branch in any_of), (
+            f"{name}'s anyOf must retain an array branch; got {any_of!r}"
+        )
+        assert any(branch.get("type") == "object" for branch in any_of), (
+            f"{name}'s anyOf must gain an object branch for the summary shape; got {any_of!r}"
+        )
+
+    # The other three tools' outputSchema stays untouched (strict, unchanged shape family).
+    entity_schema = tools["get_entity"].outputSchema
+    assert entity_schema.get("additionalProperties") is True
+    assert "anyOf" not in entity_schema.get("properties", {})
+    prov_schema = tools["get_provenance"].outputSchema
+    assert prov_schema.get("additionalProperties") == {"type": "string"}
+    dossier_schema = tools["get_entity_dossier"].outputSchema
+    assert dossier_schema.get("type") == "object"
+    assert "anyOf" not in dossier_schema.get("properties", {})
+
+
+def test_get_neighbors_summary_content_and_structured_content_via_call_tool() -> None:
+    """Wire-level (through server.call_tool, not the bare thin function): `summary=True` ->
+    exactly ONE content block whose decoded JSON is `{count, sample}`, and
+    `structuredContent == {"result": {count, sample}}` (the SDK wraps the dict under
+    "result" — spec §3.5). Uses `_all_seeded_server()`'s fake, which carries 2 neighbours."""
+    server, _fake = _all_seeded_server()
+    content, structured = _call_tool(server, "get_neighbors", {"entity_id": "A", "summary": True})
+    assert len(content) == 1, "summary mode must emit exactly ONE content block"
+    decoded = json.loads(content[0].text)
+    assert set(decoded.keys()) == {"count", "sample"}
+    assert decoded["count"] == 2
+    assert structured == {"result": decoded}, (
+        "structuredContent for the summary dict must be {'result': {count, sample}} (the "
+        f"SDK wraps the dict); got {structured!r}"
+    )
+
+
+def test_find_paths_summary_content_and_structured_content_via_call_tool() -> None:
+    """Wire-level analogue for find_paths — `_all_seeded_server()`'s fake carries 2 paths."""
+    server, _fake = _all_seeded_server()
+    content, structured = _call_tool(
+        server, "find_paths", {"from_id": "A", "to_id": "B", "max_hops": 1, "summary": True}
+    )
+    assert len(content) == 1
+    decoded = json.loads(content[0].text)
+    assert set(decoded.keys()) == {"count", "sample"}
+    assert decoded["count"] == 2
+    assert structured == {"result": decoded}

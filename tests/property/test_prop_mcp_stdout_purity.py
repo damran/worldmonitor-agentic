@@ -160,3 +160,45 @@ def test_get_entity_dossier_stdout_pure_and_bounded(
     fake = _RecordingFake()
     raised = _drive(tool_get_entity_dossier, fake, entity_id, hops)
     _assert_invariants(fake, entity_id, raised, capfd.readouterr())
+
+
+# ========================================================================================
+# Gate F-5 (`summary` context-budget flag, ADR 0124) — the summary path is a happy path
+# (no new raise site), so this is belt-and-suspenders, not a mandatory addition (spec §2
+# "Optional ... nice-to-have"). Uses a DEDICATED `_drive_kw` (not the existing `_drive`,
+# left untouched above) so this extension cannot alter the two pre-existing tests' behavior
+# in any way. `tool_get_neighbors`/`tool_find_paths` are ALREADY imported at module top
+# (they exist today, just without a `summary` kwarg) — calling with `summary=...` raises
+# TypeError until the builder adds it, which is this section's RED failure mode.
+# ========================================================================================
+
+
+def _drive_kw(fn: Any, fake: _RecordingFake, *args: Any, **kwargs: Any) -> bool:
+    """Like `_drive`, but forwards keyword arguments (e.g. `summary=`) to the tool call."""
+    try:
+        _call(fn, fake, *args, **kwargs)
+        return False
+    except ToolError:
+        return True
+
+
+@given(entity_id=_IDS, hops=_HOPS, summary=st.booleans())
+@_SETTINGS
+def test_get_neighbors_summary_stdout_pure_and_bounded(
+    capfd: pytest.CaptureFixture[str], entity_id: str, hops: int, summary: bool
+) -> None:
+    configure_stderr_logging()
+    fake = _RecordingFake()
+    raised = _drive_kw(tool_get_neighbors, fake, entity_id, hops, summary=summary)
+    _assert_invariants(fake, entity_id, raised, capfd.readouterr())
+
+
+@given(entity_id=_IDS, max_hops=_HOPS, summary=st.booleans())
+@_SETTINGS
+def test_find_paths_summary_stdout_pure_and_bounded(
+    capfd: pytest.CaptureFixture[str], entity_id: str, max_hops: int, summary: bool
+) -> None:
+    configure_stderr_logging()
+    fake = _RecordingFake()
+    raised = _drive_kw(tool_find_paths, fake, entity_id, entity_id, max_hops, summary=summary)
+    _assert_invariants(fake, entity_id, raised, capfd.readouterr())
