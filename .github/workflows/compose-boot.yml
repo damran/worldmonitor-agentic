@@ -77,6 +77,15 @@ jobs:
           docker compose --env-file .env -f deploy/compose.yaml \
             up -d --wait --wait-timeout 180 sandbox-runner
 
+      - name: MCP live-smoke — stdio tools/list + prompts/list assert the exact registered surface (ADR 0126)
+        # Runs the deployed image's own MCP entrypoint under the stdio transport (no bearer needed —
+        # ADR 0063 single-tenant) and asserts EXACTLY the 5 tools + 2 prompts. --no-deps because the
+        # smoke opens no Neo4j connection (tools/list/prompts/list call no tool); --profile agent so the
+        # profiled `mcp` service resolves; -T because CI has no TTY; --rm to clean up the one-shot.
+        run: |
+          docker compose --env-file .env -f deploy/compose.yaml --profile agent \
+            run --rm --no-deps -T mcp python -m worldmonitor.mcp.smoke
+
       - name: Status
         run: docker compose --env-file .env -f deploy/compose.yaml ps
 

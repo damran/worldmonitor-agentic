@@ -142,4 +142,5 @@
 | [0123](0123-freshness-surface.md) | Source-freshness surface (F-1 slice 1): a derived 6-state machine over connector run-metadata | ACCEPTED | 2026-07-24 | false | false |
 | [0124](0124-summary-context-budget-flag.md) | `summary` context-budget flag on `get_neighbors` / `find_paths` (REST + MCP) | ACCEPTED | 2026-07-24 | false | false |
 | [0125](0125-mcp-prompts.md) | MCP prompts as analyst playbooks (`entity-workup`, `freshness-audit`) | ACCEPTED | 2026-07-24 | false | false |
+| [0126](0126-mcp-live-smoke.md) | MCP live-smoke in CI (stdio `tools/list` + `prompts/list` set-pin on compose-boot) | ACCEPTED | 2026-07-24 | false | false |
 <!-- END GENERATED ADR INDEX -->
