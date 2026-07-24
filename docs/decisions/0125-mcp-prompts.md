@@ -1,6 +1,6 @@
 # 0125 — MCP prompts as analyst playbooks (`entity-workup`, `freshness-audit`)
 
-- **Status:** PROPOSED (flips to ACCEPTED at the gate-completing PR — the 0117–0124 convention)
+- **Status:** ACCEPTED (2026-07-24)
 - **Date:** 2026-07-24
 - **human_fork:** false — a reversible, additive, read-only **guidance surface**. Two declarative text
   prompts registered beside the five read tools; no product/architecture fork. Each scoping call (validate-

@@ -35,6 +35,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.fastmcp.prompts.base import Prompt
 from mcp.types import ToolAnnotations
 
 from worldmonitor.authz.oidc import ZitadelTokenVerifier
@@ -98,6 +99,213 @@ def _require_valid_id(entity_id: str) -> None:
             "invalid entity id",
             "must match the canonical id shape (ID_PATTERN); pass a resolved canonical id",
         )
+
+
+# ==========================================================================================
+# Analyst-playbook prompts (Gate F-4, ADR 0125) — declarative, read-only MCP prompts. A
+# prompt is a pure text template parameterised only by a validated, canonical-id-shaped
+# argument: it opens no session, issues no Cypher, and returns no graph node/edge (spec §0,
+# §3 "Append-only / read-only"). Registered ONCE (``_register_prompts``) and called by BOTH
+# transports so stdio and HTTP never drift (D2, INV-S1).
+# ==========================================================================================
+
+# Generous versus any real canonical id (Wikidata Q-numbers, LEI, GeoNames, ISO-3166,
+# `opensanctions:…`, IOC-feed ids…) while clearly rejecting a hostile blob (spec §5.1).
+_PROMPT_ARG_MAX_LEN = 256
+
+# VERBATIM contract text (spec §4.1) — pinned by a byte-identical test. `{{count, sample}}`
+# is the doubled-brace escape: it renders as the literal `{count, sample}` after
+# `.format()`; the only real substitution field is `{entity_id}`.
+_ENTITY_WORKUP_TEMPLATE = """Entity workup playbook — entity_id={entity_id}
+
+Purpose: assemble a provenance-complete picture of one resolved entity as ranked leads
+for a human analyst. This is a read-only orientation aid, never an automated verdict.
+
+Each step names one graph-read tool, its purpose, and the argument shape to pass. Work
+through them in order.
+
+Step 1 - Anchor the entity.
+  Tool: get_entity(entity_id={entity_id})
+  Purpose: confirm the node exists and read its properties and provenance
+  (prov_source_id, prov_retrieved_at, prov_reliability, prov_source_record). If the tool
+  reports "entity not found", stop: this id is not in the resolved graph.
+
+Step 2 - Read the provenance.
+  Tool: get_provenance(entity_id={entity_id})
+  Purpose: record where each fact about this entity came from before drawing any
+  inference. Every node carries provenance; weigh a single-source or low-reliability fact
+  as a weaker lead.
+
+Step 3 - Map the immediate neighbourhood.
+  Tool: get_neighbors(entity_id={entity_id}, hops=1)
+  Purpose: list the entities one edge away and how they connect. On a high-degree node,
+  pass summary=true first for a {{count, sample}} taste before requesting the full list.
+
+Step 4 - Trace a specific connection.
+  Tool: find_paths(from_id={entity_id}, to_id=<a second resolved id>, max_hops=<within
+  the hop cap>)
+  Purpose: when you have a hypothesis linking this entity to another, look for bounded
+  paths between them. No path within the hop bound is not proof of no relationship.
+
+Step 5 - Assemble the dossier.
+  Tool: get_entity_dossier(entity_id={entity_id}, hops=1)
+  Purpose: retrieve the deterministic entity + neighbours + provenance + merge_history
+  bundle in a single call for the written workup.
+
+Framing: report ranked hypotheses with their provenance and confidence for human review;
+do not merge, attribute, or label a person from this workup. Surface the leads and their
+sources and let a human decide."""
+
+# VERBATIM contract text (spec §4.2) — pinned by a byte-identical test. `{scope_line}` is
+# computed by :func:`prompt_freshness_audit` from the validated ``connector_id``.
+_FRESHNESS_AUDIT_TEMPLATE = """Source freshness audit playbook
+
+{scope_line}
+
+Purpose: assess how current the ingested sources are, so an analyst can weight findings by
+the freshness of their underlying feeds. A stale or missing source is a lead about a
+collection gap, not a verdict about the world.
+
+Freshness is served by the read-only REST endpoint GET /sources/freshness (auth-gated,
+single-tenant). There is no freshness MCP tool in this version - use the REST surface. The
+response lists, per connector instance: connector_id, an opaque instance_id, the raw
+status, the derived freshness_status, last_success_at, age_seconds, plus a summary
+count-by-state and the configured staleness budget.
+
+Step 1 - Pull the freshness surface.
+  Call: GET /sources/freshness
+  Purpose: read the current per-instance freshness_status and the summary counts.
+
+Step 2 - Read each instance's freshness_status. It is one of six values, in priority
+order:
+  - disabled    administratively off; expect no data, not a fault.
+  - error       auto-hard-disabled after repeated failures; a collection gap to escalate
+                to a human operator.
+  - no_data     active but never had a successful ingest; treat downstream coverage as
+                absent.
+  - very_stale  last success older than the very-stale budget; findings may be badly out
+                of date.
+  - stale       last success older than the stale budget; weight findings accordingly.
+  - fresh       last success within budget.
+
+Step 3 - Summarise the gaps.
+  Purpose: from the summary counts, report how many instances are error / no_data /
+  very_stale / stale versus fresh. Rank error and no_data instances first - those are the
+  collection gaps most likely to bias an analysis.
+
+Framing: freshness is operational metadata about pipelines, never data about a person.
+Read it as evidence of collection coverage and gaps and surface those gaps to a human; do
+not treat a stale or missing source as a factual claim about any entity."""
+
+
+def _prompt_error(error: str, hint: str) -> ValueError:
+    """Build a ``ValueError`` whose message is a JSON ``{"error", "hint"}`` envelope.
+
+    Mirrors :func:`_tool_error`, but a bare ``ValueError`` (not ``ToolError``) because that
+    is what the SDK's ``Prompt.render``/``FastMCP.get_prompt`` re-raise regardless of what a
+    prompt fn raises (spec §1.1): the client-visible text carries the SDK's own
+    ``Error rendering prompt <name>: `` prefix ahead of this JSON payload.
+    """
+    return ValueError(json.dumps({"error": error, "hint": hint}))
+
+
+def _require_valid_prompt_arg(value: str, *, field: str, allow_empty: bool = False) -> None:
+    """Reject an over-length or malformed-shaped prompt argument BEFORE interpolation.
+
+    Validation order is load-bearing (spec §5.1): length is checked FIRST — an over-cap
+    string is rejected as "argument too long" even when it would also fail shape
+    validation, and checking length first avoids running the shape regex against an
+    adversarial giant string. Shape is checked SECOND via the SAME
+    ``read_guards.validate_entity_id`` predicate the five tools use (ADR 0125 D3). Neither
+    branch logs or raises the raw value unbounded — only ``field``, its length, and a short
+    ``repr`` slice reach the (stderr-only) log line; the error envelope always carries a
+    fixed token + hint and never reflects the hostile bytes.
+    """
+    if allow_empty and value == "":
+        return
+    if len(value) > _PROMPT_ARG_MAX_LEN:
+        logger.warning(
+            "rejected over-length prompt argument %s (len=%d, starts=%r)",
+            field,
+            len(value),
+            value[:32],
+        )
+        raise _prompt_error(
+            "argument too long",
+            f"{field} must be at most {_PROMPT_ARG_MAX_LEN} characters",
+        )
+    if not read_guards.validate_entity_id(value):
+        logger.warning(
+            "rejected malformed prompt argument %s (failed ID_PATTERN, len=%d, starts=%r)",
+            field,
+            len(value),
+            value[:32],
+        )
+        raise _prompt_error(
+            "invalid argument",
+            f"{field} must match the canonical id shape (ID_PATTERN)",
+        )
+
+
+def prompt_entity_workup(entity_id: str) -> str:
+    """Render the ``entity-workup`` playbook for one validated canonical entity id.
+
+    ``entity_id`` is length-capped then shape-validated (spec §5.1, required/non-empty);
+    on success this returns the verbatim template (spec §4.1) with ``entity_id``
+    interpolated. Pure text: no session, no Cypher, no client (spec §0).
+    """
+    _require_valid_prompt_arg(entity_id, field="entity_id")
+    return _ENTITY_WORKUP_TEMPLATE.format(entity_id=entity_id)
+
+
+def prompt_freshness_audit(connector_id: str = "") -> str:
+    """Render the ``freshness-audit`` playbook, optionally scoped to one connector id.
+
+    ``connector_id == ""`` (the default) is the "all instances" sentinel and skips shape
+    validation (spec §5.1); a non-empty value is length-capped then shape-validated
+    identically to ``entity_id``. Pure text: no session, no Cypher, no client (spec §0).
+    """
+    _require_valid_prompt_arg(connector_id, field="connector_id", allow_empty=True)
+    if connector_id == "":
+        scope_line = "Scope: all connector instances."
+    else:
+        scope_line = f"Scope: focus on connector instances whose connector_id == {connector_id}."
+    return _FRESHNESS_AUDIT_TEMPLATE.format(scope_line=scope_line)
+
+
+def _register_prompts(server: FastMCP) -> None:
+    """Register the two analyst-playbook prompts on ``server`` (Gate F-4, ADR 0125 D2).
+
+    Shared by the stdio (:func:`build_server`) and HTTP (:func:`build_http_app`) transports
+    so BOTH surfaces expose an identical two-prompt set with no drift. Takes **no**
+    ``Neo4jClient`` — prompts are pure text (spec §0, §3): they open no session and issue no
+    Cypher. Hyphenated wire names require the explicit ``name=`` kwarg (spec §1).
+    """
+    server.add_prompt(
+        Prompt.from_function(
+            prompt_entity_workup,
+            name="entity-workup",
+            title="Entity workup",
+            description=(
+                "Declarative, read-only playbook: work up a single resolved entity across "
+                "the five graph-read tools (get_entity → get_provenance → get_neighbors → "
+                "find_paths → get_entity_dossier) as ranked leads for human review — never "
+                "an automated verdict."
+            ),
+        )
+    )
+    server.add_prompt(
+        Prompt.from_function(
+            prompt_freshness_audit,
+            name="freshness-audit",
+            title="Freshness audit",
+            description=(
+                "Declarative, read-only playbook: audit source freshness via GET "
+                "/sources/freshness and interpret the six freshness states as evidence of "
+                "collection gaps for human review."
+            ),
+        )
+    )
 
 
 # ----------------------------------------------------------------------------------------
@@ -297,6 +505,7 @@ def build_server(*, neo4j_client: Neo4jClient | None = None) -> FastMCP:
     configure_stderr_logging()
     server: FastMCP = FastMCP(name="worldmonitor-graph-read")
     _register_read_tools(server, _resolve_client(neo4j_client))
+    _register_prompts(server)
     return server
 
 
@@ -346,6 +555,7 @@ def build_http_app(
         stateless_http=True,
     )
     _register_read_tools(server, _resolve_client(neo4j_client))
+    _register_prompts(server)
     return server.streamable_http_app()
 
 
