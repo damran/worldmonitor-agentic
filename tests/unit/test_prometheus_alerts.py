@@ -21,6 +21,9 @@ Invariants enforced:
   (e) rule_files in prometheus.yml references a path that exists on disk.
   (f) OPTIONAL: if promtool is on PATH, validate config + rules + run the bundled test fixture,
       asserting returncode 0.
+  (g) Gate F-1 slice 1 (ADR 0123): the freshness budget <-> ConnectorSuccessStale alert coupling
+      (no independent drift), the very_stale > stale validator, and a pin that the freshness
+      surface adds NO new alert rule (the already-shipped ConnectorSuccessStale IS the "1 alert").
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from typing import Any
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from worldmonitor.settings import Settings
 
@@ -517,6 +521,100 @@ def test_expected_seven_alerts_all_present_by_name() -> None:
     assert not missing, (
         f"worldmonitor.rules.yml is missing the following alert rules from ADR 0078 D2: {missing}. "
         f"Present: {sorted(actual_names)}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# (g) Gate F-1 slice 1 (ADR 0123) — freshness budget <-> alert coupling + no-new-alert pin.
+# --------------------------------------------------------------------------- #
+
+
+def test_freshness_stale_budget_matches_connector_success_stale_alert() -> None:
+    """(g) AC-5 (ADR 0123 D4): Settings().freshness_stale_after_seconds must equal the numeric
+    literal in the ALREADY-SHIPPED ConnectorSuccessStale alert's expr (14400), mirroring
+    test_resolution_wedged_threshold_matches_settings, so the Python 'stale' boundary and the
+    alert cannot drift independently.
+
+    RED today: Settings has no freshness_stale_after_seconds field yet (AttributeError).
+    """
+    assert RULES_YML.exists(), f"rules file missing: {RULES_YML}"
+    doc = _load_yaml(RULES_YML)
+    alerts = _all_alert_rules(doc)
+
+    stale_alert = next((r for r in alerts if r.get("alert") == "ConnectorSuccessStale"), None)
+    assert stale_alert is not None, (
+        "worldmonitor.rules.yml must contain the already-shipped 'ConnectorSuccessStale' alert "
+        "(spec §1.1 — Gate F-1 does not add a new alert; it couples to this existing one)"
+    )
+    expr = str(stale_alert.get("expr", ""))
+    threshold_match = re.search(r">\s*(\d+)", expr)
+    assert threshold_match is not None, (
+        f"ConnectorSuccessStale expr {expr!r} must contain a '> <threshold>' literal"
+    )
+    alert_threshold = int(threshold_match.group(1))
+    assert alert_threshold == 14400, (
+        f"sanity: the shipped alert's own literal drifted from 14400: {alert_threshold}"
+    )
+
+    settings_threshold = Settings().freshness_stale_after_seconds
+    assert settings_threshold == alert_threshold, (
+        f"Settings().freshness_stale_after_seconds={settings_threshold} must equal "
+        f"ConnectorSuccessStale's literal {alert_threshold} (ADR 0123 D4) so REST/gauge and the "
+        "alert cannot drift."
+    )
+
+
+def test_freshness_very_stale_greater_than_stale() -> None:
+    """(g) AC-5 (ADR 0123 D4): the default budgets satisfy very_stale > stale (14400/86400), and
+    the model_validator rejects an inverted/equal pair (mirrors _validate_abstain_band's shape).
+
+    RED today: Settings has neither field (AttributeError on the default-pair assertions), and
+    constructing an inverted pair is silently ACCEPTED (model_config extra='ignore' drops unknown
+    kwargs) rather than rejected, so pytest.raises(ValidationError) fails with 'DID NOT RAISE'.
+    """
+    default_stale = Settings().freshness_stale_after_seconds
+    default_very_stale = Settings().freshness_very_stale_after_seconds
+    assert default_stale == 14400
+    assert default_very_stale == 86400
+    assert default_very_stale > default_stale, (
+        f"defaults must satisfy very_stale > stale: stale={default_stale}, "
+        f"very_stale={default_very_stale}"
+    )
+
+    with pytest.raises(ValidationError):
+        Settings(freshness_stale_after_seconds=100, freshness_very_stale_after_seconds=100)
+    with pytest.raises(ValidationError):
+        Settings(freshness_stale_after_seconds=200, freshness_very_stale_after_seconds=100)
+
+
+def test_alert_rule_set_unchanged_by_freshness_surface_gate() -> None:
+    """(g) Gate F-1 §3.4/§7 (ADR 0123 D6): the freshness surface adds NO alert. Pins the CURRENT
+    (pre-gate) exact alert-name set so a builder cannot silently add a 10th alert over the new
+    worldmonitor_connector_freshness gauge (a 'very_stale escalation' is an explicit
+    revisit-trigger recorded in the ADR, not something this gate builds).
+
+    This is a REGRESSION PIN, not a RED-until-implemented test: it already holds on the base tree
+    (only these 9 alerts exist today) and must keep holding after the gate lands.
+    """
+    assert RULES_YML.exists(), f"rules file missing: {RULES_YML}"
+    doc = _load_yaml(RULES_YML)
+    alerts = _all_alert_rules(doc)
+    actual_names = {r.get("alert") for r in alerts}
+
+    expected_names = {
+        "DriverDown",
+        "ResolutionWedged",
+        "ConnectorInstanceHardDisabled",
+        "ConnectorSuccessStale",
+        "ResolvePassTimingOut",
+        "ErQueueBacklogHigh",
+        "IngestDeadLettersPresent",
+        "MergesParkedForReview",
+        "ProjectionDivergenceHigh",
+    }
+    assert actual_names == expected_names, (
+        "Gate F-1 must add NO new alert (ADR 0123 D6) — the exact alert-name set drifted:\n"
+        f"  expected: {sorted(expected_names)}\n  actual:   {sorted(actual_names)}"
     )
 
 

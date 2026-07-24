@@ -16,6 +16,14 @@ reason). Constructor contract these tests pin (for the builder):
 
     DriverMetricsCollector(session_factory=<sessionmaker>, neo4j=<Neo4jClient>,
                            skip_counter=<Callable[[], int]>)
+
+Gate F-1 slice 1 additions (ADR 0123, bottom of file): the derived
+``worldmonitor_connector_freshness{connector_id, instance, state}`` gauge, sourced from the new
+``observability.freshness.compute_instance_freshness`` shared helper. These tests construct the
+collector with the two NEW keyword-only budgets (``stale_after_seconds`` /
+``very_stale_after_seconds``) that the constructor must gain (spec §4.1) — a RED
+``TypeError: unexpected keyword argument`` until the builder adds them (with defaults, so the
+EXISTING calls above that omit them keep working unmodified).
 """
 
 from __future__ import annotations
@@ -40,6 +48,9 @@ from worldmonitor.db.models import (
 
 # RED import: the collector module (and its prometheus_client dependency) do not exist yet.
 from worldmonitor.metrics.collector import DriverMetricsCollector
+
+# RED import (Gate F-1 slice 1): the observability package does not exist yet.
+from worldmonitor.observability.freshness import FRESHNESS_STATES
 
 
 # Test-only dialect shim: the ORM models use Postgres ``JSONB``; render it as SQLite ``JSON`` so
@@ -66,6 +77,11 @@ _EXPECTED_NAMES = {
     "worldmonitor_resolve_last_stopped_reason",
     "worldmonitor_connector_last_success_timestamp",
 }
+
+# Gate F-1 slice 1 defaults (ADR 0123 D4) — used to construct the collector explicitly in the
+# freshness gauge tests below so they do not depend on whatever default the builder wires in.
+_STALE_AFTER = 14400
+_VERY_STALE_AFTER = 86400
 
 
 class _StubNeo4j:
@@ -350,3 +366,226 @@ def test_connector_last_success_timestamp_per_instance() -> None:
     assert g(connector_id="feeds", instance="ci-a") == newer.timestamp()
     assert newer.timestamp() > older.timestamp(), "MAX must have picked the newer run"
     assert g(connector_id="feeds", instance="ci-b") == 0, "error-only history reports 0"
+
+
+# ================================================================================================
+# Gate F-1 slice 1 (ADR 0123) — the derived worldmonitor_connector_freshness{state} gauge.
+# ================================================================================================
+
+
+def test_connector_freshness_gauge_emitted() -> None:
+    """AC-3 / spec §6.3: the derived state gauge is emitted per instance, closed 6-state
+    alphabet, value 1 for the active series. RED: DriverMetricsCollector does not yet accept
+    ``stale_after_seconds``/``very_stale_after_seconds`` (TypeError), and the gauge does not
+    exist yet either way."""
+    sessions = _sqlite_sessions()
+    now_ref = datetime.now(UTC)
+    with sessions() as session:
+        session.add_all(
+            [
+                ConnectorInstance(
+                    id="ci-fresh", connector_id="feeds", config_encrypted="x", status="enabled"
+                ),
+                TaskRun(
+                    id="t-fresh",
+                    kind="ingest",
+                    status="ok",
+                    connector_instance_id="ci-fresh",
+                    started_at=now_ref,
+                    finished_at=now_ref - timedelta(minutes=2),
+                ),
+            ]
+        )
+        session.commit()
+
+    collector = DriverMetricsCollector(
+        session_factory=sessions,
+        neo4j=_StubNeo4j(nodes=0, edges=0),
+        skip_counter=lambda: 0,
+        stale_after_seconds=_STALE_AFTER,
+        very_stale_after_seconds=_VERY_STALE_AFTER,
+    )
+    names, values = _collect(collector)
+
+    assert "worldmonitor_connector_freshness" in names
+
+    key = (
+        "worldmonitor_connector_freshness",
+        frozenset({("connector_id", "feeds"), ("instance", "ci-fresh"), ("state", "fresh")}),
+    )
+    assert values[key] == 1.0
+
+
+def test_connector_freshness_gauge_closed_cardinality() -> None:
+    """An instance in EACH of the 6 states produces exactly the expected {instance: state}
+    labels — one active series per instance, no unbounded/extra label combination (mirrors the
+    ``_RESOLVE_STOPPED_REASONS`` closed-cardinality discipline)."""
+    sessions = _sqlite_sessions()
+    now_ref = datetime.now(UTC)
+    with sessions() as session:
+        session.add_all(
+            [
+                ConnectorInstance(
+                    id="ci-disabled", connector_id="a", config_encrypted="x", status="disabled"
+                ),
+                ConnectorInstance(
+                    id="ci-error", connector_id="b", config_encrypted="x", status="error"
+                ),
+                ConnectorInstance(
+                    id="ci-no-data", connector_id="c", config_encrypted="x", status="enabled"
+                ),
+                ConnectorInstance(
+                    id="ci-fresh", connector_id="d", config_encrypted="x", status="enabled"
+                ),
+                ConnectorInstance(
+                    id="ci-stale", connector_id="e", config_encrypted="x", status="enabled"
+                ),
+                ConnectorInstance(
+                    id="ci-very-stale", connector_id="f", config_encrypted="x", status="enabled"
+                ),
+                TaskRun(
+                    id="t-fresh",
+                    kind="ingest",
+                    status="ok",
+                    connector_instance_id="ci-fresh",
+                    started_at=now_ref,
+                    finished_at=now_ref - timedelta(minutes=2),
+                ),
+                TaskRun(
+                    id="t-stale",
+                    kind="ingest",
+                    status="ok",
+                    connector_instance_id="ci-stale",
+                    started_at=now_ref,
+                    finished_at=now_ref - timedelta(hours=6),
+                ),
+                TaskRun(
+                    id="t-very-stale",
+                    kind="ingest",
+                    status="ok",
+                    connector_instance_id="ci-very-stale",
+                    started_at=now_ref,
+                    finished_at=now_ref - timedelta(hours=30),
+                ),
+            ]
+        )
+        session.commit()
+
+    collector = DriverMetricsCollector(
+        session_factory=sessions,
+        neo4j=_StubNeo4j(nodes=0, edges=0),
+        skip_counter=lambda: 0,
+        stale_after_seconds=_STALE_AFTER,
+        very_stale_after_seconds=_VERY_STALE_AFTER,
+    )
+    _, values = _collect(collector)
+
+    expected = {
+        "ci-disabled": "disabled",
+        "ci-error": "error",
+        "ci-no-data": "no_data",
+        "ci-fresh": "fresh",
+        "ci-stale": "stale",
+        "ci-very-stale": "very_stale",
+    }
+    freshness_samples = {
+        labels: value
+        for (name, labels), value in values.items()
+        if name == "worldmonitor_connector_freshness"
+    }
+    assert len(freshness_samples) == 6, (
+        f"expected exactly 6 worldmonitor_connector_freshness series, got "
+        f"{len(freshness_samples)}: {freshness_samples}"
+    )
+
+    seen_states: set[str] = set()
+    for instance_id, expected_state in expected.items():
+        matches = [
+            (labels, value)
+            for labels, value in freshness_samples.items()
+            if ("instance", instance_id) in labels
+        ]
+        assert len(matches) == 1, f"{instance_id}: expected exactly 1 series, got {len(matches)}"
+        labels, value = matches[0]
+        assert value == 1.0
+        state = dict(labels)["state"]
+        assert state == expected_state, f"{instance_id}: expected {expected_state}, got {state!r}"
+        assert state in FRESHNESS_STATES
+        seen_states.add(state)
+
+    assert seen_states == set(FRESHNESS_STATES), (
+        f"the full closed 6-set must be exercised: {seen_states} != {set(FRESHNESS_STATES)}"
+    )
+
+
+def test_last_success_timestamp_gauge_unchanged() -> None:
+    """AC-3 regression pin (spec §9 item 8): adding worldmonitor_connector_freshness must NOT
+    alter worldmonitor_connector_last_success_timestamp's emitted values — including for a
+    DISABLED instance, proving the raw timestamp gauge stays status-blind even though the new
+    gauge is status-aware."""
+    sessions = _sqlite_sessions()
+    with sessions() as session:
+        session.add_all(
+            [
+                ConnectorInstance(
+                    id="ci-a", connector_id="feeds", config_encrypted="x", status="enabled"
+                ),
+                ConnectorInstance(
+                    id="ci-b", connector_id="feeds", config_encrypted="x", status="enabled"
+                ),
+                ConnectorInstance(
+                    id="ci-c", connector_id="feeds", config_encrypted="x", status="disabled"
+                ),
+                TaskRun(
+                    id="t-old",
+                    kind="ingest",
+                    status="ok",
+                    connector_instance_id="ci-a",
+                    started_at=_T - timedelta(hours=2),
+                    finished_at=_T - timedelta(hours=2),
+                ),
+                TaskRun(
+                    id="t-new",
+                    kind="ingest",
+                    status="ok",
+                    connector_instance_id="ci-a",
+                    started_at=_T,
+                    finished_at=_T,
+                ),
+                TaskRun(
+                    id="t-fail",
+                    kind="ingest",
+                    status="error",
+                    connector_instance_id="ci-b",
+                    started_at=_T,
+                    finished_at=_T,
+                ),
+            ]
+        )
+        session.commit()
+
+    collector = DriverMetricsCollector(
+        session_factory=sessions,
+        neo4j=_StubNeo4j(nodes=0, edges=0),
+        skip_counter=lambda: 0,
+        stale_after_seconds=_STALE_AFTER,
+        very_stale_after_seconds=_VERY_STALE_AFTER,
+    )
+    _, values = _collect(collector)
+
+    def g(**labels: str) -> float:
+        key = ("worldmonitor_connector_last_success_timestamp", frozenset(labels.items()))
+        return values[key]
+
+    with sessions() as session:
+        newer = session.execute(
+            select(TaskRun.finished_at).where(TaskRun.id == "t-new")
+        ).scalar_one()
+    assert newer is not None
+    assert g(connector_id="feeds", instance="ci-a") == newer.timestamp()
+    assert g(connector_id="feeds", instance="ci-b") == 0, "error-only history still reports 0"
+    assert g(connector_id="feeds", instance="ci-c") == 0, (
+        "a disabled instance with no ingest history is UNCHANGED by the status-aware new gauge "
+        "-- the raw timestamp gauge stays status-blind (it iterates every ConnectorInstance "
+        "regardless of status)"
+    )

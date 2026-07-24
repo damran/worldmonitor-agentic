@@ -16,6 +16,7 @@ snapshot cannot drift (INV-5 parity).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from prometheus_client.core import GaugeMetricFamily
@@ -24,6 +25,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from worldmonitor.db.models import ConnectorInstance, TaskRun
 from worldmonitor.graph.neo4j_client import Neo4jClient
+from worldmonitor.observability.freshness import compute_instance_freshness
 from worldmonitor.runner.smoke_metrics import collect_snapshot
 
 if TYPE_CHECKING:
@@ -40,6 +42,13 @@ _TASK_STATUSES = ("ok", "error", "running")
 # cardinality, defense-in-depth even though the only writer today is our own ResolveStats.
 _RESOLVE_STOPPED_REASONS = ("exhausted", "timeout")
 _UNKNOWN_REASON = "unknown"
+
+# Gate F-1 slice 1 (ADR 0123 D4) — the SAME defaults as ``Settings.freshness_stale_after_seconds``
+# / ``freshness_very_stale_after_seconds``, so a caller (e.g. the pre-existing unit tests) that
+# constructs the collector without the new keywords keeps working unmodified. The live driver
+# never relies on these — it always passes the settings values explicitly (``driver.py``).
+_DEFAULT_STALE_AFTER_SECONDS = 14400
+_DEFAULT_VERY_STALE_AFTER_SECONDS = 86400
 
 
 def _gauge(name: str, documentation: str, value: float) -> GaugeMetricFamily:
@@ -59,6 +68,8 @@ class DriverMetricsCollector:
         gc_stats: Callable[[], GcStats | None] | None = None,
         projection_divergence: Callable[[], ProjectionDivergence | None] | None = None,
         projection_diff_refusals: Callable[[], int] | None = None,
+        stale_after_seconds: int = _DEFAULT_STALE_AFTER_SECONDS,
+        very_stale_after_seconds: int = _DEFAULT_VERY_STALE_AFTER_SECONDS,
     ) -> None:
         self._session_factory = session_factory
         self._neo4j = neo4j
@@ -77,6 +88,9 @@ class DriverMetricsCollector:
         # refusal counter (Gate 3b LOW-2, ADR 0114 D-7) — same pattern as ``skip_counter``.
         # ``None`` (the existing construction shape) reports 0.
         self._projection_diff_refusals = projection_diff_refusals
+        # Gate F-1 slice 1 (ADR 0123 D4) — the derived freshness gauge's budgets.
+        self._stale_after_seconds = stale_after_seconds
+        self._very_stale_after_seconds = very_stale_after_seconds
 
     def collect(self) -> Iterator[GaugeMetricFamily]:
         """Yield every ``worldmonitor_`` gauge family, computed fresh from the stores."""
@@ -103,6 +117,15 @@ class DriverMetricsCollector:
                 )
                 .group_by(ConnectorInstance.id, ConnectorInstance.connector_id)
             ).all()
+            # Gate F-1 slice 1 (ADR 0123): the ONE shared derivation both this gauge and
+            # ``GET /sources/freshness`` consume (AC-2) — computed inside the same session/scrape
+            # so it reflects the exact same instant as every other gauge in this collect().
+            freshness_rows = compute_instance_freshness(
+                session,
+                now=datetime.now(UTC),
+                stale_after_seconds=self._stale_after_seconds,
+                very_stale_after_seconds=self._very_stale_after_seconds,
+            )
         # Read the live in-memory driver counter via the injected accessor (no driver mutation).
         skips = self._skip_counter()
 
@@ -180,6 +203,22 @@ class DriverMetricsCollector:
                 finished_at.timestamp() if finished_at is not None else 0,
             )
         yield last_success
+
+        # The derived 6-state freshness gauge (Gate F-1 slice 1, ADR 0123 D3): ONE active series
+        # per instance, value 1, ``state`` drawn from the CLOSED FRESHNESS_STATES alphabet (the
+        # totality of ``freshness_status`` guarantees this — mirrors the
+        # ``worldmonitor_resolve_last_stopped_reason`` single-active-series idiom). Emitted
+        # ALONGSIDE ``worldmonitor_connector_last_success_timestamp`` above — not a replacement.
+        freshness = GaugeMetricFamily(
+            "worldmonitor_connector_freshness",
+            "Derived source-freshness state per connector instance (ADR 0123): one active "
+            "series per instance, value 1, state in {fresh,stale,very_stale,no_data,error,"
+            "disabled}.",
+            labels=["connector_id", "instance", "state"],
+        )
+        for row in freshness_rows:
+            freshness.add_metric([row.connector_id, row.instance_id, row.freshness_status], 1)
+        yield freshness
 
         last_reason = GaugeMetricFamily(
             "worldmonitor_resolve_last_stopped_reason",
