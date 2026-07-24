@@ -143,4 +143,5 @@
 | [0124](0124-summary-context-budget-flag.md) | `summary` context-budget flag on `get_neighbors` / `find_paths` (REST + MCP) | ACCEPTED | 2026-07-24 | false | false |
 | [0125](0125-mcp-prompts.md) | MCP prompts as analyst playbooks (`entity-workup`, `freshness-audit`) | ACCEPTED | 2026-07-24 | false | false |
 | [0126](0126-mcp-live-smoke.md) | MCP live-smoke in CI (stdio `tools/list` + `prompts/list` set-pin on compose-boot) | ACCEPTED | 2026-07-24 | false | false |
+| [0127](0127-wm-cli-thin-rest-client.md) | Thin read-only `wm` CLI over our REST (slice 1: `health` / `ready` / `entity`) | PROPOSED | 2026-07-24 | false | false |
 <!-- END GENERATED ADR INDEX -->
