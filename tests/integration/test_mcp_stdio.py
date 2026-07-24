@@ -656,3 +656,83 @@ def test_stdio_get_neighbors_and_paths_summary(
         assert isinstance(element, dict) and "nodes" in element, (
             f"a path summary sample element must carry 'nodes': {element!r}"
         )
+
+
+# ========================================================================================
+# Gate F-4 (MCP prompts as analyst playbooks, ADR 0125) — prompts/list + prompts/get over
+# the spawned stdio server, and proof that registering prompts does not disturb tools/list.
+# RED today: no prompt is registered anywhere in mcp/server.py, so `prompts/list` returns an
+# empty list and `prompts/get` for either name surfaces as a JSON-RPC error frame
+# ("Unknown prompt: ...") instead of a rendered playbook.
+# ========================================================================================
+_ENTITY_WORKUP_TOOLS_IN_ORDER = (
+    "get_entity",
+    "get_provenance",
+    "get_neighbors",
+    "find_paths",
+    "get_entity_dossier",
+)
+
+
+def test_stdio_prompts_list_and_get_entity_workup_tools_untouched(
+    clean_graph: Neo4jClient, neo4j_conn: tuple[str, str, str]
+) -> None:
+    """prompts/list shows both analyst-playbook prompts; prompts/get renders entity-workup
+    over the wire; tools/list on the SAME server still shows exactly the five tool names
+    (prompt registration must not disturb the tool surface); a hostile prompt arg surfaces
+    as a clean JSON-RPC error frame (never a stdout traceback), diagnostics on stderr.
+    """
+    frames, out, err = _stdio_session(
+        neo4j_conn,
+        [
+            ("prompts/list", {}),  # id 2
+            ("tools/list", {}),  # id 3 -- must be untouched by prompt registration
+            (
+                "prompts/get",
+                {"name": "entity-workup", "arguments": {"entity_id": "p1"}},
+            ),  # id 4
+            (
+                "prompts/get",
+                {"name": "entity-workup", "arguments": {"entity_id": _INJECTION_ID}},
+            ),  # id 5 -- hostile arg
+        ],
+    )
+    assert frames, f"server produced no JSON-RPC frames on stdout; stderr:\n{err}"
+    assert "Traceback" not in out, "a Python traceback leaked onto stdout"
+    by_id = _by_id(frames)
+
+    prompts_list = by_id[2]
+    assert "error" not in prompts_list, f"prompts/list must not error: {prompts_list}"
+    prompt_entries = {p["name"]: p for p in prompts_list["result"]["prompts"]}
+    assert set(prompt_entries.keys()) == {"entity-workup", "freshness-audit"}, prompt_entries.keys()
+    entity_workup_args = {
+        a["name"]: a.get("required") for a in prompt_entries["entity-workup"].get("arguments", [])
+    }
+    assert entity_workup_args == {"entity_id": True}, entity_workup_args
+
+    tools_list = by_id[3]
+    tool_names = {t["name"] for t in tools_list["result"]["tools"]}
+    assert tool_names == {
+        "get_entity",
+        "get_neighbors",
+        "get_provenance",
+        "find_paths",
+        "get_entity_dossier",
+    }, f"prompt registration must not disturb the tool surface: {tool_names}"
+
+    workup = by_id[4]
+    assert not _is_error_outcome(workup), f"present entity-workup prompt must not error: {workup}"
+    messages = workup["result"]["messages"]
+    assert len(messages) == 1, "a str-returning prompt fn must render exactly one message"
+    message = messages[0]
+    assert message["role"] == "user"
+    text = message["content"]["text"]
+    assert "p1" in text, "the requested entity_id must appear verbatim in the rendered text"
+    for tool_name in _ENTITY_WORKUP_TOOLS_IN_ORDER:
+        assert tool_name in text, f"{tool_name} missing from the wire-rendered entity-workup text"
+
+    hostile = by_id[5]
+    assert _is_error_outcome(hostile), (
+        f"hostile entity_id must surface as an error frame: {hostile}"
+    )
+    assert err.strip() != "", "the server must emit its rejection diagnostic on stderr"

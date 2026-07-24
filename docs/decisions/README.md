@@ -141,4 +141,5 @@
 | [0122](0122-entity-dossier-deterministic.md) | `get_entity_dossier` (slice 1): deterministic aggregation over the existing read helpers | ACCEPTED | 2026-07-23 | false | false |
 | [0123](0123-freshness-surface.md) | Source-freshness surface (F-1 slice 1): a derived 6-state machine over connector run-metadata | ACCEPTED | 2026-07-24 | false | false |
 | [0124](0124-summary-context-budget-flag.md) | `summary` context-budget flag on `get_neighbors` / `find_paths` (REST + MCP) | ACCEPTED | 2026-07-24 | false | false |
+| [0125](0125-mcp-prompts.md) | MCP prompts as analyst playbooks (`entity-workup`, `freshness-audit`) | ACCEPTED | 2026-07-24 | false | false |
 <!-- END GENERATED ADR INDEX -->

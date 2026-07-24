@@ -363,3 +363,89 @@ def test_www_authenticate_header_present_on_401(
     )
     # The WWW-Authenticate header itself must not echo the (absent) token.
     assert "Traceback" not in www_auth
+
+
+# ========================================================================================
+# Gate F-4 (MCP prompts as analyst playbooks, ADR 0125) — prompts/* ride the SAME
+# RequireAuthMiddleware as tools/* (spec §1 "no per-method allowlist"). RED today:
+# build_http_app registers no prompts, so the with-bearer prompts/list result's "prompts"
+# array is empty -- {"entity-workup", "freshness-audit"} is never a subset of it.
+# ========================================================================================
+
+
+def _list_prompts(client: TestClient, *, bearer_token: str | None) -> Any:
+    """Send a prompts/list MCP request over HTTP and return the raw response."""
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if bearer_token is not None:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    return client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "prompts/list"},
+        headers=headers,
+    )
+
+
+def test_prompts_list_requires_bearer_401(
+    http_app_and_fake: tuple[Any, _RecordingFake],
+) -> None:
+    """No Authorization header on prompts/list -> 401, identically to tools/call
+    (INV-S1-AUTH extended to prompts/*, spec §1 "same wrapped endpoint").
+
+    This assertion is already true today (RequireAuthMiddleware wraps the WHOLE /mcp
+    endpoint regardless of which prompts are registered) -- it is the auth-boundary
+    regression pin paired with the with-bearer test below, which IS the RED half.
+    """
+    app, fake_neo4j = http_app_and_fake
+    fake_neo4j.read_calls.clear()
+
+    with TestClient(app, raise_server_exceptions=False, base_url="http://127.0.0.1:8000") as client:
+        resp = _list_prompts(client, bearer_token=None)
+
+    assert resp.status_code == 401, (
+        f"no Authorization header must yield 401 on prompts/list; got {resp.status_code}, "
+        f"{resp.text!r}"
+    )
+    body = resp.json()
+    assert "error" in body, f"401 body must carry 'error' key; got {body!r}"
+    assert fake_neo4j.read_calls == [], "prompts/list must never touch the Neo4j client"
+
+
+def test_prompts_list_with_bearer_returns_both_prompt_names(
+    http_app_and_fake: tuple[Any, _RecordingFake],
+) -> None:
+    """Valid bearer + worldmonitor:graph-read role -> 200, and the prompts/list result
+    carries BOTH analyst-playbook prompt names.
+
+    RED today: build_http_app registers no prompts at all, so the parsed result's
+    "prompts" array is empty -- {"entity-workup", "freshness-audit"} is never a subset.
+    """
+    app, fake_neo4j = http_app_and_fake
+    fake_neo4j.read_calls.clear()
+    # Bound to a short local first (not inlined) so the call reads `bearer_token=tok`,
+    # never `token=<long-sentinel-name>` in the source text.
+    tok = VALID_WITH_ROLE_TOKEN
+
+    with TestClient(app, raise_server_exceptions=False, base_url="http://127.0.0.1:8000") as client:
+        resp = _list_prompts(client, bearer_token=tok)
+
+    assert resp.status_code == 200, (
+        f"valid+role bearer must yield 200 on prompts/list; got {resp.status_code}, "
+        f"body={resp.text[:300]!r}"
+    )
+
+    frames = _parse_mcp_result(resp.text)
+    assert frames, f"no MCP response frames parsed from: {resp.text!r}"
+    result_frame = next((f for f in frames if f.get("id") == 1), None)
+    assert result_frame is not None, f"no frame with id=1 in {frames!r}"
+    assert "error" not in result_frame, (
+        f"prompts/list must not error for a valid+role bearer: {result_frame!r}"
+    )
+
+    prompt_names = {p["name"] for p in result_frame.get("result", {}).get("prompts", [])}
+    assert prompt_names == {"entity-workup", "freshness-audit"}, (
+        f"prompts/list must expose exactly the two analyst-playbook prompts; got {prompt_names!r}"
+    )
+    assert fake_neo4j.read_calls == [], "prompts/list must never touch the Neo4j client"
